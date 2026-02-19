@@ -2,7 +2,11 @@
 
 ## Overview
 
-https://github.com/user-attachments/assets/eeeed47b-8386-44d0-b9ae-f9b2f7ad47d1
+
+
+https://github.com/user-attachments/assets/b02f665f-1ea2-4682-ab97-67c237b3ac01
+
+
 
 CraftNexus is a global digital marketplace that enables artisans to sell **handcrafted products** and **educational courses** directly to buyers worldwide. The platform leverages **Stellar’s low-cost payment infrastructure** to provide instant, borderless, and fair payments without unnecessary complexity.
 
