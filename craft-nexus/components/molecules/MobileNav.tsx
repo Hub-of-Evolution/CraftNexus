@@ -2,15 +2,23 @@
 import { FaBars, FaTimes, FaSearch } from "react-icons/fa";
 import Image from "next/image";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { ConnectWalletModal } from "./ConnectWalletModal";
 export const MobileNav = () => {
   const [isWalletModalOpen, setIsWalletModalOpen] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
+  const pathname = usePathname();
 
   const toggleMenu = () => {
     setIsOpen(!isOpen);
   };
+
+  const closeMenu = () => {
+    setIsOpen(false);
+  };
+
+  const isActive = (path: string) => pathname === path;
 
   return (
     <div className="md:hidden flex flex-col w-full  shadow-sm">
@@ -19,7 +27,7 @@ export const MobileNav = () => {
         handleClose={() => setIsWalletModalOpen(false)}
       />
       <div className="flex justify-between items-center  p-4 px-4">
-        <Link href="">
+        <Link href="/">
           <Image src="/logo.svg" alt="CraftNexus" width={80} height={80} />
         </Link>
         <button onClick={toggleMenu} className="text-2xl">
@@ -40,13 +48,31 @@ export const MobileNav = () => {
               className="border-0 outline-0 w-full"
             />
           </div>
-          <Link href="/market" className="text-black font-inter text-sm">
+          <Link
+            href="/market"
+            className={`text-black font-inter text-sm ${
+              isActive("/market") ? "font-bold" : ""
+            }`}
+            onClick={closeMenu}
+          >
             Market
           </Link>
-          <Link href="/workshop" className="text-black font-inter text-sm">
+          <Link
+            href="/workshop"
+            className={`text-black font-inter text-sm ${
+              isActive("/workshop") ? "font-bold" : ""
+            }`}
+            onClick={closeMenu}
+          >
             Workshop
           </Link>
-          <Link href="/contact" className="text-black font-inter text-sm">
+          <Link
+            href="/contact"
+            className={`text-black font-inter text-sm ${
+              isActive("/contact") ? "font-bold" : ""
+            }`}
+            onClick={closeMenu}
+          >
             Contact
           </Link>
           <button
