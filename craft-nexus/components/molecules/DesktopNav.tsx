@@ -2,11 +2,15 @@
 import { FaSearch } from "react-icons/fa";
 import Image from "next/image";
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { ConnectWalletModal } from "./ConnectWalletModal";
 
 export const DesktopNav = () => {
   const [isWalletModalOpen, setIsWalletModalOpen] = useState(false);
+  const pathname = usePathname();
+
+  const isActive = (path: string) => pathname === path;
 
   return (
     <div className="hidden md:flex flex-row justify-between items-center w-[90vw] mx-auto py-4">
@@ -15,7 +19,7 @@ export const DesktopNav = () => {
         handleClose={() => setIsWalletModalOpen(false)}
       />
       <div className="flex flex-row items-center">
-        <Link href="">
+        <Link href="/">
           <Image src="/logo.svg" alt="CraftNexus" width={100} height={100} />
         </Link>
       </div>
@@ -28,9 +32,24 @@ export const DesktopNav = () => {
         />
       </div>
       <div className="flex flex-row items-center text-black gap-4 lg:gap-8 font-inter text-sm lg:text-base">
-        <Link href="/market">Market</Link>
-        <Link href="/workshop">Workshop</Link>
-        <Link href="/contact">Contact</Link>
+        <Link
+          href="/market"
+          className={`${isActive("/market") ? "font-bold" : ""}`}
+        >
+          Market
+        </Link>
+        <Link
+          href="/workshop"
+          className={`${isActive("/workshop") ? "font-bold" : ""}`}
+        >
+          Workshop
+        </Link>
+        <Link
+          href="/contact"
+          className={`${isActive("/contact") ? "font-bold" : ""}`}
+        >
+          Contact
+        </Link>
         <button
           onClick={() => setIsWalletModalOpen(true)}
           className="border-1 py-2 px-2  lg:px-4 rounded-lg shadow-sm cursor-pointer hover:translate-y-[-3px] focus:translate-y-[-3px] transition-all"
