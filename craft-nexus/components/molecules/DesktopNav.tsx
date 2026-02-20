@@ -34,19 +34,19 @@ export const DesktopNav = () => {
       <div className="flex flex-row items-center text-black gap-4 lg:gap-8 font-inter text-sm lg:text-base">
         <Link
           href="/market"
-          className={`${isActive("/market") ? "font-bold" : ""}`}
+          className={`${isActive("/market") ? "font-bold text-primary" : ""}`}
         >
           Market
         </Link>
         <Link
           href="/workshop"
-          className={`${isActive("/workshop") ? "font-bold" : ""}`}
+          className={`${isActive("/workshop") ? "font-bold text-primary" : ""}`}
         >
           Workshop
         </Link>
         <Link
           href="/contact"
-          className={`${isActive("/contact") ? "font-bold" : ""}`}
+          className={`${isActive("/contact") ? "font-bold text-primary" : ""}`}
         >
           Contact
         </Link>
