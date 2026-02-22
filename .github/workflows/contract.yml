@@ -1,0 +1,49 @@
+name: CI Build & Lint for Contract
+
+on:
+  push:
+    paths:
+      - 'craft-nexus-contract/**'
+      - '.github/workflows/contract.yml'
+  pull_request:
+    paths:
+      - 'craft-nexus-contract/**'
+      - '.github/workflows/contract.yml'
+
+jobs:
+  build-and-test:
+    name: Build and Test Contract
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        working-directory: craft-nexus-contract
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Rust Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: craft-nexus-contract
+
+      - name: Cache Soroban CLI Binary
+        id: cache-soroban
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/soroban
+          key: ${{ runner.os }}-soroban-cli-v1
+          
+      - name: Install soroban-cli
+        if: steps.cache-soroban.outputs.cache-hit != 'true'
+        run: cargo install soroban-cli
+
+      - name: Build Contract
+        run: soroban contract build
+
+      - name: Test Contract
+        run: soroban contract test
