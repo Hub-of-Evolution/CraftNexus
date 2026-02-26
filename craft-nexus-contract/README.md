@@ -13,31 +13,53 @@ This contract handles escrow functionality for marketplace transactions:
 ## Prerequisites
 
 - Rust 1.70.0 or later
-- Stellar Soroban CLI
+- Stellar CLI (installation instructions below)
 - Stellar account with testnet XLM (for deployment)
 
-## Installation
+## Quick Start
 
-### Install Stellar CLI
+### 1. Install Stellar CLI
+
+Run the automated installation script:
 
 ```bash
-cargo install --locked stellar-cli
+./scripts/install-stellar-cli.sh
 ```
 
-### Install Rust Target
+This will:
+- Install Stellar CLI with optimizations
+- Verify the installation
+- Ensure WASM target is configured
 
+**Manual Installation (Alternative):**
 ```bash
+cargo install --locked stellar-cli
 rustup target add wasm32-unknown-unknown
 ```
 
-## Building the Contract
+### 2. Build the Contract
 
 ```bash
-cd craft-nexus-contract
+./scripts/build.sh
+```
+
+Or manually:
+```bash
 stellar contract build
 ```
 
-This will create a WASM file in `target/wasm32-unknown-unknown/release/craft_nexus_contract.wasm`
+This creates: `target/wasm32-unknown-unknown/release/craft_nexus_contract.wasm`
+
+### 3. Run Tests
+
+```bash
+./scripts/test.sh
+```
+
+Or manually:
+```bash
+cargo test --release
+```
 
 ## Deployment
 
@@ -53,11 +75,19 @@ To deploy the contract, you will need:
 
 ### Automated Deployment (Recommended)
 
-A deployment script is provided in the frontend repository to simplify the process.
+Use the provided deployment script:
 
 ```bash
-# From the craft-nexus (frontend) directory
-./scripts/deploy-contract.sh [testnet|mainnet] <YOUR_SECRET_KEY>
+./scripts/deploy.sh [testnet|mainnet] <YOUR_IDENTITY_NAME>
+```
+
+Example:
+```bash
+# Deploy to testnet using identity 'alice'
+./scripts/deploy.sh testnet alice
+
+# Deploy to mainnet using identity 'mainnet-deployer'
+./scripts/deploy.sh mainnet mainnet-deployer
 ```
 
 The script will:
@@ -80,7 +110,19 @@ stellar network add --rpc-url https://soroban-testnet.stellar.org:443 --network-
 stellar network add --rpc-url https://soroban-rpc.mainnet.stellar.org:443 --network-passphrase "Public Global Stellar Network ; September 2015" mainnet
 ```
 
-#### 2. Build and Deploy
+#### 2. Create Identity (if needed)
+
+```bash
+stellar keys generate --network testnet alice
+```
+
+#### 3. Fund Account (Testnet only)
+
+```bash
+stellar keys fund alice --network testnet
+```
+
+#### 4. Build and Deploy
 
 ```bash
 # Build
@@ -89,11 +131,11 @@ stellar contract build
 # Deploy
 stellar contract deploy \
   --wasm target/wasm32-unknown-unknown/release/craft_nexus_contract.wasm \
-  --source <YOUR_IDENTITY_NAME_OR_SECRET_KEY> \
+  --source alice \
   --network testnet
 ```
 
-#### 3. Update Environment Variables
+#### 5. Update Environment Variables
 
 After deployment, copy the returned Contract ID and add it to your frontend `.env.local`:
 
