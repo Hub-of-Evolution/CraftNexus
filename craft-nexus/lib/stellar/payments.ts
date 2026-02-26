@@ -64,12 +64,11 @@ export class StellarPaymentService {
         networkPassphrase: this.network,
       });
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       transaction.addOperation(Operation.payment({
         destination: recipientPublicKey,
         asset: usdcAsset,
         amount: amount,
-      }) as any);
+      }));
 
       if (orderId) {
         transaction.addMemo(Memo.text(`ORDER:${orderId}`));
@@ -84,8 +83,7 @@ export class StellarPaymentService {
       builtTx.sign(senderKeypair);
 
       // Submit transaction
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = await this.server.submitTransaction(builtTx as any);
+      const result = await this.server.submitTransaction(builtTx);
       return result.hash;
     } catch (error) {
       console.error("Payment failed:", error);
@@ -121,21 +119,19 @@ export class StellarPaymentService {
       });
 
       // Add seller payment
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       transactionBuilder.addOperation(Operation.payment({
         destination: sellerPublicKey,
         asset: usdcAsset,
         amount: sellerAmount,
-      }) as any);
+      }));
 
       // Add commission payment if platform wallet is configured
       if (PLATFORM_COMMISSION_WALLET) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         transactionBuilder.addOperation(Operation.payment({
           destination: PLATFORM_COMMISSION_WALLET,
           asset: usdcAsset,
           amount: commissionAmount,
-        }) as any);
+        }));
       }
 
       const transaction = transactionBuilder
@@ -143,11 +139,9 @@ export class StellarPaymentService {
         .setTimeout(30)
         .build();
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      transaction.sign(buyerKeypair as any);
+      transaction.sign(buyerKeypair);
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = await this.server.submitTransaction(transaction as any);
+      const result = await this.server.submitTransaction(transaction);
       return {
         paymentHash: result.hash,
       };
@@ -165,7 +159,6 @@ export class StellarPaymentService {
   async getUSDCBalance(publicKey: string): Promise<string> {
     try {
       const account = await this.server.loadAccount(publicKey);
-      const usdcAsset = new Asset("USDC", USDC_ISSUER);
 
       const balance = account.balances.find(
         (b: { asset_code?: string; asset_issuer?: string; balance?: string }) =>
