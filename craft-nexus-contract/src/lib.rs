@@ -59,6 +59,7 @@ pub enum DataKey {
     Escrow(u32),
     BuyerEscrows(Address),
     SellerEscrows(Address),
+    MinEscrowAmount(Address),
 }
 
 #[contracttype]
@@ -185,6 +186,25 @@ impl EscrowContract {
         }
     }
 
+    fn get_admin(env: &Env) -> Result<Address, Error> {
+        env.storage()
+            .persistent()
+            .get(&ADMIN)
+            .ok_or(Error::PlatformNotInitialized)
+    }
+
+    pub fn check_min_amount(env: &Env, token: Address, amount: i128) -> Result<(), Error> {
+        let min_amount: i128 = env.storage().persistent()
+            .get(&DataKey::MinEscrowAmount(token))
+            .unwrap_or(100_00000); // Default 100 tokens (assuming 5 decimals or 1 token if 7)
+        
+        if amount < min_amount {
+            return Err(Error::AmountBelowMinimum);
+        }
+        
+        Ok(())
+    }
+
     /// Initialize the contract with platform configuration
     /// 
     /// # Arguments
@@ -258,8 +278,10 @@ impl EscrowContract {
     ) -> Escrow {
         buyer.require_auth();
         
-        // Validate amount is positive
-        if !(amount > 0) { env.panic_with_error(Error::AmountBelowMinimum); }
+        // Validate amount is positive and above minimum
+        if let Err(e) = Self::check_min_amount(&env, token.clone(), amount) {
+            env.panic_with_error(e);
+        }
         
         // Validate buyer and seller are different
         if !(buyer != seller) { env.panic_with_error(Error::SameBuyerSeller); }
@@ -658,6 +680,23 @@ impl EscrowContract {
         };
         
         env.storage().persistent().set(&PLATFORM_FEE, &new_config);
+    }
+
+    /// Set the minimum escrow amount for a specific token (admin only)
+    /// 
+    /// # Arguments
+    /// * `token` - Token address
+    /// * `min_amount` - Minimum amount in smallest unit
+    pub fn set_min_escrow_amount(
+        env: Env,
+        token: Address,
+        min_amount: i128,
+    ) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        
+        env.storage().persistent().set(&DataKey::MinEscrowAmount(token), &min_amount);
+        Ok(())
     }
 
     /// Get current platform fee percentage
