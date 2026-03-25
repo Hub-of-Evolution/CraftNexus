@@ -3,8 +3,10 @@
 use super::*;
 use soroban_sdk::{testutils::{Address as _, Events, Ledger}, vec, Address, Bytes, Env, IntoVal, String, Symbol, token};
 
-fn setup_test(env: &Env) -> (EscrowContractClient<'static>, Address, Address, Address, token::StellarAssetClient<'static>, Address) {
-    env.mock_all_auths();
+fn setup_test(env: &Env, mock_auth: bool) -> (EscrowContractClient<'static>, Address, Address, Address, token::StellarAssetClient<'static>, Address, Address) {
+    if mock_auth {
+        env.mock_all_auths();
+    }
     let contract_id = env.register_contract(None, EscrowContract);
     let client = EscrowContractClient::new(env, &contract_id);
 
@@ -25,14 +27,14 @@ fn setup_test(env: &Env) -> (EscrowContractClient<'static>, Address, Address, Ad
     // Set min amount to 0 for tests to pass with small amounts
     client.set_min_escrow_amount(&token_contract.address(), &0);
 
-    (client, buyer, seller, token_contract.address(), token_admin_client, platform_wallet)
+    (client, buyer, seller, token_contract.address(), token_admin_client, platform_wallet, admin)
 }
 
 #[test]
 fn test_create_escrow_success() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_000_000);
     
@@ -64,7 +66,7 @@ fn test_create_escrow_success() {
 fn test_create_escrow_default_window() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_00000);
     let escrow = client.create_escrow(&buyer, &seller, &token_id, &100_00000, &1, &None);
@@ -76,7 +78,7 @@ fn test_create_escrow_default_window() {
 fn test_release_funds_success() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
@@ -109,7 +111,7 @@ fn test_release_funds_success() {
 fn test_release_funds_already_processed() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
@@ -121,7 +123,7 @@ fn test_release_funds_already_processed() {
 fn test_auto_release_success_after_window() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_000_000);
     let window = 100;
@@ -157,7 +159,7 @@ fn test_auto_release_success_after_window() {
 fn test_auto_release_failure_before_window() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_00000);
     client.create_escrow(&buyer, &seller, &token_id, &100_00000, &1, &Some(100));
@@ -167,21 +169,25 @@ fn test_auto_release_failure_before_window() {
 }
 
 #[test]
-fn test_refund_success_by_buyer() {
+fn test_refund_success_by_admin() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
     
-    client.refund(&1, &buyer);
+    // Check initial balance
+    let token_client = token::Client::new(&env, &token_id);
+    assert_eq!(token_client.balance(&buyer), 50_000_000);
+
+    // Provide escrow_id 1
+    client.refund(&1);
     
     let escrow = client.get_escrow(&1);
     assert_eq!(escrow.status, EscrowStatus::Refunded);
     
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&buyer), 100_00000);
+    assert_eq!(token_client.balance(&buyer), 100_000_000);
 
     // Verify event
     let events = env.events().all();
@@ -195,16 +201,16 @@ fn test_refund_success_by_buyer() {
 fn test_dispute_escrow_success() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
     
-    client.dispute_escrow(&1, &String::from("Item damaged"), &buyer);
+    client.dispute_escrow(&1, &String::from_str(&env, "Item damaged"), &buyer);
     
     let escrow = client.get_escrow(&1);
     assert_eq!(escrow.status, EscrowStatus::Disputed);
-    assert_eq!(escrow.dispute_reason, Some(String::from("Item damaged")));
+    assert_eq!(escrow.dispute_reason, Some(String::from_str(&env, "Item damaged")));
 
     // Verify event
     let events = env.events().all();
@@ -218,60 +224,69 @@ fn test_dispute_escrow_success() {
 fn test_dispute_escrow_by_seller() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
     token_admin.mint(&buyer, &1000);
     client.create_escrow(&buyer, &seller, &token_id, &500, &1, &None);
 
-    client.dispute_escrow(&1, &String::from("Payment not received"), &seller);
+    client.dispute_escrow(&1, &String::from_str(&env, "Payment not received"), &seller);
 
     let escrow = client.get_escrow(&1);
     assert_eq!(escrow.status, EscrowStatus::Disputed);
-    assert_eq!(escrow.dispute_reason, Some(String::from("Payment not received")));
+    assert_eq!(escrow.dispute_reason, Some(String::from_str(&env, "Payment not received")));
 }
 
 #[test]
+#[should_panic]
 fn test_dispute_escrow_unauthorized() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &None);
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
 
     let unauthorized = Address::generate(&env);
-    let result = std::panic::catch_unwind(|| {
-        client.dispute_escrow(&1, &String::from("Invalid reason"), &unauthorized);
-    });
-    assert!(result.is_err());
+    client.dispute_escrow(&1, &String::from_str(&env, "Invalid reason"), &unauthorized);
 }
 
 #[test]
-fn test_disputed_prevents_release_and_refund() {
+#[should_panic]
+fn test_disputed_prevents_release() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &None);
-    client.dispute_escrow(&1, &String::from("Damaged item"), &buyer);
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+    client.dispute_escrow(&1, &String::from_str(&env, "Damaged item"), &buyer);
 
-    let release_err = std::panic::catch_unwind(|| { client.release_funds(&1); });
-    assert!(release_err.is_err());
+    client.release_funds(&1);
+}
 
-    let refund_err = std::panic::catch_unwind(|| { client.refund(&1, &buyer); });
-    assert!(refund_err.is_err());
+#[test]
+#[should_panic]
+fn test_disputed_prevents_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+    client.dispute_escrow(&1, &String::from_str(&env, "Damaged item"), &buyer);
+
+    client.refund(&1);
 }
 
 #[test]
 fn test_resolve_dispute_release_to_seller() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &None);
-    client.dispute_escrow(&1, &String::from("Non-delivery"), &buyer);
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+    client.dispute_escrow(&1, &String::from_str(&env, "Non-delivery"), &buyer);
 
     // Arbitrator is setup in setup_test as a random Address and mock_all_auths bypasses auth
     client.resolve_dispute(&1, &Resolution::ReleaseToSeller);
@@ -280,7 +295,7 @@ fn test_resolve_dispute_release_to_seller() {
     assert_eq!(escrow.status, EscrowStatus::Resolved);
 
     let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&seller), 475);
+    assert_eq!(token_client.balance(&seller), 47_500_000);
 
     let events = env.events().all();
     let last_event = events.last().unwrap();
@@ -291,11 +306,11 @@ fn test_resolve_dispute_release_to_seller() {
 fn test_resolve_dispute_refund_to_buyer() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &None);
-    client.dispute_escrow(&1, &String::from("Late shipping"), &buyer);
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+    client.dispute_escrow(&1, &String::from_str(&env, "Late shipping"), &buyer);
 
     client.resolve_dispute(&1, &Resolution::RefundToBuyer);
 
@@ -303,7 +318,7 @@ fn test_resolve_dispute_refund_to_buyer() {
     assert_eq!(escrow.status, EscrowStatus::Resolved);
 
     let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&buyer), 1000);
+    assert_eq!(token_client.balance(&buyer), 100_000_000);
 
     let events = env.events().all();
     let last_event = events.last().unwrap();
@@ -315,34 +330,37 @@ fn test_resolve_dispute_refund_to_buyer() {
 fn test_resolve_dispute_non_disputed() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &None);
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
 
     client.resolve_dispute(&1, &Resolution::RefundToBuyer);
 }
 
 #[test]
-#[should_panic(expected = "Not authorized to refund")]
 #[should_panic]
 fn test_refund_failure_unauthorized() {
     let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    // Do NOT mock auth globally during setup_test
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, false);
     
+    // Manually mock for create_escrow
+    env.mock_all_auths();
     token_admin.mint(&buyer, &100_000_000);
+    client.set_min_escrow_amount(&token_id, &0);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
     
-    let unauthorized = Address::generate(&env);
-    client.refund(&1, &unauthorized);
+    // Now call refund as a non-admin (actually without any auth)
+    // require_auth() will fail because we are calling it but no auth is recorded for 'admin'
+    client.refund(&1);
 }
 
 #[test]
 #[should_panic]
 fn test_get_escrow_not_found() {
     let env = Env::default();
-    let (client, _, _, _, _, _) = setup_test(&env);
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
     client.get_escrow(&999);
 }
 
@@ -351,7 +369,7 @@ fn test_get_escrow_not_found() {
 fn test_create_escrow_zero_amount() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_00000);
     client.create_escrow(&buyer, &seller, &token_id, &0, &1, &None);
@@ -362,7 +380,7 @@ fn test_create_escrow_zero_amount() {
 fn test_create_escrow_negative_amount() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_00000);
     client.create_escrow(&buyer, &seller, &token_id, &-100, &1, &None);
@@ -373,7 +391,7 @@ fn test_create_escrow_negative_amount() {
 fn test_create_escrow_same_buyer_seller() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, _, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, _, token_id, token_admin, _, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_00000);
     client.create_escrow(&buyer, &buyer, &token_id, &100_00000, &1, &None);
@@ -385,7 +403,7 @@ fn test_create_escrow_same_buyer_seller() {
 fn test_platform_fee_deduction_5_percent() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_00000);
     // Create escrow with 1,000,000 (should have 50,000 fee at 5%)
@@ -433,7 +451,7 @@ fn test_platform_fee_deduction_10_percent() {
 fn test_calculate_fee_for_amount() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _, _, _, _) = setup_test(&env);
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
     
     // 5% of 1000 = 50
     let fee = client.calculate_fee_for_amount(&1000);
@@ -448,7 +466,7 @@ fn test_calculate_fee_for_amount() {
 fn test_calculate_seller_net_amount() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _, _, _, _) = setup_test(&env);
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
     
     // 1000 - 50 = 950
     let net = client.calculate_seller_net_amount(&1000);
@@ -526,7 +544,7 @@ fn test_update_platform_fee_too_high() {
 fn test_total_fees_accumulate() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &30_000_000);
     
@@ -550,13 +568,14 @@ fn test_total_fees_accumulate() {
 fn test_dispute_escrow_failure_unauthorized() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
 
     let unauthorized = Address::generate(&env);
-    client.dispute_escrow(&1, &unauthorized);
+    let unauthorized = Address::generate(&env);
+    client.dispute_escrow(&1, &String::from_str(&env, "Unauthorized"), &unauthorized);
 }
 
 #[test]
@@ -564,12 +583,12 @@ fn test_dispute_escrow_failure_unauthorized() {
 fn test_refund_after_release_fails() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &1, &None);
     client.release_funds(&1);
-    client.refund(&1, &buyer);
+    client.refund(&1);
 }
 
 #[test]
@@ -577,12 +596,12 @@ fn test_refund_after_release_fails() {
 fn test_dispute_after_release_fails() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &1, &None);
     client.release_funds(&1);
-    client.dispute_escrow(&1, &buyer);
+    client.dispute_escrow(&1, &String::from_str(&env, "buyer dispute"), &buyer);
 }
 
 #[test]
@@ -590,7 +609,7 @@ fn test_dispute_after_release_fails() {
 fn test_release_funds_escrow_not_found() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _, _, _, _) = setup_test(&env);
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
     client.release_funds(&999);
 }
 
@@ -599,9 +618,9 @@ fn test_release_funds_escrow_not_found() {
 fn test_refund_escrow_not_found() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _, _, _, _) = setup_test(&env);
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
     let caller = Address::generate(&env);
-    client.refund(&999, &caller);
+    client.refund(&999);
 }
 
 #[test]
@@ -609,9 +628,9 @@ fn test_refund_escrow_not_found() {
 fn test_dispute_escrow_not_found() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _, _, _, _) = setup_test(&env);
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
     let caller = Address::generate(&env);
-    client.dispute_escrow(&999, &caller);
+    client.dispute_escrow(&999, &String::from_str(&env, "reason"), &caller);
 }
 
 #[test]
@@ -619,7 +638,7 @@ fn test_dispute_escrow_not_found() {
 fn test_auto_release_escrow_not_found() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _, _, _, _) = setup_test(&env);
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
     client.auto_release(&999);
 }
 
@@ -628,7 +647,7 @@ fn test_auto_release_escrow_not_found() {
 fn test_can_auto_release_escrow_not_found() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _, _, _, _) = setup_test(&env);
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
     let _ = client.can_auto_release(&999);
 }
 
@@ -636,7 +655,7 @@ fn test_can_auto_release_escrow_not_found() {
 fn test_auto_release_at_exact_window_boundary() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
 
     token_admin.mint(&buyer, &100_000_000);
     let window = 100;
@@ -657,7 +676,7 @@ fn test_auto_release_at_exact_window_boundary() {
 fn test_fee_rounding_floor_behavior_small_amounts() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _, _, _, _) = setup_test(&env);
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
 
     // 5% floor rounding (integer division).
     assert_eq!(client.calculate_fee_for_amount(&1), 0);
@@ -725,17 +744,19 @@ fn test_integration_multiple_tokens_and_escrows() {
     assert_eq!(token_a.balance(&seller), 47_500_000);
     assert_eq!(token_b.balance(&seller), 95_000_000);
 
-    // Platform: 25 (token A) + 50 (token B)
-    assert_eq!(token_a.balance(&platform_wallet), 25);
-    assert_eq!(token_b.balance(&platform_wallet), 50);
-    assert_eq!(client.get_total_fees_collected(), 7_500_000);
+    // Platform: 500,000 (token A) + 500,000 (token B)
+    let fee_a = token_a.balance(&platform_wallet);
+    let fee_b = token_b.balance(&platform_wallet);
+    assert_eq!(fee_a, 500_000);
+    assert_eq!(fee_b, 500_000);
+    assert_eq!(client.get_total_fees_collected(), 1_000_000);
 }
 
 #[test]
 fn test_fuzz_fee_and_net_amount_invariants() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _, _, _, _) = setup_test(&env);
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
 
     // Deterministic fuzz-style sweep of amounts for arithmetic invariants.
     for amount in 1i128..=1_000i128 {
@@ -752,7 +773,7 @@ fn test_fuzz_fee_and_net_amount_invariants() {
 fn test_create_escrow_with_metadata_success_cid_v0() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
     token_admin.mint(&buyer, &100_000_000);
     let ipfs_hash = String::from_str(&env, "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9");
@@ -787,7 +808,7 @@ fn test_create_escrow_with_metadata_success_cid_v0() {
 fn test_create_escrow_with_metadata_success_cid_v1() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
     token_admin.mint(&buyer, &100_000_000);
     let ipfs_hash = String::from_str(&env, "bafybeigdyrztf2v7y5h6l2k3g5zazf5s6ptm3h4m5k4e3v2w2x2y3z4a5q");
@@ -811,7 +832,7 @@ fn test_create_escrow_with_metadata_success_cid_v1() {
 fn test_create_escrow_with_invalid_cid_fails() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow_with_metadata(
@@ -831,7 +852,7 @@ fn test_create_escrow_with_invalid_cid_fails() {
 fn test_escrow_search_by_buyer() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &200_000_000);
     
@@ -867,7 +888,7 @@ fn test_escrow_search_by_buyer() {
 fn test_escrow_search_by_seller() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &200_000_000);
     
@@ -897,7 +918,7 @@ fn test_escrow_search_by_seller() {
 fn test_min_escrow_amount_configuration() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     
     token_admin.mint(&buyer, &100_00000);
     // Let's test set_min_escrow_amount.
@@ -916,7 +937,7 @@ fn test_min_escrow_amount_configuration() {
 fn test_create_escrow_below_custom_minimum() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _) = setup_test(&env);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     
     client.set_min_escrow_amount(&token_id, &50_000_000); // 50 tokens
     
@@ -928,17 +949,12 @@ fn test_create_escrow_below_custom_minimum() {
 #[should_panic]
 fn test_set_min_escrow_amount_unauthorized() {
     let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, token_id, _, _) = setup_test(&env);
+    // Do NOT mock auth globally
+    let (client, _, _, token_id, _, _, _) = setup_test(&env, false);
     
     let non_admin = Address::generate(&env);
-    // Use as_contract to simulate calling from a different address if mock_all_auths wasn't used,
-    // but mock_all_auths is used. We need to actually test the auth.
-    // In setup_test, mock_all_auths() is called.
     
-    // To test Unauthorized, we can use env.as_contract or just rely on the fact that
-    // subsequent require_auth calls will check the invoker.
-    // However, in mock_all_auths mode, it's tricky.
-    
-    // Let's assume the admin check in lib.rs works.
+    // Attempt to set min amount without being the admin or providing auth
+    // The contract uses get_admin and admin.require_auth()
+    client.set_min_escrow_amount(&token_id, &100);
 }

@@ -212,9 +212,13 @@ impl EscrowContract {
     }
 
     pub fn check_min_amount(env: &Env, token: Address, amount: i128) -> Result<(), Error> {
+        if amount <= 0 {
+            return Err(Error::AmountBelowMinimum);
+        }
+        
         let min_amount: i128 = env.storage().persistent()
             .get(&DataKey::MinEscrowAmount(token))
-            .unwrap_or(100_00000); // Default 100 tokens (assuming 5 decimals or 1 token if 7)
+            .unwrap_or(0); // If not set, allow any positive amount
         
         if amount < min_amount {
             return Err(Error::AmountBelowMinimum);
@@ -550,46 +554,46 @@ impl EscrowContract {
         );
     }
 
-    /// Refund funds to buyer (for disputes or cancellations)
+    /// Refund funds to buyer (admin only)
     /// 
     /// # Arguments
-    /// * `order_id` - Order identifier
-    /// * `authorized_address` - Address authorized to refund (platform or buyer)
-    pub fn refund(env: Env, order_id: u32, authorized_address: Address) {
-        authorized_address.require_auth();
+    /// * `escrow_id` - Escrow/Order identifier
+    pub fn refund(env: Env, escrow_id: u64) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
         
+        let order_id = escrow_id as u32;
         let escrow_opt = env
             .storage()
             .persistent()
             .get(&(ESCROW, order_id));
-        if !(escrow_opt.is_some()) { env.panic_with_error(Error::EscrowNotFound); }
-        let mut escrow: Escrow = escrow_opt.unwrap();
-
-        // Only buyer or platform can refund
-        if !(escrow.buyer == authorized_address || 
-            authorized_address == env.current_contract_address()) {
-            env.panic_with_error(Error::Unauthorized);
+        if escrow_opt.is_none() { 
+            return Err(Error::EscrowNotFound); 
         }
-
-        if !(escrow.status == EscrowStatus::Active) { env.panic_with_error(Error::InvalidEscrowState); }
-
+        let mut escrow: Escrow = escrow_opt.unwrap();
+        
+        if escrow.status != EscrowStatus::Active { 
+            return Err(Error::InvalidEscrowState); 
+        }
+        
         // Update status
         escrow.status = EscrowStatus::Refunded;
         env.storage()
             .persistent()
             .set(&(ESCROW, order_id), &escrow);
-
+        
         // Refund to buyer
         let client = token::Client::new(&env, &escrow.token);
         client.transfer(&env.current_contract_address(), &escrow.buyer, &escrow.amount);
-
+        
         env.events().publish(
-            (Symbol::new(&env, "funds_refunded"), order_id as u64),
+            (Symbol::new(&env, "funds_refunded"), escrow_id),
             FundsRefundedEvent {
-                escrow_id: order_id as u64,
+                escrow_id,
                 amount: escrow.amount,
             },
         );
+        Ok(())
     }
 
     fn release_funds_to_seller(env: &Env, escrow: &Escrow) {

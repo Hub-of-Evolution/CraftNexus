@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 7,
+    "address": 8,
     "nonce": 0
   },
   "auth": [
@@ -37,6 +37,9 @@
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
                 },
                 {
                   "u32": 500
@@ -300,6 +303,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "arbitrator"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "platform_fee_bps"
                       },
                       "val": {
@@ -500,6 +511,12 @@
                       "val": {
                         "u32": 0
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "dispute_reason"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -1256,6 +1273,9 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
+                },
+                {
                   "u32": 500
                 }
               ]
@@ -1710,6 +1730,12 @@
                   "val": {
                     "u32": 0
                   }
+                },
+                {
+                  "key": {
+                    "symbol": "dispute_reason"
+                  },
+                  "val": "void"
                 },
                 {
                   "key": {

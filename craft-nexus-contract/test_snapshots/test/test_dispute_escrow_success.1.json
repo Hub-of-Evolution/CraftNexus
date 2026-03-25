@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 7,
+    "address": 8,
     "nonce": 0
   },
   "auth": [
@@ -37,6 +37,9 @@
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
                 },
                 {
                   "u32": 500
@@ -168,6 +171,9 @@
               "args": [
                 {
                   "u32": 1
+                },
+                {
+                  "string": "Item damaged"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -312,6 +318,14 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "arbitrator"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
                       }
                     },
                     {
@@ -515,6 +529,14 @@
                       },
                       "val": {
                         "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "dispute_reason"
+                      },
+                      "val": {
+                        "string": "Item damaged"
                       }
                     },
                     {
@@ -1301,6 +1323,9 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
+                },
+                {
                   "u32": 500
                 }
               ]
@@ -1748,6 +1773,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "dispute_reason"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "id"
                   },
                   "val": {
@@ -1829,6 +1860,9 @@
                   "u32": 1
                 },
                 {
+                  "string": "Item damaged"
+                },
+                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 }
               ]
@@ -1855,6 +1889,14 @@
             ],
             "data": {
               "map": [
+                {
+                  "key": {
+                    "symbol": "dispute_reason"
+                  },
+                  "val": {
+                    "string": "Item damaged"
+                  }
+                },
                 {
                   "key": {
                     "symbol": "escrow_id"
@@ -1959,6 +2001,14 @@
                   },
                   "val": {
                     "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "dispute_reason"
+                  },
+                  "val": {
+                    "string": "Item damaged"
                   }
                 },
                 {
