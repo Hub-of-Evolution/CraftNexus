@@ -343,6 +343,14 @@
                       "val": {
                         "string": "admin"
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "version"
+                      },
+                      "val": {
+                        "u32": 2
+                      }
                     }
                   ]
                 }
@@ -444,6 +452,14 @@
                       },
                       "val": {
                         "string": "arty3"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "version"
+                      },
+                      "val": {
+                        "u32": 2
                       }
                     }
                   ]
@@ -1006,6 +1022,14 @@
                   },
                   "val": {
                     "string": "arty3"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "version"
+                  },
+                  "val": {
+                    "u32": 2
                   }
                 }
               ]

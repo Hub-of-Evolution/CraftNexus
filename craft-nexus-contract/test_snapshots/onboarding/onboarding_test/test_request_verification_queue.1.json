@@ -288,6 +288,14 @@
                       "val": {
                         "string": "admin"
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "version"
+                      },
+                      "val": {
+                        "u32": 2
+                      }
                     }
                   ]
                 }
@@ -389,6 +397,14 @@
                       },
                       "val": {
                         "string": "queued1"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "version"
+                      },
+                      "val": {
+                        "u32": 2
                       }
                     }
                   ]
@@ -1029,6 +1045,14 @@
                   },
                   "val": {
                     "string": "queued1"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "version"
+                  },
+                  "val": {
+                    "u32": 2
                   }
                 }
               ]

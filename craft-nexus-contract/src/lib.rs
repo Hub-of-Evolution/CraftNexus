@@ -1,7 +1,8 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
-    BytesN, Env, String, Symbol,
+    BytesN, Env, Map, String, Symbol, TryFromVal, Val,
 };
 
 mod test;
@@ -67,8 +68,6 @@ const PLATFORM_FEE: Symbol = symbol_short!("PLAT_FEE");
 const PLATFORM_WALLET: Symbol = symbol_short!("PLAT_WAL");
 const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
 const ADMIN: Symbol = symbol_short!("ADMIN");
-const PENDING_ADMIN: Symbol = symbol_short!("PEND_ADM");
-const WASM_UPGRADE_PROPOSAL: Symbol = symbol_short!("WASM_PROP");
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
@@ -81,12 +80,10 @@ const WASM_UPGRADE_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 const MAX_DISPUTE_DURATION: u64 = 30 * 24 * 60 * 60;
 /// Cooldown period after staking before tokens can be unstaked (7 days in seconds)
 const STAKE_COOLDOWN: u64 = 7 * 24 * 60 * 60;
-/// Default platform fee in basis points (500 = 5%)
-const DEFAULT_PLATFORM_FEE_BPS: u32 = 500;
 /// Maximum platform fee in basis points (10000 = 100%)
 const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
 const MAX_TOTAL_RELEASE_WINDOW: u32 = 2592000; // 30 days
-// const CURRENT_VERSION: u32 = 1;
+const CURRENT_ESCROW_VERSION: u32 = 2;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,6 +140,7 @@ pub enum Resolution {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Escrow {
+    pub version: u32,
     pub id: u64,
     pub buyer: Address,
     pub seller: Address,
@@ -150,6 +148,23 @@ pub struct Escrow {
     pub amount: i128,
     pub status: EscrowStatus,
     pub release_window: u32, // Time in seconds before auto-release
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<String>,
+    pub dispute_initiated_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyEscrow {
+    pub id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
     pub created_at: u32,
     pub ipfs_hash: Option<String>,
     pub metadata_hash: Option<Bytes>,
@@ -215,6 +230,14 @@ pub struct EscrowResolvedEvent {
     pub token: Address,
     pub resolution: Resolution,
     pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigUpdatedEvent {
+    pub field_name: String,
+    pub old_value: String,
+    pub new_value: String,
 }
 
 /// Event emitted for each successful escrow in a batch creation
@@ -291,9 +314,10 @@ pub struct PlatformConfig {
     /// Admin address for management.
     /// This address can be a regular account or a Multisig contract address
     /// to enhance security for sensitive operations like `propose_upgrade_wasm` (#95).
-    pub admin: Address,           
-    pub arbitrator: Address,      // Arbitrator for dispute resolution
-    pub is_paused: bool,          // Circuit breaker (#96)
+    pub admin: Address,
+    pub arbitrator: Address, // Arbitrator for dispute resolution
+    pub moderator: Option<Address>,
+    pub is_paused: bool,                // Circuit breaker (#96)
     pub min_stake_required: i128, // Minimum stake artisan must hold to create escrows (Issue #99)
     pub pending_admin: Option<Address>, // Pending admin for two-step transfer
 }
@@ -308,31 +332,61 @@ pub struct PartialRefundProposal {
     pub proposed_at: u64,
 }
 
-
 /// Minimal cross-contract interface for the OnboardingContract.
 /// Used by EscrowContract to update user reputation and activity metrics
 /// when escrow state changes (release, refund, resolve).
 #[soroban_sdk::contractclient(name = "OnboardingClient")]
 pub trait OnboardingInterface {
-    fn update_reputation(
-        env: Env,
-        address: Address,
-        successful_delta: u32,
-        disputed_delta: u32,
-    );
-    fn update_user_metrics(
-        env: Env,
-        address: Address,
-        escrow_count_delta: u32,
-        volume_delta: i128,
-    );
+    fn update_reputation(env: Env, address: Address, successful_delta: u32, disputed_delta: u32);
+    fn update_user_metrics(env: Env, address: Address, escrow_count_delta: u32, volume_delta: i128);
 }
-
 #[contract]
 pub struct EscrowContract;
 
 #[contractimpl]
 impl EscrowContract {
+    fn string_from_u32(env: &Env, value: u32) -> String {
+        let mut digits = [0u8; 10];
+        let mut value = value;
+        let mut index = digits.len();
+
+        if value == 0 {
+            return String::from_str(env, "0");
+        }
+
+        while value > 0 {
+            index -= 1;
+            digits[index] = b'0' + (value % 10) as u8;
+            value /= 10;
+        }
+
+        String::from_bytes(env, &digits[index..])
+    }
+
+    fn string_from_i128(env: &Env, value: i128) -> String {
+        let mut digits = [0u8; 40];
+        let negative = value < 0;
+        let mut value = if negative { -value } else { value } as u128;
+        let mut index = digits.len();
+
+        if value == 0 {
+            return String::from_str(env, "0");
+        }
+
+        while value > 0 {
+            index -= 1;
+            digits[index] = b'0' + (value % 10) as u8;
+            value /= 10;
+        }
+
+        if negative {
+            index -= 1;
+            digits[index] = b'-';
+        }
+
+        String::from_bytes(env, &digits[index..])
+    }
+
     /// Validate IPFS CID format (v0 and v1 with multibase prefixes).
     ///
     /// Supports:
@@ -470,6 +524,20 @@ impl EscrowContract {
         );
     }
 
+    fn emit_config_updated(env: &Env, field_name: &str, old_value: String, new_value: String) {
+        env.events().publish(
+            (
+                Symbol::new(env, "config_updated"),
+                Symbol::new(env, field_name),
+            ),
+            ConfigUpdatedEvent {
+                field_name: String::from_str(env, field_name),
+                old_value,
+                new_value,
+            },
+        );
+    }
+
     fn enter_reentry_guard(env: &Env) {
         if env.storage().temporary().has(&DataKey::ReentryGuard) {
             env.panic_with_error(Error::ReentryDetected);
@@ -517,7 +585,7 @@ impl EscrowContract {
 
     /// Returns an OnboardingClient pointed at the registered onboarding contract,
     /// or None if no address has been configured via set_onboarding_contract.
-    fn get_onboarding_client(env: &Env) -> Option<OnboardingClient> {
+    fn get_onboarding_client(env: &Env) -> Option<OnboardingClient<'_>> {
         env.storage()
             .persistent()
             .get::<DataKey, Address>(&DataKey::OnboardingContractAddress)
@@ -563,7 +631,7 @@ impl EscrowContract {
         // Validate fee is within bounds
         assert!(platform_fee_bps <= MAX_PLATFORM_FEE_BPS, "Fee too high");
 
-        if !(platform_fee_bps <= MAX_PLATFORM_FEE_BPS) {
+        if platform_fee_bps > MAX_PLATFORM_FEE_BPS {
             env.panic_with_error(Error::InvalidFee);
         }
 
@@ -572,6 +640,7 @@ impl EscrowContract {
             platform_wallet: platform_wallet.clone(),
             admin: admin.clone(),
             arbitrator: arbitrator.clone(),
+            moderator: None,
             is_paused: false,
             min_stake_required: 0,
             pending_admin: None,
@@ -579,12 +648,12 @@ impl EscrowContract {
 
         env.storage().persistent().set(&PLATFORM_FEE, &config);
         Self::extend_persistent(&env, &PLATFORM_FEE);
-        
+
         env.storage()
             .persistent()
             .set(&PLATFORM_WALLET, &platform_wallet);
         Self::extend_persistent(&env, &PLATFORM_WALLET);
-        
+
         env.storage().persistent().set(&ADMIN, &admin);
         Self::extend_persistent(&env, &ADMIN);
 
@@ -598,6 +667,19 @@ impl EscrowContract {
             .persistent()
             .set(&DataKey::ContractVersion, &1u32);
         Self::extend_persistent(&env, &DataKey::ContractVersion);
+
+        Self::emit_config_updated(
+            &env,
+            "platform_fee_bps",
+            String::from_str(&env, "unset"),
+            Self::string_from_u32(&env, platform_fee_bps),
+        );
+        Self::emit_config_updated(
+            &env,
+            "platform_wallet",
+            String::from_str(&env, "unset"),
+            platform_wallet.to_string(),
+        );
     }
 
     /// Propose a new administrator for the platform (admin only).
@@ -680,7 +762,7 @@ impl EscrowContract {
         }
 
         // Validate buyer and seller are different
-        if !(buyer != seller) {
+        if buyer == seller {
             env.panic_with_error(Error::SameBuyerSeller);
         }
 
@@ -719,6 +801,7 @@ impl EscrowContract {
         Self::validate_optional_metadata_hash(&metadata_hash);
 
         let escrow = Escrow {
+            version: CURRENT_ESCROW_VERSION,
             id: order_id as u64,
             buyer: buyer.clone(),
             seller: seller.clone(),
@@ -842,15 +925,59 @@ impl EscrowContract {
 
     fn get_platform_config_internal(env: &Env) -> PlatformConfig {
         let config = env.storage().persistent().get(&PLATFORM_FEE);
-        if !(config.is_some()) {
+        if config.is_none() {
             env.panic_with_error(Error::PlatformNotInitialized);
         }
-        Self::extend_persistent(&env, &PLATFORM_FEE);
+        Self::extend_persistent(env, &PLATFORM_FEE);
         config.unwrap()
     }
 
-    fn get_arbitrator(env: &Env) -> Address {
-        Self::get_platform_config_internal(env).arbitrator
+    fn get_stored_escrow(env: &Env, order_id: u32) -> Escrow {
+        let key = (ESCROW, order_id);
+        let stored: Val = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("Escrow not found");
+        let map = Map::<Symbol, Val>::try_from_val(env, &stored).expect("Escrow storage corrupted");
+        let version_key = Symbol::new(env, "version");
+
+        if map.contains_key(version_key) {
+            let escrow = Escrow::try_from_val(env, &stored).expect("Escrow storage corrupted");
+            if escrow.version < CURRENT_ESCROW_VERSION {
+                return Self::upgrade_escrow(env, order_id, escrow);
+            }
+            Self::extend_persistent(env, &key);
+            return escrow;
+        }
+
+        let legacy = LegacyEscrow::try_from_val(env, &stored).expect("Escrow storage corrupted");
+        let upgraded = Escrow {
+            version: CURRENT_ESCROW_VERSION,
+            id: legacy.id,
+            buyer: legacy.buyer,
+            seller: legacy.seller,
+            token: legacy.token,
+            amount: legacy.amount,
+            status: legacy.status,
+            release_window: legacy.release_window,
+            created_at: legacy.created_at,
+            ipfs_hash: legacy.ipfs_hash,
+            metadata_hash: legacy.metadata_hash,
+            dispute_reason: legacy.dispute_reason,
+            dispute_initiated_at: legacy.dispute_initiated_at,
+        };
+        env.storage().persistent().set(&key, &upgraded);
+        Self::extend_persistent(env, &key);
+        upgraded
+    }
+
+    fn upgrade_escrow(env: &Env, order_id: u32, mut escrow: Escrow) -> Escrow {
+        escrow.version = CURRENT_ESCROW_VERSION;
+        let key = (ESCROW, order_id);
+        env.storage().persistent().set(&key, &escrow);
+        Self::extend_persistent(env, &key);
+        escrow
     }
 
     /// Calculate platform fee for a given amount
@@ -865,7 +992,7 @@ impl EscrowContract {
     pub fn release_funds(env: Env, order_id: u32) {
         Self::enter_reentry_guard(&env);
         let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
-        if !(escrow_opt.is_some()) {
+        if escrow_opt.is_none() {
             env.panic_with_error(Error::EscrowNotFound);
         }
         Self::extend_persistent(&env, &(ESCROW, order_id));
@@ -940,7 +1067,7 @@ impl EscrowContract {
     pub fn auto_release(env: Env, order_id: u32) {
         Self::enter_reentry_guard(&env);
         let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
-        if !(escrow_opt.is_some()) {
+        if escrow_opt.is_none() {
             env.panic_with_error(Error::EscrowNotFound);
         }
         Self::extend_persistent(&env, &(ESCROW, order_id));
@@ -953,7 +1080,7 @@ impl EscrowContract {
         let current_time = env.ledger().timestamp();
         let elapsed = current_time - (escrow.created_at as u64);
 
-        if !(elapsed >= escrow.release_window as u64) {
+        if elapsed < escrow.release_window as u64 {
             env.panic_with_error(Error::ReleaseWindowNotElapsed);
         }
 
@@ -1022,7 +1149,7 @@ impl EscrowContract {
         let escrow_key = (ESCROW, order_id);
         let escrow_opt = env.storage().persistent().get(&escrow_key);
 
-        if !(escrow_opt.is_some()) {
+        if escrow_opt.is_none() {
             env.panic_with_error(Error::EscrowNotFound);
         }
 
@@ -1036,10 +1163,7 @@ impl EscrowContract {
             env.panic_with_error(Error::InvalidEscrowState);
         }
 
-        let new_window = escrow
-            .release_window
-            .checked_add(additional_seconds)
-            .unwrap_or(u32::MAX);
+        let new_window = escrow.release_window.saturating_add(additional_seconds);
 
         if new_window > MAX_TOTAL_RELEASE_WINDOW {
             env.panic_with_error(Error::ReleaseWindowTooLong);
@@ -1236,12 +1360,10 @@ impl EscrowContract {
     /// # Arguments
     /// * `order_id` - Order identifier
     pub fn get_escrow(env: Env, order_id: u32) -> Escrow {
-        let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
-        if !(escrow_opt.is_some()) {
+        if !env.storage().persistent().has(&(ESCROW, order_id)) {
             env.panic_with_error(Error::EscrowNotFound);
         }
-        Self::extend_persistent(&env, &(ESCROW, order_id));
-        escrow_opt.unwrap()
+        Self::get_stored_escrow(&env, order_id)
     }
 
     /// Get escrow metadata fields only.
@@ -1258,12 +1380,10 @@ impl EscrowContract {
     /// # Arguments
     /// * `order_id` - Order identifier
     pub fn can_auto_release(env: Env, order_id: u32) -> bool {
-        let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
-        if !(escrow_opt.is_some()) {
+        if !env.storage().persistent().has(&(ESCROW, order_id)) {
             env.panic_with_error(Error::EscrowNotFound);
         }
-        Self::extend_persistent(&env, &(ESCROW, order_id));
-        let escrow: Escrow = escrow_opt.unwrap();
+        let escrow = Self::get_stored_escrow(&env, order_id);
 
         if escrow.status != EscrowStatus::Active {
             return false;
@@ -1289,12 +1409,10 @@ impl EscrowContract {
     ) {
         authorized_address.require_auth();
 
-        let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
-        if !(escrow_opt.is_some()) {
+        if !env.storage().persistent().has(&(ESCROW, order_id)) {
             env.panic_with_error(Error::EscrowNotFound);
         }
-        Self::extend_persistent(&env, &(ESCROW, order_id));
-        let mut escrow: Escrow = escrow_opt.unwrap();
+        let mut escrow = Self::get_stored_escrow(&env, order_id);
 
         // Allow buyer or seller to dispute
         if !(escrow.buyer == authorized_address || escrow.seller == authorized_address) {
@@ -1332,22 +1450,27 @@ impl EscrowContract {
     /// - `RefundToBuyer`: Full original amount is returned to the buyer.
     ///
     /// # Edge Cases
-    /// - **Refund Failure**: If the transfer to the buyer fails (e.g. account revoked), 
-    ///   the entire transaction reverts due to Stellar's atomicity. 
+    /// - **Refund Failure**: If the transfer to the buyer fails (e.g. account revoked),
+    ///   the entire transaction reverts due to Stellar's atomicity.
     ///   The escrow remains in `Disputed` state for re-investigation.
     /// - **State Logic**: Can ONLY be called if `status` is currently `Disputed`.
-    pub fn resolve_dispute(env: Env, order_id: u32, resolution: Resolution) {
+    pub fn resolve_dispute(
+        env: Env,
+        order_id: u32,
+        resolution: Resolution,
+        authorized_address: Address,
+    ) {
         Self::enter_reentry_guard(&env);
-        let arbitrator = Self::get_arbitrator(&env);
-        arbitrator.require_auth();
+        let config = Self::get_platform_config_internal(&env);
+        authorized_address.require_auth();
+        let is_authorized = authorized_address == config.admin
+            || Some(authorized_address.clone()) == config.moderator
+            || authorized_address == config.arbitrator;
+        if !is_authorized {
+            env.panic_with_error(Error::Unauthorized);
+        }
 
-        let mut escrow: Escrow = env
-            .storage()
-            .persistent()
-            .get(&(ESCROW, order_id))
-            .expect("Escrow not found");
-        Self::extend_persistent(&env, &(ESCROW, order_id));
-        
+        let mut escrow = Self::get_stored_escrow(&env, order_id);
 
         assert!(
             escrow.status == EscrowStatus::Disputed,
@@ -1407,7 +1530,7 @@ impl EscrowContract {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
-        if !(new_fee_bps <= MAX_PLATFORM_FEE_BPS) {
+        if new_fee_bps > MAX_PLATFORM_FEE_BPS {
             env.panic_with_error(Error::InvalidFee);
         }
 
@@ -1416,6 +1539,7 @@ impl EscrowContract {
             platform_wallet: config.platform_wallet,
             admin: config.admin,
             arbitrator: config.arbitrator,
+            moderator: config.moderator,
             is_paused: config.is_paused,
             min_stake_required: config.min_stake_required,
             pending_admin: config.pending_admin,
@@ -1423,6 +1547,12 @@ impl EscrowContract {
 
         env.storage().persistent().set(&PLATFORM_FEE, &new_config);
         Self::extend_persistent(&env, &PLATFORM_FEE);
+        Self::emit_config_updated(
+            &env,
+            "platform_fee_bps",
+            Self::string_from_u32(&env, config.platform_fee_bps),
+            Self::string_from_u32(&env, new_fee_bps),
+        );
     }
 
     /// Update platform wallet address (admin only)
@@ -1438,6 +1568,7 @@ impl EscrowContract {
             platform_wallet: new_wallet,
             admin: config.admin,
             arbitrator: config.arbitrator,
+            moderator: config.moderator,
             is_paused: config.is_paused,
             min_stake_required: config.min_stake_required,
             pending_admin: config.pending_admin,
@@ -1445,8 +1576,27 @@ impl EscrowContract {
 
         env.storage().persistent().set(&PLATFORM_FEE, &new_config);
         Self::extend_persistent(&env, &PLATFORM_FEE);
+        Self::emit_config_updated(
+            &env,
+            "platform_wallet",
+            config.platform_wallet.to_string(),
+            new_config.platform_wallet.to_string(),
+        );
     }
 
+    pub fn set_moderator(env: Env, moderator: Address) {
+        let mut config = Self::get_platform_config(env.clone());
+        config.admin.require_auth();
+        let previous = config
+            .moderator
+            .clone()
+            .map(|address| address.to_string())
+            .unwrap_or_else(|| String::from_str(&env, "unset"));
+        config.moderator = Some(moderator.clone());
+        env.storage().persistent().set(&PLATFORM_FEE, &config);
+        Self::extend_persistent(&env, &PLATFORM_FEE);
+        Self::emit_config_updated(&env, "moderator", previous, moderator.to_string());
+    }
 
     /// Set the minimum escrow amount for a specific token (admin only)
     ///
@@ -1457,10 +1607,17 @@ impl EscrowContract {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::MinEscrowAmount(token.clone()), &min_amount);
-        Self::extend_persistent(&env, &DataKey::MinEscrowAmount(token));
+        let key = DataKey::MinEscrowAmount(token.clone());
+        let old_amount: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+
+        env.storage().persistent().set(&key, &min_amount);
+        Self::extend_persistent(&env, &key);
+        Self::emit_config_updated(
+            &env,
+            "min_escrow_amount",
+            Self::string_from_i128(&env, old_amount),
+            Self::string_from_i128(&env, min_amount),
+        );
         Ok(())
     }
 
@@ -1511,9 +1668,7 @@ impl EscrowContract {
         }
 
         // Check minimum amount
-        if let Err(e) = Self::check_min_amount(env, params.token.clone(), params.amount) {
-            return Err(e);
-        }
+        Self::check_min_amount(env, params.token.clone(), params.amount)?;
 
         // Validate buyer and seller are different
         if params.buyer == params.seller {
@@ -1561,6 +1716,7 @@ impl EscrowContract {
         Self::validate_optional_metadata_hash(&params.metadata_hash);
 
         let escrow = Escrow {
+            version: CURRENT_ESCROW_VERSION,
             id: params.order_id as u64,
             buyer: params.buyer.clone(),
             seller: params.seller.clone(),
@@ -1578,7 +1734,7 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&(ESCROW, params.order_id), &escrow);
-        Self::extend_persistent(&env, &(ESCROW, params.order_id));
+        Self::extend_persistent(env, &(ESCROW, params.order_id));
 
         // Update buyer's escrow list for indexing
         let buyer_key = DataKey::BuyerEscrows(params.buyer.clone());
@@ -1597,13 +1753,13 @@ impl EscrowContract {
             .storage()
             .persistent()
             .get(&seller_key)
-            .unwrap_or(soroban_sdk::Vec::new(&env));
+            .unwrap_or(soroban_sdk::Vec::new(env));
         seller_escrows.push_back(params.order_id as u64);
         env.storage().persistent().set(&seller_key, &seller_escrows);
-        Self::extend_persistent(&env, &seller_key);
+        Self::extend_persistent(env, &seller_key);
 
         // Transfer funds from buyer to contract
-        let client = token::Client::new(&env, &params.token);
+        let client = token::Client::new(env, &params.token);
         client.transfer(
             &params.buyer,
             &env.current_contract_address(),
@@ -1622,7 +1778,7 @@ impl EscrowContract {
             ipfs_hash: params.ipfs_hash,
             metadata_hash: params.metadata_hash,
         };
-        Self::emit_escrow_created(&env, event);
+        Self::emit_escrow_created(env, event);
 
         Ok(params.order_id as u64)
     }
@@ -1900,7 +2056,11 @@ impl EscrowContract {
     /// Get the referral reward basis points.
     pub fn get_referral_reward_bps(env: Env) -> u32 {
         let key = DataKey::ReferralRewardBps;
-        let bps = env.storage().persistent().get::<DataKey, u32>(&key).unwrap_or(0);
+        let bps = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u32>(&key)
+            .unwrap_or(0);
         if env.storage().persistent().has(&key) {
             Self::extend_persistent(&env, &key);
         }
@@ -1981,11 +2141,7 @@ impl EscrowContract {
 
         // Accumulate stake
         let stake_key = DataKey::ArtisanStake(artisan.clone());
-        let current_stake: i128 = env
-            .storage()
-            .persistent()
-            .get(&stake_key)
-            .unwrap_or(0);
+        let current_stake: i128 = env.storage().persistent().get(&stake_key).unwrap_or(0);
         env.storage()
             .persistent()
             .set(&stake_key, &(current_stake + amount));
@@ -2003,22 +2159,14 @@ impl EscrowContract {
         artisan.require_auth();
 
         let cooldown_key = DataKey::StakeCooldownEnd(artisan.clone());
-        let cooldown_end: u64 = env
-            .storage()
-            .persistent()
-            .get(&cooldown_key)
-            .unwrap_or(0);
+        let cooldown_end: u64 = env.storage().persistent().get(&cooldown_key).unwrap_or(0);
 
         if env.ledger().timestamp() < cooldown_end {
             env.panic_with_error(Error::StakeCooldownActive);
         }
 
         let stake_key = DataKey::ArtisanStake(artisan.clone());
-        let stake: i128 = env
-            .storage()
-            .persistent()
-            .get(&stake_key)
-            .unwrap_or(0);
+        let stake: i128 = env.storage().persistent().get(&stake_key).unwrap_or(0);
 
         if stake <= 0 {
             env.panic_with_error(Error::AmountBelowMinimum);
@@ -2206,11 +2354,7 @@ impl EscrowContract {
 
         // Pay seller
         if seller_net > 0 {
-            token_client.transfer(
-                &env.current_contract_address(),
-                &escrow.seller,
-                &seller_net,
-            );
+            token_client.transfer(&env.current_contract_address(), &escrow.seller, &seller_net);
         }
 
         // Clean up proposal

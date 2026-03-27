@@ -36,7 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "john_doe"
+                  "string": " J\\xc3\\xb6hn \\xc5\\x90n\\xd0\\xb5 "
                 },
                 {
                   "u32": 1
@@ -47,7 +47,8 @@
           "sub_invocations": []
         }
       ]
-    ]
+    ],
+    []
   ],
   "ledger": {
     "protocol_version": 21,
@@ -356,7 +357,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "john_doe"
+                        "string": "john_one"
                       }
                     },
                     {
@@ -431,7 +432,7 @@
                   "symbol": "Username"
                 },
                 {
-                  "string": "john_doe"
+                  "string": "john_one"
                 }
               ]
             },
@@ -451,7 +452,7 @@
                       "symbol": "Username"
                     },
                     {
-                      "string": "john_doe"
+                      "string": "john_one"
                     }
                   ]
                 },
@@ -719,7 +720,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "john_doe"
+                  "string": " J\\xc3\\xb6hn \\xc5\\x90n\\xd0\\xb5 "
                 },
                 {
                   "u32": 1
@@ -821,7 +822,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "john_doe"
+                    "string": "john_one"
                   }
                 },
                 {
@@ -833,6 +834,55 @@
                   }
                 }
               ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_call"
+              },
+              {
+                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
+              },
+              {
+                "symbol": "is_username_taken"
+              }
+            ],
+            "data": {
+              "string": "JOHN ONE"
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "is_username_taken"
+              }
+            ],
+            "data": {
+              "bool": true
             }
           }
         }

@@ -1,9 +1,11 @@
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, String, Symbol, Vec};
+use soroban_sdk::{TryFromVal, Val};
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
 const TTL_EXTENSION: u32 = 518_400;
+const CURRENT_USER_PROFILE_VERSION: u32 = 2;
 
 #[cfg(test)]
 #[path = "onboarding_test.rs"]
@@ -31,16 +33,32 @@ pub enum DataKey {
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum UserRole {
-    None = 0,    // User has not onboarded
-    Buyer = 1,   // Can purchase items
-    Artisan = 2, // Can sell items and create escrow
-    Admin = 3,   // Platform administrator
+    None = 0,      // User has not onboarded
+    Buyer = 1,     // Can purchase items
+    Artisan = 2,   // Can sell items and create escrow
+    Admin = 3,     // Platform administrator
+    Moderator = 4, // Can help manage disputes
 }
 
 /// Onboarding status for users
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserProfile {
+    pub version: u32,
+    pub address: Address,
+    pub role: UserRole,
+    pub username: String,
+    pub registered_at: u64,
+    pub is_verified: bool,
+    /// Count of escrows where this user was on the winning side (#100)
+    pub successful_trades: u32,
+    /// Count of escrows that ended in a dispute against this user (#100)
+    pub disputed_trades: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyUserProfile {
     pub address: Address,
     pub role: UserRole,
     pub username: String,
@@ -89,40 +107,164 @@ pub struct OnboardingConfig {
     pub escrow_contract: Option<Address>,
 }
 
-/// Normalize a username to lowercase ASCII.
-///
-/// Iterates over each byte of the string and converts uppercase ASCII
-/// letters (A-Z) to lowercase (a-z). Leading and trailing spaces are
-/// stripped. This ensures case-insensitive uniqueness.
 fn normalize_username(env: &Env, username: &String) -> String {
-    let len = username.len() as usize;
     const MAX_INPUT_BYTES: usize = 256;
+    const MAX_OUTPUT_BYTES: usize = 256;
+    let len = username.len() as usize;
     if len > MAX_INPUT_BYTES {
         panic!("Username too long");
     }
 
     let mut buf = [0u8; MAX_INPUT_BYTES];
-    username.copy_into_slice(&mut buf[0..len]);
+    username.copy_into_slice(&mut buf[..len]);
+    let mut normalized = [0u8; MAX_OUTPUT_BYTES];
+    let mut out_len = 0usize;
+    let mut last_was_separator = false;
+    let mut index = 0usize;
 
-    let mut out_len = 0;
-    for i in 0..len {
-        let b = buf[i];
-        if b != b' ' {
-            if b >= b'A' && b <= b'Z' {
-                buf[out_len] = b + 32;
-            } else {
-                buf[out_len] = b;
-            }
+    while index < len {
+        let byte = buf[index];
+
+        if byte.is_ascii_alphanumeric() {
+            normalized[out_len] = byte.to_ascii_lowercase();
             out_len += 1;
+            last_was_separator = false;
+            index += 1;
+            continue;
         }
+
+        if matches!(byte, b' ' | b'_' | b'-' | b'.') {
+            if out_len > 0 && !last_was_separator {
+                normalized[out_len] = b'_';
+                out_len += 1;
+                last_was_separator = true;
+            }
+            index += 1;
+            continue;
+        }
+
+        if let Some((mapped, consumed)) = map_username_bytes(&buf[index..len]) {
+            for mapped_byte in mapped {
+                if *mapped_byte == b'_' {
+                    if out_len == 0 || last_was_separator {
+                        continue;
+                    }
+                    normalized[out_len] = b'_';
+                    out_len += 1;
+                    last_was_separator = true;
+                } else {
+                    normalized[out_len] = *mapped_byte;
+                    out_len += 1;
+                    last_was_separator = false;
+                }
+            }
+            index += consumed;
+            continue;
+        }
+
+        if out_len > 0 && !last_was_separator {
+            normalized[out_len] = b'_';
+            out_len += 1;
+            last_was_separator = true;
+        }
+        index += utf8_char_len(byte);
     }
 
-    if out_len == 0 {
-        return String::from_str(env, "");
+    while out_len > 0 && normalized[out_len - 1] == b'_' {
+        out_len -= 1;
     }
 
-    let s = core::str::from_utf8(&buf[0..out_len]).unwrap_or("");
-    String::from_str(env, s)
+    String::from_bytes(env, &normalized[..out_len])
+}
+
+fn map_username_bytes(input: &[u8]) -> Option<(&'static [u8], usize)> {
+    match input {
+        [0xC3, 0x84, ..]
+        | [0xC3, 0xA4, ..]
+        | [0xC3, 0x80, ..]
+        | [0xC3, 0xA0, ..]
+        | [0xC3, 0x81, ..]
+        | [0xC3, 0xA1, ..]
+        | [0xC3, 0x82, ..]
+        | [0xC3, 0xA2, ..]
+        | [0xC3, 0x83, ..]
+        | [0xC3, 0xA3, ..]
+        | [0xC3, 0x85, ..]
+        | [0xC3, 0xA5, ..]
+        | [0xCE, 0x91, ..]
+        | [0xD0, 0xB0, ..] => Some((b"a", 2)),
+        [0xC3, 0x87, ..] | [0xC3, 0xA7, ..] | [0xD0, 0xA1, ..] | [0xD1, 0x81, ..] => {
+            Some((b"c", 2))
+        }
+        [0xC3, 0x88, ..]
+        | [0xC3, 0xA8, ..]
+        | [0xC3, 0x89, ..]
+        | [0xC3, 0xA9, ..]
+        | [0xC3, 0x8A, ..]
+        | [0xC3, 0xAA, ..]
+        | [0xC3, 0x8B, ..]
+        | [0xC3, 0xAB, ..]
+        | [0xCE, 0x95, ..]
+        | [0xD0, 0x95, ..]
+        | [0xD0, 0xB5, ..] => Some((b"e", 2)),
+        [0xC3, 0x8D, ..]
+        | [0xC3, 0xAD, ..]
+        | [0xC3, 0x8E, ..]
+        | [0xC3, 0xAE, ..]
+        | [0xC3, 0x8F, ..]
+        | [0xC3, 0xAF, ..]
+        | [0xD0, 0x86, ..]
+        | [0xD1, 0x96, ..] => Some((b"i", 2)),
+        [0xC3, 0x91, ..] | [0xC3, 0xB1, ..] => Some((b"n", 2)),
+        [0xC3, 0x96, ..]
+        | [0xC3, 0xB6, ..]
+        | [0xC3, 0x93, ..]
+        | [0xC3, 0xB3, ..]
+        | [0xC3, 0x94, ..]
+        | [0xC3, 0xB4, ..]
+        | [0xC3, 0x95, ..]
+        | [0xC3, 0xB5, ..]
+        | [0xC3, 0x92, ..]
+        | [0xC3, 0xB2, ..]
+        | [0xC3, 0x98, ..]
+        | [0xC3, 0xB8, ..]
+        | [0xC5, 0x90, ..]
+        | [0xC5, 0x91, ..]
+        | [0xCE, 0x9F, ..]
+        | [0xD0, 0x9E, ..]
+        | [0xD0, 0xBE, ..] => Some((b"o", 2)),
+        [0xC3, 0x9C, ..]
+        | [0xC3, 0xBC, ..]
+        | [0xC3, 0x9A, ..]
+        | [0xC3, 0xBA, ..]
+        | [0xC3, 0x99, ..]
+        | [0xC3, 0xB9, ..]
+        | [0xC3, 0x9B, ..]
+        | [0xC3, 0xBB, ..] => Some((b"u", 2)),
+        [0xC3, 0x9F, ..] => Some((b"ss", 2)),
+        [0xC3, 0x86, ..] | [0xC3, 0xA6, ..] => Some((b"ae", 2)),
+        [0xC5, 0x92, ..] | [0xC5, 0x93, ..] => Some((b"oe", 2)),
+        [0xD0, 0xA0, ..] | [0xD1, 0x80, ..] => Some((b"p", 2)),
+        [0xD0, 0xA5, ..] | [0xD1, 0x85, ..] => Some((b"x", 2)),
+        [0xD0, 0xA3, ..] | [0xD1, 0x83, ..] => Some((b"y", 2)),
+        [0xD0, 0x9D, ..] | [0xD2, 0xBB, ..] => Some((b"h", 2)),
+        [0xE2, 0x80, 0x8B, ..]
+        | [0xE2, 0x80, 0x8C, ..]
+        | [0xE2, 0x80, 0x8D, ..]
+        | [0xE2, 0x81, 0xA0, ..]
+        | [0xEF, 0xBB, 0xBF, ..] => Some((b"", 3)),
+        _ => None,
+    }
+}
+
+fn utf8_char_len(first_byte: u8) -> usize {
+    match first_byte {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
+    }
 }
 
 #[contract]
@@ -130,6 +272,52 @@ pub struct OnboardingContract;
 
 #[contractimpl]
 impl OnboardingContract {
+    fn get_user_profile(env: &Env, user: Address) -> UserProfile {
+        let key = DataKey::UserProfile(user.clone());
+        let stored: Val = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("User not found");
+        let map =
+            Map::<Symbol, Val>::try_from_val(env, &stored).expect("User profile storage corrupted");
+        let version_key = Symbol::new(env, "version");
+
+        if map.contains_key(version_key) {
+            let profile =
+                UserProfile::try_from_val(env, &stored).expect("User profile storage corrupted");
+            if profile.version < CURRENT_USER_PROFILE_VERSION {
+                return Self::upgrade_user_profile(env, user, profile);
+            }
+            Self::extend_persistent(env, &key);
+            return profile;
+        }
+
+        let legacy =
+            LegacyUserProfile::try_from_val(env, &stored).expect("User profile storage corrupted");
+        let upgraded = UserProfile {
+            version: CURRENT_USER_PROFILE_VERSION,
+            address: legacy.address.clone(),
+            role: legacy.role,
+            username: legacy.username.clone(),
+            registered_at: legacy.registered_at,
+            is_verified: legacy.is_verified,
+            successful_trades: legacy.successful_trades,
+            disputed_trades: legacy.disputed_trades,
+        };
+        env.storage().persistent().set(&key, &upgraded);
+        Self::extend_persistent(env, &key);
+        upgraded
+    }
+
+    fn upgrade_user_profile(env: &Env, user: Address, mut profile: UserProfile) -> UserProfile {
+        profile.version = CURRENT_USER_PROFILE_VERSION;
+        let key = DataKey::UserProfile(user);
+        env.storage().persistent().set(&key, &profile);
+        Self::extend_persistent(env, &key);
+        profile
+    }
+
     /// Extend the TTL of a persistent storage entry using standardized values.
     fn extend_persistent(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
         env.storage()
@@ -156,9 +344,7 @@ impl OnboardingContract {
         };
 
         // Store the configuration
-        env.storage()
-            .persistent()
-            .set(&DataKey::Config, &config);
+        env.storage().persistent().set(&DataKey::Config, &config);
         Self::extend_persistent(&env, &DataKey::Config);
 
         let admin_username = String::from_str(&env, "admin");
@@ -166,6 +352,7 @@ impl OnboardingContract {
 
         // Store admin as initial admin role
         let admin_profile = UserProfile {
+            version: CURRENT_USER_PROFILE_VERSION,
             address: admin.clone(),
             role: UserRole::Admin,
             username: normalized.clone(),
@@ -253,6 +440,7 @@ impl OnboardingContract {
 
         // Create user profile with normalized username
         let profile = UserProfile {
+            version: CURRENT_USER_PROFILE_VERSION,
             address: user.clone(),
             role,
             username: normalized.clone(),
@@ -289,12 +477,7 @@ impl OnboardingContract {
     /// # Returns
     /// UserProfile if user exists, reverts otherwise
     pub fn get_user(env: Env, user: Address) -> UserProfile {
-        let profile: UserProfile = env.storage()
-            .persistent()
-            .get(&DataKey::UserProfile(user.clone()))
-            .expect("User not found");
-        Self::extend_persistent(&env, &DataKey::UserProfile(user));
-        profile
+        Self::get_user_profile(&env, user)
     }
 
     /// Get user profile by username (case-insensitive)
@@ -314,13 +497,7 @@ impl OnboardingContract {
             .expect("Username not found");
         Self::extend_persistent(&env, &DataKey::Username(normalized));
 
-        let profile: UserProfile = env.storage()
-            .persistent()
-            .get(&DataKey::UserProfile(owner.clone()))
-            .expect("User not found");
-        Self::extend_persistent(&env, &DataKey::UserProfile(owner));
-        
-        profile
+        Self::get_user_profile(&env, owner)
     }
 
     /// Check if a username is already taken (case-insensitive)
@@ -332,7 +509,8 @@ impl OnboardingContract {
     /// true if username is taken, false if available
     pub fn is_username_taken(env: Env, username: String) -> bool {
         let normalized = normalize_username(&env, &username);
-        let has = env.storage()
+        let has = env
+            .storage()
             .persistent()
             .has(&DataKey::Username(normalized.clone()));
         if has {
@@ -349,12 +527,10 @@ impl OnboardingContract {
     /// # Returns
     /// true if user has onboarded, false otherwise
     pub fn is_onboarded(env: Env, user: Address) -> bool {
-        let has = env.storage()
-            .persistent()
-            .get::<DataKey, UserProfile>(&DataKey::UserProfile(user.clone()))
-            .is_some();
+        let key = DataKey::UserProfile(user.clone());
+        let has = env.storage().persistent().has(&key);
         if has {
-            Self::extend_persistent(&env, &DataKey::UserProfile(user));
+            let _ = Self::get_user_profile(&env, user);
         }
         has
     }
@@ -367,17 +543,20 @@ impl OnboardingContract {
     /// # Returns
     /// UserRole if user exists, UserRole::None otherwise
     pub fn get_user_role(env: Env, user: Address) -> UserRole {
-        match env
+        if env
             .storage()
             .persistent()
-            .get::<DataKey, UserProfile>(&DataKey::UserProfile(user.clone()))
+            .has(&DataKey::UserProfile(user.clone()))
         {
-            Some(profile) => {
-                Self::extend_persistent(&env, &DataKey::UserProfile(user));
-                profile.role
-            },
-            None => UserRole::None,
+            Self::get_user_profile(&env, user).role
+        } else {
+            UserRole::None
         }
+    }
+
+    /// Assign or update the moderator role for a user (admin only).
+    pub fn set_moderator(env: Env, user: Address) -> UserProfile {
+        Self::update_user_role(env, user, UserRole::Moderator)
     }
 
     /// Update user role (admin only)
@@ -402,12 +581,7 @@ impl OnboardingContract {
         config.platform_admin.require_auth();
 
         // Get existing profile
-        let mut profile: UserProfile = env
-            .storage()
-            .persistent()
-            .get(&DataKey::UserProfile(user.clone()))
-            .expect("User not found");
-        Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
+        let mut profile = Self::get_user_profile(&env, user.clone());
 
         // Update role
         let _old_role = profile.role;
@@ -447,12 +621,7 @@ impl OnboardingContract {
         config.platform_admin.require_auth();
 
         // Get existing profile
-        let mut profile: UserProfile = env
-            .storage()
-            .persistent()
-            .get(&DataKey::UserProfile(user.clone()))
-            .expect("User not found");
-        Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
+        let mut profile = Self::get_user_profile(&env, user.clone());
 
         // Set verified
         profile.is_verified = true;
@@ -475,7 +644,8 @@ impl OnboardingContract {
     /// # Returns
     /// OnboardingConfig struct
     pub fn get_config(env: Env) -> OnboardingConfig {
-        let config: OnboardingConfig = env.storage()
+        let config: OnboardingConfig = env
+            .storage()
             .persistent()
             .get(&DataKey::Config)
             .expect("Contract not initialized");
@@ -503,16 +673,14 @@ impl OnboardingContract {
     /// # Returns
     /// true if user is verified, false otherwise
     pub fn is_verified(env: Env, user: Address) -> bool {
-        match env
+        if env
             .storage()
             .persistent()
-            .get::<DataKey, UserProfile>(&DataKey::UserProfile(user.clone()))
+            .has(&DataKey::UserProfile(user.clone()))
         {
-            Some(profile) => {
-                Self::extend_persistent(&env, &DataKey::UserProfile(user));
-                profile.is_verified
-            },
-            None => false,
+            Self::get_user_profile(&env, user).is_verified
+        } else {
+            false
         }
     }
 
@@ -542,11 +710,7 @@ impl OnboardingContract {
     /// # Arguments
     /// * `min_escrow_count` - Minimum number of completed escrows required
     /// * `min_volume` - Minimum total transaction volume required (in stroops)
-    pub fn set_verification_thresholds(
-        env: Env,
-        min_escrow_count: u32,
-        min_volume: i128,
-    ) {
+    pub fn set_verification_thresholds(env: Env, min_escrow_count: u32, min_volume: i128) {
         let mut config: OnboardingConfig = env
             .storage()
             .persistent()
@@ -606,16 +770,15 @@ impl OnboardingContract {
         }
 
         let key = DataKey::UserMetrics(address.clone());
-        let mut metrics: UserMetrics = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(UserMetrics {
+        let mut metrics: UserMetrics =
+            env.storage().persistent().get(&key).unwrap_or(UserMetrics {
                 total_escrow_count: 0,
                 total_volume: 0,
             });
 
-        metrics.total_escrow_count = metrics.total_escrow_count.saturating_add(escrow_count_delta);
+        metrics.total_escrow_count = metrics
+            .total_escrow_count
+            .saturating_add(escrow_count_delta);
         metrics.total_volume = metrics.total_volume.saturating_add(volume_delta);
 
         env.storage().persistent().set(&key, &metrics);
@@ -626,7 +789,12 @@ impl OnboardingContract {
     }
 
     /// Internal helper: verify a user automatically if they meet the configured thresholds.
-    fn try_auto_verify(env: &Env, address: &Address, config: &OnboardingConfig, metrics: &UserMetrics) {
+    fn try_auto_verify(
+        env: &Env,
+        address: &Address,
+        config: &OnboardingConfig,
+        metrics: &UserMetrics,
+    ) {
         let profile_key = DataKey::UserProfile(address.clone());
         let profile_opt: Option<UserProfile> = env.storage().persistent().get(&profile_key);
         let mut profile = match profile_opt {

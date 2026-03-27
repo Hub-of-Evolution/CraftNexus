@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use super::*;
 use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
@@ -26,6 +24,10 @@ fn test_initialize() {
     assert_eq!(config.platform_admin, admin);
     assert_eq!(config.min_username_length, 3);
     assert_eq!(config.max_username_length, 50);
+    assert_eq!(
+        client.get_user(&admin).version,
+        CURRENT_USER_PROFILE_VERSION
+    );
 }
 
 #[test]
@@ -55,6 +57,7 @@ fn test_onboard_user_as_buyer() {
 
     let profile = client.onboard_user(&user, &username, &UserRole::Buyer);
 
+    assert_eq!(profile.version, CURRENT_USER_PROFILE_VERSION);
     assert_eq!(profile.address, user);
     assert_eq!(profile.username, String::from_str(&env, "john_doe"));
     assert_eq!(profile.role, UserRole::Buyer);
@@ -92,6 +95,22 @@ fn test_onboard_stores_normalized_username() {
 
     // Username should be stored as lowercase
     assert_eq!(profile.username, String::from_str(&env, "johndoe"));
+}
+
+#[test]
+fn test_onboard_normalizes_multilingual_username() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, " Jöhn Őnе ");
+
+    let profile = client.onboard_user(&user, &username, &UserRole::Buyer);
+
+    assert_eq!(profile.username, String::from_str(&env, "john_one"));
+    assert!(client.is_username_taken(&String::from_str(&env, "JOHN ONE")));
 }
 
 #[test]
@@ -380,6 +399,25 @@ fn test_update_user_role() {
 }
 
 #[test]
+fn test_set_moderator() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "moderator_user"),
+        &UserRole::Buyer,
+    );
+
+    let updated = client.set_moderator(&user);
+    assert_eq!(updated.role, UserRole::Moderator);
+    assert!(client.has_role(&user, &UserRole::Moderator));
+}
+
+#[test]
 fn test_verify_user() {
     let env = Env::default();
     env.mock_all_auths();
@@ -448,7 +486,11 @@ fn test_new_user_has_zero_reputation() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "artisan1"), &UserRole::Artisan);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "artisan1"),
+        &UserRole::Artisan,
+    );
 
     let (successful, disputed) = client.get_user_reputation(&user);
     assert_eq!(successful, 0);
@@ -568,7 +610,11 @@ fn test_request_verification_queue() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "queued1"), &UserRole::Artisan);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "queued1"),
+        &UserRole::Artisan,
+    );
 
     client.request_verification(&user);
 
@@ -589,7 +635,11 @@ fn test_process_verification_request_approve() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "queued2"), &UserRole::Artisan);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "queued2"),
+        &UserRole::Artisan,
+    );
 
     client.request_verification(&user);
     client.process_verification_request(&user, &true);
@@ -609,7 +659,11 @@ fn test_process_verification_request_reject() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "queued3"), &UserRole::Artisan);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "queued3"),
+        &UserRole::Artisan,
+    );
 
     client.request_verification(&user);
     client.process_verification_request(&user, &false);
@@ -691,4 +745,40 @@ fn test_update_reputation_unknown_address_is_no_op() {
     let (successful, disputed) = client.get_user_reputation(&unknown);
     assert_eq!(successful, 0);
     assert_eq!(disputed, 0);
+}
+
+#[test]
+fn test_get_user_migrates_legacy_profile() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let legacy = LegacyUserProfile {
+        address: user.clone(),
+        role: UserRole::Buyer,
+        username: String::from_str(&env, "legacy_user"),
+        registered_at: 1234,
+        is_verified: false,
+        successful_trades: 0,
+        disputed_trades: 0,
+    };
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserProfile(user.clone()), &legacy);
+    });
+
+    let migrated = client.get_user(&user);
+    assert_eq!(migrated.version, CURRENT_USER_PROFILE_VERSION);
+    assert_eq!(migrated.username, String::from_str(&env, "legacy_user"));
+
+    let stored: UserProfile = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserProfile(user))
+            .unwrap()
+    });
+    assert_eq!(stored.version, CURRENT_USER_PROFILE_VERSION);
 }

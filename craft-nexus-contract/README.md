@@ -10,6 +10,7 @@ Stellar Smart Contracts (Soroban) for the CraftNexus marketplace platform.
   - [Escrow Contract](#escrow-contract)
 - [Storage Architecture](#storage-architecture)
 - [Event Reference](#event-reference)
+- [Versioned State Migration](#versioned-state-migration)
 - [Error Codes](#error-codes)
 - [Prerequisites](#prerequisites)
 - [Building Contracts](#building-contracts)
@@ -28,6 +29,10 @@ CraftNexus uses Stellar Soroban smart contracts to provide secure, decentralized
 
 1. **Onboarding Contract** - Manages user registration, role assignment, and platform access
 2. **Escrow Contract** - Handles secure payment holding for marketplace transactions
+
+## Versioned State Migration
+
+State migration notes for the `Escrow` and `UserProfile` versioned schemas live in [docs/versioned-state-migration.md](docs/versioned-state-migration.md).
 
 ---
 
