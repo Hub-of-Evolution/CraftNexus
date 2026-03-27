@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, BytesN,
-    Env, String, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
+    BytesN, Env, String, Symbol,
 };
 
 mod test;
@@ -122,10 +122,15 @@ pub enum EscrowStatus {
     Resolved = 4,
 }
 
+/// Choice of resolution for a disputed escrow.
 #[contracttype]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Resolution {
+    /// Release funds to the seller.
+    /// Platform fees ARE collected in this case.
     ReleaseToSeller = 0,
+    /// Refund funds to the buyer.
+    /// Full amount is returned; platform fees ARE NOT collected.
     RefundToBuyer = 1,
 }
 
@@ -379,7 +384,7 @@ impl EscrowContract {
         }
     }
 
-    fn validate_optional_metadata_hash(_metadata_hash: &Option<BytesN<32>>) {
+    fn validate_optional_metadata_hash(_metadata_hash: &Option<Bytes>) {
         // BytesN<32> is always exactly 32 bytes by type; no runtime check needed
     }
 
@@ -528,7 +533,7 @@ impl EscrowContract {
     /// Propose a new administrator for the platform (admin only).
     /// Starts the two-step transfer process (#95).
     pub fn update_admin(env: Env, new_admin: Address) {
-        let mut config = Self::get_platform_config(&env);
+        let mut config = Self::get_platform_config(env.clone());
         config.admin.require_auth();
 
         config.pending_admin = Some(new_admin);
@@ -539,7 +544,7 @@ impl EscrowContract {
     /// Claim the administrative role (pending admin only).
     /// Completes the two-step transfer process (#95).
     pub fn claim_admin(env: Env) {
-        let mut config = Self::get_platform_config(&env);
+        let mut config = Self::get_platform_config(env.clone());
         let pending = config.pending_admin.as_ref().expect("No pending admin");
         pending.require_auth();
 
@@ -610,7 +615,7 @@ impl EscrowContract {
         }
 
         // Check artisan (seller) stake requirement (Issue #99)
-        let config = Self::get_platform_config(&env);
+        let config = Self::get_platform_config(env.clone());
         if config.min_stake_required > 0 {
             let artisan_stake: i128 = env
                 .storage()
@@ -794,7 +799,7 @@ impl EscrowContract {
         }
 
         // Get platform config
-        let config = Self::get_platform_config(&env);
+        let config = Self::get_platform_config(env.clone());
 
         // Calculate platform fee
         let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
@@ -866,7 +871,7 @@ impl EscrowContract {
         }
 
         // Get platform config
-        let config = Self::get_platform_config(&env);
+        let config = Self::get_platform_config(env.clone());
 
         // Calculate platform fee
         let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
@@ -1093,7 +1098,7 @@ impl EscrowContract {
     }
 
     fn release_funds_to_seller(env: &Env, escrow: &Escrow) {
-        let config = Self::get_platform_config(env);
+        let config = Self::get_platform_config(env.clone());
         let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
         let seller_amount = escrow.amount - fee_amount;
 
@@ -1218,7 +1223,18 @@ impl EscrowContract {
         );
     }
 
-    /// Resolve disputed escrow (arbitrator only)
+    /// Resolve disputed escrow (arbitrator only).
+    ///
+    /// This function transitions the escrow from `Disputed` to `Resolved`.
+    /// Depending on the `resolution` choice:
+    /// - `ReleaseToSeller`: Funds are sent to the seller minus the platform fee.
+    /// - `RefundToBuyer`: Full original amount is returned to the buyer.
+    ///
+    /// # Edge Cases
+    /// - **Refund Failure**: If the transfer to the buyer fails (e.g. account revoked), 
+    ///   the entire transaction reverts due to Stellar's atomicity. 
+    ///   The escrow remains in `Disputed` state for re-investigation.
+    /// - **State Logic**: Can ONLY be called if `status` is currently `Disputed`.
     pub fn resolve_dispute(env: Env, order_id: u32, resolution: Resolution) {
         Self::enter_reentry_guard(&env);
         let arbitrator = Self::get_arbitrator(&env);
@@ -1269,7 +1285,7 @@ impl EscrowContract {
     /// # Arguments
     /// * `new_fee_bps` - New fee in basis points
     pub fn update_platform_fee(env: Env, new_fee_bps: u32) {
-        let config = Self::get_platform_config(&env);
+        let config = Self::get_platform_config(env.clone());
         config.admin.require_auth();
 
         if !(new_fee_bps <= MAX_PLATFORM_FEE_BPS) {
@@ -1295,7 +1311,7 @@ impl EscrowContract {
     /// # Arguments
     /// * `new_wallet` - New platform wallet address
     pub fn update_platform_wallet(env: Env, new_wallet: Address) {
-        let config = Self::get_platform_config(&env);
+        let config = Self::get_platform_config(env.clone());
         config.admin.require_auth();
 
         let new_config = PlatformConfig {
@@ -1331,13 +1347,13 @@ impl EscrowContract {
 
     /// Get current platform fee percentage
     pub fn get_platform_fee(env: Env) -> u32 {
-        let config = Self::get_platform_config(&env);
+        let config = Self::get_platform_config(env.clone());
         config.platform_fee_bps
     }
 
     /// Get platform wallet address
     pub fn get_platform_wallet(env: Env) -> Address {
-        let config = Self::get_platform_config(&env);
+        let config = Self::get_platform_config(env.clone());
         config.platform_wallet
     }
 
@@ -1355,7 +1371,7 @@ impl EscrowContract {
     /// # Arguments
     /// * `amount` - The escrow amount
     pub fn calculate_fee_for_amount(env: Env, amount: i128) -> i128 {
-        let config = Self::get_platform_config(&env);
+        let config = Self::get_platform_config(env.clone());
         Self::calculate_fee(amount, config.platform_fee_bps)
     }
 
@@ -1392,7 +1408,7 @@ impl EscrowContract {
             }
         }
 
-        // metadata_hash is Option<BytesN<32>>; type guarantees 32 bytes, no runtime check needed
+        // metadata_hash is Option<Bytes>; type guarantees 32 bytes, no runtime check needed
 
         Ok(())
     }
@@ -1611,7 +1627,7 @@ impl EscrowContract {
 
                 if let Some(mut escrow) = escrow_opt {
                     // Get platform config
-                    let config = Self::get_platform_config(&env);
+                    let config = Self::get_platform_config(env.clone());
 
                     // Calculate platform fee
                     let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
@@ -1699,7 +1715,7 @@ impl EscrowContract {
         let admin = Self::get_admin(&env).unwrap();
         admin.require_auth();
 
-        let mut config = Self::get_platform_config(&env);
+        let mut config = Self::get_platform_config(env.clone());
         config.is_paused = paused;
         env.storage().persistent().set(&PLATFORM_FEE, &config);
         Self::extend_persistent(&env, &PLATFORM_FEE);
@@ -1707,7 +1723,7 @@ impl EscrowContract {
 
     /// View: check if contract is paused.
     pub fn is_paused(env: Env) -> bool {
-        let config = Self::get_platform_config(&env);
+        let config = Self::get_platform_config(env.clone());
         config.is_paused
     }
 
@@ -1734,7 +1750,7 @@ impl EscrowContract {
             Self::extend_persistent(&env, &key);
             fee
         } else {
-            let config = Self::get_platform_config(&env);
+            let config = Self::get_platform_config(env.clone());
             config.platform_fee_bps
         }
     }
@@ -1901,7 +1917,7 @@ impl EscrowContract {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
-        let mut config = Self::get_platform_config(&env);
+        let mut config = Self::get_platform_config(env.clone());
         config.min_stake_required = min_stake;
         env.storage().persistent().set(&PLATFORM_FEE, &config);
         Self::extend_persistent(&env, &PLATFORM_FEE);
@@ -2032,7 +2048,7 @@ impl EscrowContract {
         let seller_gross = escrow.amount - refund_amount;
 
         // Deduct platform fee from seller's portion
-        let config = Self::get_platform_config(&env);
+        let config = Self::get_platform_config(env.clone());
         let fee_amount = Self::calculate_fee(seller_gross, config.platform_fee_bps);
         let seller_net = seller_gross - fee_amount;
 

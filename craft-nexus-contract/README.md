@@ -16,6 +16,7 @@ Stellar Smart Contracts (Soroban) for the CraftNexus marketplace platform.
 - [Deployment](#deployment)
 - [Testing Contracts](#testing-contracts)
 - [Integration](#integration)
+- [Arbitrator Role](#arbitrator-role)
 - [Contract Addresses](#contract-addresses)
 - [Security Considerations](#security-considerations)
 
@@ -76,6 +77,7 @@ The platform supports four user roles:
 | `Buyer` | Standard customer | Browse, purchase, create orders |
 | `Artisan` | Seller/crafter | Create listings, receive payments, manage shop |
 | `Admin` | Platform administrator | Verify users, manage roles, platform settings |
+| `Arbitrator` | Dispute resolver | Resolve disputes between buyers and sellers |
 
 ---
 
@@ -483,12 +485,29 @@ Get escrow details.
 **Parameters:**
 - `order_id`: Order identifier
 
-##### `can_auto_release`
+##### `resolve_dispute`
 
-Check if escrow can be auto-released.
+Resolve a disputed escrow (Arbitrator only).
 
 **Parameters:**
 - `order_id`: Order identifier
+- `resolution`: Choice of resolution (0 = Release to Seller, 1 = Refund to Buyer)
+
+---
+
+## Arbitrator Role
+
+Arbitrators have the critical responsibility of resolving disputes when buyers and sellers cannot reach an agreement.
+
+For detailed technical instructions on the arbitrator role, including CLI command examples and data structure explanations, please refer to the [Arbitrator Technical Guide](docs/ArbitratorTechnicalGuide.md).
+
+### Dispute Resolution Process
+
+1. **Dispute Initiation**: Either buyer or seller initiates a dispute.
+2. **Investigation**: Arbitrator reviews the `dispute_reason` and off-chain evidence (via `ipfs_hash`).
+3. **Resolution**: Arbitrator calls `resolve_dispute` with the appropriate resolution.
+
+---
 
 ---
 

@@ -261,7 +261,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -313,6 +313,23 @@
                     },
                     {
                       "key": {
+                        "symbol": "min_stake_required"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "pending_admin"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "platform_fee_bps"
                       },
                       "val": {
@@ -333,7 +350,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -364,7 +381,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -398,7 +415,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -447,7 +464,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -486,7 +503,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -555,6 +572,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "dispute_initiated_at"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "dispute_reason"
                       },
                       "val": "void"
@@ -617,7 +640,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -665,7 +688,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -714,7 +737,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -1768,6 +1791,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "dispute_initiated_at"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "dispute_reason"
                   },
                   "val": "void"
@@ -1879,7 +1908,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Escrow not in dispute' from contract function 'Symbol(obj#371)'"
+                  "string": "caught panic 'Escrow not in dispute' from contract function 'Symbol(obj#405)'"
                 },
                 {
                   "u32": 1

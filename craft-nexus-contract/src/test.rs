@@ -1184,7 +1184,7 @@ fn test_contract_upgrade_success() {
     // To test update_wasm, we need a WASM hash that "exists" in the test environment.
     // We can upload a tiny dummy WASM to get a valid hash.
     let dummy_wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
-    let new_wasm_hash = env.deployer().upload_contract_wasm(dummy_wasm);
+    let _new_wasm_hash = env.deployer().upload_contract_wasm(dummy_wasm);
 
     client.update_wasm();
 
@@ -1199,7 +1199,7 @@ fn test_contract_upgrade_unauthorized() {
     // Do NOT mock auth globally
     let (client, _, _, _, _, _, _) = setup_test(&env, false);
 
-    let dummy_hash = BytesN::from_array(&env, &[1u8; 32]);
+    let _dummy_hash = BytesN::from_array(&env, &[1u8; 32]);
 
     // Attempt upgrade without admin auth
     client.update_wasm();
@@ -1353,7 +1353,7 @@ fn test_create_batch_escrow_fails_same_buyer_seller() {
 fn test_release_batch_funds_success() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
+    let (client, buyer, seller, token_id, token_admin, _platform_wallet, _) = setup_test(&env, true);
 
     token_admin.mint(&buyer, &1_000_000_000);
 

@@ -496,7 +496,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -548,6 +548,23 @@
                     },
                     {
                       "key": {
+                        "symbol": "min_stake_required"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "pending_admin"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "platform_fee_bps"
                       },
                       "val": {
@@ -568,7 +585,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -599,7 +616,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -633,7 +650,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -688,7 +705,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -727,7 +744,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -796,6 +813,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "dispute_initiated_at"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "dispute_reason"
                       },
                       "val": "void"
@@ -858,7 +881,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -927,6 +950,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "dispute_initiated_at"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "dispute_reason"
                       },
                       "val": "void"
@@ -989,7 +1018,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -1058,6 +1087,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "dispute_initiated_at"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "dispute_reason"
                       },
                       "val": "void"
@@ -1120,7 +1155,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -1168,7 +1203,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -1262,7 +1297,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -3185,6 +3220,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "dispute_initiated_at"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "dispute_reason"
                   },
                   "val": "void"
@@ -3320,6 +3361,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "dispute_initiated_at"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "dispute_reason"
                   },
                   "val": "void"
@@ -3452,6 +3499,12 @@
                   "val": {
                     "u32": 1711368000
                   }
+                },
+                {
+                  "key": {
+                    "symbol": "dispute_initiated_at"
+                  },
+                  "val": "void"
                 },
                 {
                   "key": {
