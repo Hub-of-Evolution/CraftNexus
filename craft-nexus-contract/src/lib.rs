@@ -1812,6 +1812,30 @@ impl EscrowContract {
         Ok(params.order_id as u64)
     }
 
+    /// DevEx: Dry-Run Batch Validation
+    /// Validates a batch of escrow creations without modifying state.
+    /// Returns a map of index -> Error for any escrow that fails validation.
+    pub fn validate_batch_creation(
+        env: Env,
+        escrows: soroban_sdk::Vec<EscrowCreateParams>,
+    ) -> Map<u32, Error> {
+        let mut errors: Map<u32, Error> = Map::new(&env);
+
+        if escrows.len() > MAX_BATCH_SIZE as u32 {
+            env.panic_with_error(Error::BatchOperationFailed);
+        }
+
+        for i in 0..escrows.len() {
+            if let Some(params) = escrows.get(i) {
+                if let Err(e) = Self::validate_escrow_params(&env, &params) {
+                    errors.set(i, e);
+                }
+            }
+        }
+
+        errors
+    }
+
     /// Create multiple escrows in a batch operation (Issue #111: Optimized)
     ///
     /// Validates all escrows first before processing any to ensure atomic behavior.

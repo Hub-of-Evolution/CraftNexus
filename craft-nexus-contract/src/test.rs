@@ -2111,3 +2111,85 @@ fn test_create_batch_escrow_with_metadata() {
         assert_eq!(metadata.metadata_hash, Some(metadata_hash_bytes.clone()));
     }
 }
+
+// ============================================================
+// DevEx #119 – Dry-Run Batch Validation
+// ============================================================
+
+#[test]
+fn test_validate_batch_creation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    let invalid_amount = EscrowCreateParams {
+        buyer: buyer.clone(),
+        seller: seller.clone(),
+        token: token_id.clone(),
+        amount: 0,
+        order_id: 1,
+        release_window: Some(3600),
+        ipfs_hash: None,
+        metadata_hash: None,
+    };
+
+    let invalid_parties = EscrowCreateParams {
+        buyer: buyer.clone(),
+        seller: buyer.clone(),
+        token: token_id.clone(),
+        amount: 1000,
+        order_id: 2,
+        release_window: Some(3600),
+        ipfs_hash: None,
+        metadata_hash: None,
+    };
+
+    let valid_param = EscrowCreateParams {
+        buyer: buyer.clone(),
+        seller: seller.clone(),
+        token: token_id.clone(),
+        amount: 1000,
+        order_id: 3,
+        release_window: Some(3600),
+        ipfs_hash: None,
+        metadata_hash: None,
+    };
+
+    let mut batch_params = soroban_sdk::Vec::new(&env);
+    batch_params.push_back(invalid_amount);
+    batch_params.push_back(invalid_parties);
+    batch_params.push_back(valid_param);
+
+    let errors = client.validate_batch_creation(&batch_params);
+
+    assert_eq!(errors.len(), 2);
+    assert_eq!(errors.get(0).unwrap(), Error::AmountBelowMinimum);
+    assert_eq!(errors.get(1).unwrap(), Error::SameBuyerSeller);
+    assert!(errors.get(2).is_none());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+fn test_validate_batch_creation_exceeds_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    let valid_param = EscrowCreateParams {
+        buyer: buyer.clone(),
+        seller: seller.clone(),
+        token: token_id.clone(),
+        amount: 1000,
+        order_id: 1,
+        release_window: Some(3600),
+        ipfs_hash: None,
+        metadata_hash: None,
+    };
+
+    let mut batch_params = soroban_sdk::Vec::new(&env);
+    for _ in 0..101 { // MAX_BATCH_SIZE is 100
+        batch_params.push_back(valid_param.clone());
+    }
+
+    client.validate_batch_creation(&batch_params);
+}
