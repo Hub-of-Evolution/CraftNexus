@@ -1724,3 +1724,174 @@ fn test_refund_no_onboarding_contract() {
     let escrow = client.get_escrow(&1);
     assert_eq!(escrow.status, EscrowStatus::Refunded);
 }
+
+// ─── Issue #103: Token Whitelisting ──────────────────────────────────────────
+
+/// When no tokens have been whitelisted, any token is accepted (backward compat).
+#[test]
+fn test_whitelist_empty_allows_any_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Whitelist is empty — escrow creation must succeed for any token
+    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Active);
+}
+
+/// is_token_whitelisted returns true for any token when the whitelist is empty.
+#[test]
+fn test_is_token_whitelisted_empty_whitelist() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
+
+    assert!(client.is_token_whitelisted(&token_id));
+}
+
+/// Admin can whitelist a token; is_token_whitelisted returns true for it.
+#[test]
+fn test_whitelist_token_admin_can_add() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
+
+    client.whitelist_token(&token_id);
+    assert!(client.is_token_whitelisted(&token_id));
+}
+
+/// Once a token is whitelisted, a different (non-whitelisted) token is rejected.
+#[test]
+#[should_panic]
+fn test_create_escrow_non_whitelisted_token_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Whitelist the first token — enforcement is now active
+    client.whitelist_token(&token_id);
+
+    // Attempt to create an escrow with a different, non-whitelisted token
+    let other_token_admin = Address::generate(&env);
+    let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
+    let other_token_client = token::StellarAssetClient::new(&env, &other_token.address());
+    other_token_client.mint(&buyer, &100_000_000);
+
+    client.create_escrow(
+        &buyer,
+        &seller,
+        &other_token.address(),
+        &10_000,
+        &2,
+        &Some(3600),
+    );
+}
+
+/// Whitelisted token is accepted for escrow creation when whitelist is active.
+#[test]
+fn test_create_escrow_whitelisted_token_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    client.whitelist_token(&token_id);
+    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Active);
+}
+
+/// Admin can remove a token from the whitelist; is_token_whitelisted returns false for it.
+#[test]
+fn test_remove_token_from_whitelist() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
+
+    client.whitelist_token(&token_id);
+    assert!(client.is_token_whitelisted(&token_id));
+
+    client.remove_token_from_whitelist(&token_id);
+    // Whitelist is now empty again — all tokens permitted
+    assert!(client.is_token_whitelisted(&token_id));
+}
+
+/// After removing the last token, escrow creation succeeds for any token again.
+#[test]
+fn test_empty_whitelist_after_removal_allows_any_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Add then immediately remove to leave whitelist empty
+    client.whitelist_token(&token_id);
+    client.remove_token_from_whitelist(&token_id);
+
+    // Should succeed — empty whitelist means no enforcement
+    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Active);
+}
+
+/// Batch escrow creation fails if a token in the batch is not whitelisted.
+#[test]
+fn test_batch_escrow_non_whitelisted_token_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Whitelist the first token — enforcement is now active
+    client.whitelist_token(&token_id);
+
+    // Build a batch with a non-whitelisted second token
+    let other_token_admin = Address::generate(&env);
+    let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
+
+    let params = soroban_sdk::vec![
+        &env,
+        EscrowCreateParams {
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: other_token.address(),
+            amount: 10_000,
+            order_id: 10,
+            release_window: Some(3600),
+            ipfs_hash: None,
+            metadata_hash: None,
+        },
+    ];
+    let result = client.try_create_batch_escrow(&1u64, &params);
+    assert!(result.is_err());
+}
+
+/// Multiple tokens can be whitelisted independently.
+#[test]
+fn test_multiple_tokens_on_whitelist() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Register a second token
+    let token2_admin = Address::generate(&env);
+    let token2 = env.register_stellar_asset_contract_v2(token2_admin.clone());
+    let token2_client = token::StellarAssetClient::new(&env, &token2.address());
+    token2_client.mint(&buyer, &100_000_000);
+
+    client.whitelist_token(&token_id);
+    client.whitelist_token(&token2.address());
+
+    assert!(client.is_token_whitelisted(&token_id));
+    assert!(client.is_token_whitelisted(&token2.address()));
+
+    // Both should succeed in escrow creation
+    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
+    client.create_escrow(&buyer, &seller, &token2.address(), &10_000, &2, &Some(3600));
+    assert_eq!(client.get_escrow(&1).status, EscrowStatus::Active);
+    assert_eq!(client.get_escrow(&2).status, EscrowStatus::Active);
+}
