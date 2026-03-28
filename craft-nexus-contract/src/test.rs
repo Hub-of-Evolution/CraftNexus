@@ -2019,6 +2019,8 @@ fn test_multiple_tokens_on_whitelist() {
     client.create_escrow(&buyer, &seller, &token2.address(), &10_000, &2, &Some(3600));
     assert_eq!(client.get_escrow(&1).status, EscrowStatus::Active);
     assert_eq!(client.get_escrow(&2).status, EscrowStatus::Active);
+}
+
 // ============================================================
 // Issue #111 – Batch Optimization Tests (Additional)
 // ============================================================
@@ -2361,4 +2363,146 @@ fn test_validate_batch_creation_exceeds_limit() {
     }
 
     client.validate_batch_creation(&batch_params);
+}
+
+// ── Storage Explorer tests ───────────────────────────────────────────
+
+#[test]
+fn test_get_escrow_count_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    assert_eq!(client.get_escrow_count(), 0);
+}
+
+#[test]
+fn test_get_escrow_count_increments() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &1_000_000);
+
+    assert_eq!(client.get_escrow_count(), 0);
+
+    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &Some(3600));
+    assert_eq!(client.get_escrow_count(), 1);
+
+    client.create_escrow(&buyer, &seller, &token_id, &500, &2, &Some(3600));
+    assert_eq!(client.get_escrow_count(), 2);
+
+    client.create_escrow(&buyer, &seller, &token_id, &500, &3, &Some(3600));
+    assert_eq!(client.get_escrow_count(), 3);
+}
+
+#[test]
+fn test_get_all_escrow_ids_iterative_empty() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let ids = client.get_all_escrow_ids_iterative(&0, &10);
+    assert_eq!(ids.len(), 0);
+}
+
+#[test]
+fn test_get_all_escrow_ids_iterative_single_page() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &1_000_000);
+
+    client.create_escrow(&buyer, &seller, &token_id, &100, &10, &Some(3600));
+    client.create_escrow(&buyer, &seller, &token_id, &100, &20, &Some(3600));
+    client.create_escrow(&buyer, &seller, &token_id, &100, &30, &Some(3600));
+
+    let ids = client.get_all_escrow_ids_iterative(&0, &10);
+    assert_eq!(ids.len(), 3);
+    assert_eq!(ids.get(0), Some(10u32));
+    assert_eq!(ids.get(1), Some(20u32));
+    assert_eq!(ids.get(2), Some(30u32));
+}
+
+#[test]
+fn test_get_all_escrow_ids_iterative_pagination() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &1_000_000);
+
+    // Create 5 escrows
+    for i in 1u32..=5 {
+        client.create_escrow(&buyer, &seller, &token_id, &100, &i, &Some(3600));
+    }
+
+    // Page 0, limit 2 → IDs 1, 2
+    let page0 = client.get_all_escrow_ids_iterative(&0, &2);
+    assert_eq!(page0.len(), 2);
+    assert_eq!(page0.get(0), Some(1u32));
+    assert_eq!(page0.get(1), Some(2u32));
+
+    // Page 1, limit 2 → IDs 3, 4
+    let page1 = client.get_all_escrow_ids_iterative(&1, &2);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1.get(0), Some(3u32));
+    assert_eq!(page1.get(1), Some(4u32));
+
+    // Page 2, limit 2 → ID 5 (partial page)
+    let page2 = client.get_all_escrow_ids_iterative(&2, &2);
+    assert_eq!(page2.len(), 1);
+    assert_eq!(page2.get(0), Some(5u32));
+
+    // Page 3, limit 2 → empty (out of range)
+    let page3 = client.get_all_escrow_ids_iterative(&3, &2);
+    assert_eq!(page3.len(), 0);
+}
+
+#[test]
+fn test_get_all_escrow_ids_iterative_limit_capped_at_max_batch_size() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Create 5 escrows, request with limit > MAX_BATCH_SIZE (100)
+    for i in 1u32..=5 {
+        client.create_escrow(&buyer, &seller, &token_id, &100, &i, &Some(3600));
+    }
+
+    // limit=200 is silently capped to 100; all 5 escrows fit on page 0
+    let ids = client.get_all_escrow_ids_iterative(&0, &200);
+    assert_eq!(ids.len(), 5);
+}
+
+#[test]
+fn test_get_escrow_count_batch_creation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &1_000_000);
+
+    let params = EscrowCreateParams {
+        buyer: buyer.clone(),
+        seller: seller.clone(),
+        token: token_id.clone(),
+        amount: 100,
+        order_id: 0,
+        release_window: Some(3600),
+        ipfs_hash: None,
+        metadata_hash: None,
+    };
+
+    let mut batch = soroban_sdk::Vec::new(&env);
+    for i in 1u32..=3 {
+        let mut p = params.clone();
+        p.order_id = i;
+        batch.push_back(p);
+    }
+
+    client.create_batch_escrow(&1u64, &batch).unwrap();
+
+    assert_eq!(client.get_escrow_count(), 3);
+
+    let ids = client.get_all_escrow_ids_iterative(&0, &10);
+    assert_eq!(ids.len(), 3);
 }

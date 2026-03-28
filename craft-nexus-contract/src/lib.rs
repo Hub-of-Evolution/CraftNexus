@@ -117,6 +117,10 @@ pub enum DataKey {
     OnboardingContractAddress,
     /// Map of whitelisted token addresses (Address -> bool); enforcement active when non-empty
     WhitelistedTokens,
+    /// Ordered list of all escrow order IDs ever created (Vec<u32>); used for off-chain enumeration
+    AllEscrowIds,
+    /// Total count of escrows ever created; lightweight O(1) alternative to AllEscrowIds.len()
+    EscrowCount,
 }
 
 #[contracttype]
@@ -908,6 +912,26 @@ impl EscrowContract {
 
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
         Self::extend_persistent(&env, &(ESCROW, order_id));
+
+        // Update global escrow index for off-chain enumeration
+        let ids_key = DataKey::AllEscrowIds;
+        let mut all_ids: soroban_sdk::Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&ids_key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        all_ids.push_back(order_id);
+        env.storage().persistent().set(&ids_key, &all_ids);
+        Self::extend_persistent(&env, &ids_key);
+
+        let count_key = DataKey::EscrowCount;
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0u32);
+        env.storage().persistent().set(&count_key, &(count + 1));
+        Self::extend_persistent(&env, &count_key);
 
         // Update buyer's escrow list for indexing
         let buyer_key = DataKey::BuyerEscrows(buyer.clone());
@@ -2073,6 +2097,34 @@ impl EscrowContract {
             i += 1;
         }
 
+        // Consolidate global index updates for the entire batch
+        if results.len() > 0 {
+            let ids_key = DataKey::AllEscrowIds;
+            let mut all_ids: soroban_sdk::Vec<u32> = env
+                .storage()
+                .persistent()
+                .get(&ids_key)
+                .unwrap_or(soroban_sdk::Vec::new(&env));
+            for j in 0..results.len() {
+                if let Some(id) = results.get(j) {
+                    all_ids.push_back(id as u32);
+                }
+            }
+            env.storage().persistent().set(&ids_key, &all_ids);
+            Self::extend_persistent(&env, &ids_key);
+
+            let count_key = DataKey::EscrowCount;
+            let count: u32 = env
+                .storage()
+                .persistent()
+                .get(&count_key)
+                .unwrap_or(0u32);
+            env.storage()
+                .persistent()
+                .set(&count_key, &(count + results.len()));
+            Self::extend_persistent(&env, &count_key);
+        }
+
         Self::exit_reentry_guard(&env);
         Ok(results)
     }
@@ -2508,6 +2560,86 @@ impl EscrowContract {
         Self::extend_persistent(&env, &proposal_key);
 
         Ok(())
+    }
+
+    // ── Storage Explorer ──────────────────────────────────────
+
+    /// Returns the total number of escrows ever created on this platform.
+    ///
+    /// This is an O(1) read — safe to call at any scale. Pair with
+    /// `get_all_escrow_ids_iterative` to paginate the full ID set without
+    /// hitting Soroban CPU/memory resource limits.
+    pub fn get_escrow_count(env: Env) -> u32 {
+        let key = DataKey::EscrowCount;
+        let count = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u32>(&key)
+            .unwrap_or(0);
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(&env, &key);
+        }
+        count
+    }
+
+    /// Returns a page of all escrow order IDs created on the platform, in creation order.
+    ///
+    /// This is the recommended pattern for frontends to enumerate every escrow without
+    /// hitting Soroban resource limits. The function reads a bounded slice of the
+    /// globally maintained `AllEscrowIds` index; no on-chain loops proportional to
+    /// the total escrow count are performed at call time.
+    ///
+    /// # Usage pattern (frontend / off-chain)
+    /// ```text
+    /// total  = get_escrow_count()
+    /// pages  = ceil(total / PAGE_SIZE)
+    /// for p in 0..pages:
+    ///     ids = get_all_escrow_ids_iterative(p, PAGE_SIZE)
+    ///     for id in ids:
+    ///         escrow = get_escrow(id)
+    /// ```
+    ///
+    /// # Soroban RPC key browsing
+    /// To enumerate storage keys directly via the RPC without calling this function,
+    /// use the `getLedgerEntries` method or the experimental `getContractData` cursor
+    /// endpoint.  Relevant key patterns:
+    /// - `DataKey::AllEscrowIds`           – the full ordered ID list (this index)
+    /// - `DataKey::EscrowCount`            – u32 total count
+    /// - `(ESCROW, order_id: u32)`         – individual escrow struct
+    /// - `DataKey::BuyerEscrows(address)`  – Vec<u64> of IDs for a buyer
+    /// - `DataKey::SellerEscrows(address)` – Vec<u64> of IDs for a seller
+    ///
+    /// # Arguments
+    /// * `page`  – Zero-indexed page number
+    /// * `limit` – Page size; values above `MAX_BATCH_SIZE` (100) are silently capped
+    ///
+    /// # Returns
+    /// A `Vec<u32>` of escrow IDs for the requested page; empty when `page` is out of range.
+    pub fn get_all_escrow_ids_iterative(env: Env, page: u32, limit: u32) -> soroban_sdk::Vec<u32> {
+        let limit = limit.min(MAX_BATCH_SIZE);
+        if limit == 0 {
+            return soroban_sdk::Vec::new(&env);
+        }
+
+        let key = DataKey::AllEscrowIds;
+        let all_ids: soroban_sdk::Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(&env, &key);
+        }
+
+        let start = page * limit;
+        let len = all_ids.len();
+
+        if start >= len {
+            return soroban_sdk::Vec::new(&env);
+        }
+
+        let end = (start + limit).min(len);
+        all_ids.slice(start..end)
     }
 
     /// Accept the outstanding partial refund proposal for a disputed escrow.
