@@ -115,6 +115,8 @@ pub enum DataKey {
     MaxReleaseWindow,
     /// Address of the deployed onboarding contract for cross-contract reputation calls
     OnboardingContractAddress,
+    /// Map of whitelisted token addresses (Address -> bool); enforcement active when non-empty
+    WhitelistedTokens,
 }
 
 #[contracttype]
@@ -631,6 +633,79 @@ impl EscrowContract {
         Self::extend_persistent(&env, &DataKey::OnboardingContractAddress);
     }
 
+    /// Add a token to the platform whitelist (admin only).
+    ///
+    /// Once at least one token is whitelisted, only whitelisted tokens may be
+    /// used in escrow creation. The check is skipped when the whitelist is empty,
+    /// preserving backward compatibility.
+    pub fn whitelist_token(env: Env, token: Address) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let mut whitelist: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WhitelistedTokens)
+            .unwrap_or(Map::new(&env));
+        whitelist.set(token, true);
+        env.storage()
+            .persistent()
+            .set(&DataKey::WhitelistedTokens, &whitelist);
+        Self::extend_persistent(&env, &DataKey::WhitelistedTokens);
+    }
+
+    /// Remove a token from the platform whitelist (admin only).
+    ///
+    /// If the resulting whitelist is empty, whitelist enforcement is automatically
+    /// disabled (all tokens permitted again).
+    pub fn remove_token_from_whitelist(env: Env, token: Address) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let mut whitelist: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WhitelistedTokens)
+            .unwrap_or(Map::new(&env));
+        whitelist.remove(token);
+        env.storage()
+            .persistent()
+            .set(&DataKey::WhitelistedTokens, &whitelist);
+        Self::extend_persistent(&env, &DataKey::WhitelistedTokens);
+    }
+
+    /// Check whether a specific token is on the whitelist.
+    ///
+    /// Returns `true` if the token is explicitly whitelisted, OR if the whitelist
+    /// is empty (enforcement not yet active).
+    pub fn is_token_whitelisted(env: Env, token: Address) -> bool {
+        let whitelist: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WhitelistedTokens)
+            .unwrap_or(Map::new(&env));
+        if whitelist.is_empty() {
+            return true;
+        }
+        whitelist.get(token).unwrap_or(false)
+    }
+
+    /// Internal helper: panics with TokenNotWhitelisted when enforcement is active
+    /// and the token is not on the whitelist.
+    fn check_token_whitelisted(env: &Env, token: &Address) {
+        let whitelist: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WhitelistedTokens)
+            .unwrap_or(Map::new(env));
+        if whitelist.is_empty() {
+            return;
+        }
+        if !whitelist.get(token.clone()).unwrap_or(false) {
+            env.panic_with_error(Error::TokenNotWhitelisted);
+        }
+    }
+
     pub fn initialize(
         env: Env,
         platform_wallet: Address,
@@ -777,6 +852,9 @@ impl EscrowContract {
         if buyer == seller {
             env.panic_with_error(Error::SameBuyerSeller);
         }
+
+        // Validate token is whitelisted (#103)
+        Self::check_token_whitelisted(&env, &token);
 
         // Check artisan (seller) stake requirement (Issue #99)
         let config = Self::get_platform_config_internal(&env);
@@ -1722,6 +1800,16 @@ impl EscrowContract {
         // Validate buyer and seller are different
         if params.buyer == params.seller {
             return Err(Error::SameBuyerSeller);
+        }
+
+        // Validate token is whitelisted (#103)
+        let whitelist: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WhitelistedTokens)
+            .unwrap_or(Map::new(env));
+        if !whitelist.is_empty() && !whitelist.get(params.token.clone()).unwrap_or(false) {
+            return Err(Error::TokenNotWhitelisted);
         }
 
         // Validate release window bounds (#67)
