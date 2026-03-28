@@ -73,13 +73,17 @@ const ADMIN: Symbol = symbol_short!("ADMIN");
 const TTL_THRESHOLD: u32 = 10_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
 const TTL_EXTENSION: u32 = 518_400;
-/// Grace period for WASM upgrades (7 days in seconds)
-const WASM_UPGRADE_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 
-/// Maximum duration a dispute can remain open before it can be force-resolved (30 days in seconds)
-const MAX_DISPUTE_DURATION: u64 = 30 * 24 * 60 * 60;
-/// Cooldown period after staking before tokens can be unstaked (7 days in seconds)
-const STAKE_COOLDOWN: u64 = 7 * 24 * 60 * 60;
+// Default configuration constants (can be overridden via PlatformConfig)
+/// Default grace period for WASM upgrades (7 days in seconds)
+const DEFAULT_WASM_UPGRADE_COOLDOWN: u32 = 7 * 24 * 60 * 60;
+
+/// Default maximum duration a dispute can remain open before it can be force-resolved (30 days in seconds)
+const DEFAULT_MAX_DISPUTE_DURATION: u32 = 30 * 24 * 60 * 60;
+
+/// Default cooldown period after staking before tokens can be unstaked (7 days in seconds)
+const DEFAULT_STAKE_COOLDOWN: u32 = 7 * 24 * 60 * 60;
+
 /// Maximum platform fee in basis points (10000 = 100%)
 const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
 const MAX_TOTAL_RELEASE_WINDOW: u32 = 2592000; // 30 days
@@ -334,6 +338,9 @@ pub struct PlatformConfig {
     pub is_paused: bool,                // Circuit breaker (#96)
     pub min_stake_required: i128, // Minimum stake artisan must hold to create escrows (Issue #99)
     pub pending_admin: Option<Address>, // Pending admin for two-step transfer
+    pub wasm_upgrade_cooldown: u32, // Grace period for WASM upgrades in seconds (default: 7 days)
+    pub max_dispute_duration: u32, // Maximum duration a dispute can remain open in seconds (default: 30 days)
+    pub stake_cooldown: u32, // Cooldown period after staking before tokens can be unstaked in seconds (default: 7 days)
 }
 
 /// Partial refund proposal created during a dispute (Issue #101)
@@ -731,6 +738,9 @@ impl EscrowContract {
             is_paused: false,
             min_stake_required: 0,
             pending_admin: None,
+            wasm_upgrade_cooldown: DEFAULT_WASM_UPGRADE_COOLDOWN,
+            max_dispute_duration: DEFAULT_MAX_DISPUTE_DURATION,
+            stake_cooldown: DEFAULT_STAKE_COOLDOWN,
         };
 
         env.storage().persistent().set(&PLATFORM_FEE, &config);
@@ -1278,12 +1288,13 @@ impl EscrowContract {
     }
 
     /// Propose a new WASM code for the contract (admin only).
-    /// Sets a 7-day grace period before the upgrade can be executed (#95).
+    /// Sets a configurable grace period before the upgrade can be executed (#95).
     pub fn propose_upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
-        let upgrade_at = env.ledger().timestamp() + WASM_UPGRADE_COOLDOWN;
+        let config = Self::get_platform_config_internal(&env);
+        let upgrade_at = env.ledger().timestamp() + config.wasm_upgrade_cooldown as u64;
         let proposal = WasmUpgradeProposal {
             wasm_hash: new_wasm_hash,
             upgrade_at,
@@ -1670,6 +1681,9 @@ impl EscrowContract {
             is_paused: config.is_paused,
             min_stake_required: config.min_stake_required,
             pending_admin: config.pending_admin,
+            wasm_upgrade_cooldown: config.wasm_upgrade_cooldown,
+            max_dispute_duration: config.max_dispute_duration,
+            stake_cooldown: config.stake_cooldown,
         };
 
         env.storage().persistent().set(&PLATFORM_FEE, &new_config);
@@ -1699,6 +1713,9 @@ impl EscrowContract {
             is_paused: config.is_paused,
             min_stake_required: config.min_stake_required,
             pending_admin: config.pending_admin,
+            wasm_upgrade_cooldown: config.wasm_upgrade_cooldown,
+            max_dispute_duration: config.max_dispute_duration,
+            stake_cooldown: config.stake_cooldown,
         };
 
         env.storage().persistent().set(&PLATFORM_FEE, &new_config);
@@ -2291,7 +2308,7 @@ impl EscrowContract {
 
     /// Resolve a dispute that has exceeded the maximum dispute duration.
     ///
-    /// If the dispute has been open for longer than MAX_DISPUTE_DURATION, the full
+    /// If the dispute has been open for longer than the configured max_dispute_duration, the full
     /// escrow amount is refunded to the buyer and the escrow is marked Resolved.
     /// Returns DisputeExpired error if the deadline has not yet passed.
     pub fn resolve_expired_dispute(env: Env, order_id: u32) -> Result<(), Error> {
@@ -2310,8 +2327,9 @@ impl EscrowContract {
             .dispute_initiated_at
             .ok_or(Error::InvalidEscrowState)?;
         let current_time = env.ledger().timestamp();
-
-        if initiated_at + MAX_DISPUTE_DURATION > current_time {
+        
+        let config = Self::get_platform_config_internal(&env);
+        if initiated_at + config.max_dispute_duration as u64 > current_time {
             return Err(Error::DisputeExpired);
         }
 
@@ -2368,8 +2386,9 @@ impl EscrowContract {
         Self::extend_persistent(&env, &stake_key);
 
         // Set / reset cooldown end timestamp
+        let config = Self::get_platform_config_internal(&env);
         let cooldown_key = DataKey::StakeCooldownEnd(artisan.clone());
-        let cooldown_end = env.ledger().timestamp() + STAKE_COOLDOWN;
+        let cooldown_end = env.ledger().timestamp() + config.stake_cooldown as u64;
         env.storage().persistent().set(&cooldown_key, &cooldown_end);
         Self::extend_persistent(&env, &cooldown_key);
     }
@@ -2418,6 +2437,66 @@ impl EscrowContract {
         config.min_stake_required = min_stake;
         env.storage().persistent().set(&PLATFORM_FEE, &config);
         Self::extend_persistent(&env, &PLATFORM_FEE);
+        Ok(())
+    }
+
+    /// Admin sets the WASM upgrade cooldown period (in seconds).
+    pub fn set_wasm_upgrade_cooldown(env: Env, cooldown_seconds: u32) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let mut config = Self::get_platform_config_internal(&env);
+        let old_value = config.wasm_upgrade_cooldown;
+        config.wasm_upgrade_cooldown = cooldown_seconds;
+        env.storage().persistent().set(&PLATFORM_FEE, &config);
+        Self::extend_persistent(&env, &PLATFORM_FEE);
+
+        Self::emit_config_updated(
+            &env,
+            "wasm_upgrade_cooldown",
+            Self::string_from_u32(&env, old_value),
+            Self::string_from_u32(&env, cooldown_seconds),
+        );
+        Ok(())
+    }
+
+    /// Admin sets the maximum dispute duration (in seconds).
+    pub fn set_max_dispute_duration(env: Env, duration_seconds: u32) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let mut config = Self::get_platform_config_internal(&env);
+        let old_value = config.max_dispute_duration;
+        config.max_dispute_duration = duration_seconds;
+        env.storage().persistent().set(&PLATFORM_FEE, &config);
+        Self::extend_persistent(&env, &PLATFORM_FEE);
+
+        Self::emit_config_updated(
+            &env,
+            "max_dispute_duration",
+            Self::string_from_u32(&env, old_value),
+            Self::string_from_u32(&env, duration_seconds),
+        );
+        Ok(())
+    }
+
+    /// Admin sets the stake cooldown period (in seconds).
+    pub fn set_stake_cooldown(env: Env, cooldown_seconds: u32) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let mut config = Self::get_platform_config_internal(&env);
+        let old_value = config.stake_cooldown;
+        config.stake_cooldown = cooldown_seconds;
+        env.storage().persistent().set(&PLATFORM_FEE, &config);
+        Self::extend_persistent(&env, &PLATFORM_FEE);
+
+        Self::emit_config_updated(
+            &env,
+            "stake_cooldown",
+            Self::string_from_u32(&env, old_value),
+            Self::string_from_u32(&env, cooldown_seconds),
+        );
         Ok(())
     }
 
