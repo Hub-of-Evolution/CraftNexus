@@ -1725,7 +1725,7 @@ impl EscrowContract {
         let previous = config
             .moderator
             .clone()
-            .map(ConfigValue::Address)
+            .map(|address| ConfigValue::Address(address))
             .unwrap_or_else(|| ConfigValue::String(String::from_str(&env, "unset")));
         config.moderator = Some(moderator.clone());
         env.storage().persistent().set(&PLATFORM_FEE, &config);
@@ -1917,7 +1917,7 @@ impl EscrowContract {
     ) -> Map<u32, Error> {
         let mut errors: Map<u32, Error> = Map::new(&env);
 
-        if escrows.len() > MAX_BATCH_SIZE {
+        if escrows.len() > MAX_BATCH_SIZE as u32 {
             env.panic_with_error(Error::BatchOperationFailed);
         }
 
@@ -1959,14 +1959,14 @@ impl EscrowContract {
         Self::check_not_paused(&env);
 
         // Issue #111: Enforce batch size limit
-        if escrows.len() > MAX_BATCH_SIZE {
+        if escrows.len() > MAX_BATCH_SIZE as u32 {
             return Err(Error::BatchOperationFailed);
         }
 
         let mut results = soroban_sdk::Vec::new(&env);
 
         // Early exit for empty batch
-        if escrows.is_empty() {
+        if escrows.len() == 0 {
             Self::exit_reentry_guard(&env);
             return Ok(results);
         }
