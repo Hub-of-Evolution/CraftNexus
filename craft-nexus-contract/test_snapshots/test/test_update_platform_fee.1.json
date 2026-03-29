@@ -354,6 +354,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "max_dispute_duration"
+                      },
+                      "val": {
+                        "u32": 2592000
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "min_stake_required"
                       },
                       "val": {
@@ -389,6 +397,22 @@
                       },
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "stake_cooldown"
+                      },
+                      "val": {
+                        "u32": 604800
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "wasm_upgrade_cooldown"
+                      },
+                      "val": {
+                        "u32": 604800
                       }
                     }
                   ]
@@ -457,6 +481,49 @@
                     "hi": 0,
                     "lo": 8000000
                   }
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "AllEscrowIds"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "AllEscrowIds"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "vec": [
+                    {
+                      "u32": 1
+                    }
+                  ]
                 }
               }
             },
@@ -690,6 +757,45 @@
                       }
                     }
                   ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "EscrowCount"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "EscrowCount"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 1
                 }
               }
             },
@@ -1659,7 +1765,7 @@
                     "symbol": "field_name"
                   },
                   "val": {
-                    "string": "platform_fee_bps"
+                    "symbol": "platform_fee_bps"
                   }
                 },
                 {
@@ -1667,7 +1773,14 @@
                     "symbol": "new_value"
                   },
                   "val": {
-                    "string": "500"
+                    "vec": [
+                      {
+                        "symbol": "U32"
+                      },
+                      {
+                        "u32": 500
+                      }
+                    ]
                   }
                 },
                 {
@@ -1675,7 +1788,14 @@
                     "symbol": "old_value"
                   },
                   "val": {
-                    "string": "unset"
+                    "vec": [
+                      {
+                        "symbol": "String"
+                      },
+                      {
+                        "string": "unset"
+                      }
+                    ]
                   }
                 }
               ]
@@ -1707,7 +1827,7 @@
                     "symbol": "field_name"
                   },
                   "val": {
-                    "string": "platform_wallet"
+                    "symbol": "platform_wallet"
                   }
                 },
                 {
@@ -1715,7 +1835,14 @@
                     "symbol": "new_value"
                   },
                   "val": {
-                    "string": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                    "vec": [
+                      {
+                        "symbol": "Address"
+                      },
+                      {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      }
+                    ]
                   }
                 },
                 {
@@ -1723,7 +1850,14 @@
                     "symbol": "old_value"
                   },
                   "val": {
-                    "string": "unset"
+                    "vec": [
+                      {
+                        "symbol": "String"
+                      },
+                      {
+                        "string": "unset"
+                      }
+                    ]
                   }
                 }
               ]
@@ -1849,7 +1983,7 @@
                     "symbol": "field_name"
                   },
                   "val": {
-                    "string": "platform_fee_bps"
+                    "symbol": "platform_fee_bps"
                   }
                 },
                 {
@@ -1857,7 +1991,14 @@
                     "symbol": "new_value"
                   },
                   "val": {
-                    "string": "800"
+                    "vec": [
+                      {
+                        "symbol": "U32"
+                      },
+                      {
+                        "u32": 800
+                      }
+                    ]
                   }
                 },
                 {
@@ -1865,7 +2006,14 @@
                     "symbol": "old_value"
                   },
                   "val": {
-                    "string": "500"
+                    "vec": [
+                      {
+                        "symbol": "U32"
+                      },
+                      {
+                        "u32": 500
+                      }
+                    ]
                   }
                 }
               ]

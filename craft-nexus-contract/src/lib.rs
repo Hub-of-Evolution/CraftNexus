@@ -63,16 +63,18 @@ pub enum Error {
     ReentryDetected = 22,
     /// Release window is zero or negative
     ReleaseWindowTooShort = 23,
+    /// Staked funds can only be withdrawn in the original staking token
+    StakeTokenMismatch = 24,
     /// Recurring escrow not found
-    RecurringEscrowNotFound = 24,
+    RecurringEscrowNotFound = 25,
     /// Invalid frequency (must be > 0)
-    InvalidFrequency = 25,
+    InvalidFrequency = 26,
     /// Invalid duration (must be > 0)
-    InvalidDuration = 26,
+    InvalidDuration = 27,
     /// Release not yet due (too early)
-    ReleaseNotDue = 27,
+    ReleaseNotDue = 28,
     /// All periods already released
-    AllPeriodsReleased = 28,
+    AllPeriodsReleased = 29,
 }
 
 const ESCROW: Symbol = symbol_short!("ESCROW");
@@ -85,13 +87,17 @@ const ADMIN: Symbol = symbol_short!("ADMIN");
 const TTL_THRESHOLD: u32 = 10_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
 const TTL_EXTENSION: u32 = 518_400;
-/// Grace period for WASM upgrades (7 days in seconds)
-const WASM_UPGRADE_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 
-/// Maximum duration a dispute can remain open before it can be force-resolved (30 days in seconds)
-const MAX_DISPUTE_DURATION: u64 = 30 * 24 * 60 * 60;
-/// Cooldown period after staking before tokens can be unstaked (7 days in seconds)
-const STAKE_COOLDOWN: u64 = 7 * 24 * 60 * 60;
+// Default configuration constants (can be overridden via PlatformConfig)
+/// Default grace period for WASM upgrades (7 days in seconds)
+const DEFAULT_WASM_UPGRADE_COOLDOWN: u32 = 7 * 24 * 60 * 60;
+
+/// Default maximum duration a dispute can remain open before it can be force-resolved (30 days in seconds)
+const DEFAULT_MAX_DISPUTE_DURATION: u32 = 30 * 24 * 60 * 60;
+
+/// Default cooldown period after staking before tokens can be unstaked (7 days in seconds)
+const DEFAULT_STAKE_COOLDOWN: u32 = 7 * 24 * 60 * 60;
+
 /// Maximum platform fee in basis points (10000 = 100%)
 const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
 const MAX_TOTAL_RELEASE_WINDOW: u32 = 2592000; // 30 days
@@ -113,6 +119,8 @@ pub enum DataKey {
     ReferralRewardBps,
     /// Staked token amount for an artisan
     ArtisanStake(Address),
+    /// Token address backing an artisan's staked balance
+    ArtisanStakeToken(Address),
     /// Timestamp when the stake cooldown ends for an artisan
     StakeCooldownEnd(Address),
     /// Partial refund proposal for a disputed order
@@ -137,6 +145,10 @@ pub enum DataKey {
     BuyerRecurringEscrows(Address),
     /// List of recurring escrow IDs for an artisan (seller)
     ArtisanRecurringEscrows(Address),
+    /// Ordered list of all escrow order IDs ever created (Vec<u32>); used for off-chain enumeration
+    AllEscrowIds,
+    /// Total count of escrows ever created; lightweight O(1) alternative to AllEscrowIds.len()
+    EscrowCount,
 }
 
 #[contracttype]
@@ -258,10 +270,26 @@ pub struct EscrowResolvedEvent {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigValue {
+    U32(u32),
+    I128(i128),
+    Address(Address),
+    String(String),
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigUpdatedEvent {
-    pub field_name: String,
-    pub old_value: String,
-    pub new_value: String,
+    pub field_name: Symbol,
+    pub old_value: ConfigValue,
+    pub new_value: ConfigValue,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtisanFeeTierUpdatedEvent {
+    pub artisan: Address,
+    pub fee_bps: u32,
 }
 
 /// Event emitted for each successful escrow in a batch creation
@@ -354,6 +382,9 @@ pub struct PlatformConfig {
     pub is_paused: bool,                // Circuit breaker (#96)
     pub min_stake_required: i128, // Minimum stake artisan must hold to create escrows (Issue #99)
     pub pending_admin: Option<Address>, // Pending admin for two-step transfer
+    pub wasm_upgrade_cooldown: u32, // Grace period for WASM upgrades in seconds (default: 7 days)
+    pub max_dispute_duration: u32, // Maximum duration a dispute can remain open in seconds (default: 30 days)
+    pub stake_cooldown: u32, // Cooldown period after staking before tokens can be unstaked in seconds (default: 7 days)
 }
 
 /// Partial refund proposal created during a dispute (Issue #101)
@@ -470,55 +501,13 @@ pub struct RecurringEscrowCompletedEvent {
 #[soroban_sdk::contractclient(name = "OnboardingClient")]
 pub trait OnboardingInterface {
     fn update_reputation(env: Env, address: Address, successful_delta: u32, disputed_delta: u32);
-    fn update_user_metrics(env: Env, address: Address, escrow_count_delta: u32, volume_delta: i128);
+    fn update_user_metrics(env: Env, address: Address, escrow_count_delta: u32, volume_delta: i128, token_address: Address);
 }
 #[contract]
 pub struct EscrowContract;
 
 #[contractimpl]
 impl EscrowContract {
-    fn string_from_u32(env: &Env, value: u32) -> String {
-        let mut digits = [0u8; 10];
-        let mut value = value;
-        let mut index = digits.len();
-
-        if value == 0 {
-            return String::from_str(env, "0");
-        }
-
-        while value > 0 {
-            index -= 1;
-            digits[index] = b'0' + (value % 10) as u8;
-            value /= 10;
-        }
-
-        String::from_bytes(env, &digits[index..])
-    }
-
-    fn string_from_i128(env: &Env, value: i128) -> String {
-        let mut digits = [0u8; 40];
-        let negative = value < 0;
-        let mut value = if negative { -value } else { value } as u128;
-        let mut index = digits.len();
-
-        if value == 0 {
-            return String::from_str(env, "0");
-        }
-
-        while value > 0 {
-            index -= 1;
-            digits[index] = b'0' + (value % 10) as u8;
-            value /= 10;
-        }
-
-        if negative {
-            index -= 1;
-            digits[index] = b'-';
-        }
-
-        String::from_bytes(env, &digits[index..])
-    }
-
     /// Validate IPFS CID format (v0 and v1 with multibase prefixes).
     ///
     /// Supports:
@@ -595,8 +584,10 @@ impl EscrowContract {
         }
     }
 
-    fn validate_optional_metadata_hash(_metadata_hash: &Option<Bytes>) {
-        // Bytes length is not constrained by type; callers are responsible for content
+    fn validate_optional_metadata_hash(metadata_hash: &Option<Bytes>) {
+        if let Some(hash) = metadata_hash {
+            assert!(hash.len() == 32, "Invalid metadata hash length");
+        }
     }
 
     fn get_admin(env: &Env) -> Result<Address, Error> {
@@ -656,17 +647,27 @@ impl EscrowContract {
         );
     }
 
-    fn emit_config_updated(env: &Env, field_name: &str, old_value: String, new_value: String) {
+    fn emit_config_updated(env: &Env, field_name: &str, old_value: ConfigValue, new_value: ConfigValue) {
         env.events().publish(
             (
                 Symbol::new(env, "config_updated"),
                 Symbol::new(env, field_name),
             ),
             ConfigUpdatedEvent {
-                field_name: String::from_str(env, field_name),
+                field_name: Symbol::new(env, field_name),
                 old_value,
                 new_value,
             },
+        );
+    }
+
+    fn emit_artisan_fee_tier_updated(env: &Env, artisan: Address, fee_bps: u32) {
+        env.events().publish(
+            (
+                Symbol::new(env, "artisan_fee_tier_updated"),
+                artisan.clone(),
+            ),
+            ArtisanFeeTierUpdatedEvent { artisan, fee_bps },
         );
     }
 
@@ -849,6 +850,9 @@ impl EscrowContract {
             is_paused: false,
             min_stake_required: 0,
             pending_admin: None,
+            wasm_upgrade_cooldown: DEFAULT_WASM_UPGRADE_COOLDOWN,
+            max_dispute_duration: DEFAULT_MAX_DISPUTE_DURATION,
+            stake_cooldown: DEFAULT_STAKE_COOLDOWN,
         };
 
         env.storage().persistent().set(&PLATFORM_FEE, &config);
@@ -876,14 +880,14 @@ impl EscrowContract {
         Self::emit_config_updated(
             &env,
             "platform_fee_bps",
-            String::from_str(&env, "unset"),
-            Self::string_from_u32(&env, platform_fee_bps),
+            ConfigValue::String(String::from_str(&env, "unset")),
+            ConfigValue::U32(platform_fee_bps),
         );
         Self::emit_config_updated(
             &env,
             "platform_wallet",
-            String::from_str(&env, "unset"),
-            platform_wallet.to_string(),
+            ConfigValue::String(String::from_str(&env, "unset")),
+            ConfigValue::Address(platform_wallet),
         );
     }
 
@@ -1026,6 +1030,26 @@ impl EscrowContract {
 
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
         Self::extend_persistent(&env, &(ESCROW, order_id));
+
+        // Update global escrow index for off-chain enumeration
+        let ids_key = DataKey::AllEscrowIds;
+        let mut all_ids: soroban_sdk::Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&ids_key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        all_ids.push_back(order_id);
+        env.storage().persistent().set(&ids_key, &all_ids);
+        Self::extend_persistent(&env, &ids_key);
+
+        let count_key = DataKey::EscrowCount;
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0u32);
+        env.storage().persistent().set(&count_key, &(count + 1));
+        Self::extend_persistent(&env, &count_key);
 
         // Update buyer's escrow list for indexing
         let buyer_key = DataKey::BuyerEscrows(buyer.clone());
@@ -1264,7 +1288,7 @@ impl EscrowContract {
         if let Some(client) = Self::get_onboarding_client(&env) {
             client.update_reputation(&escrow.seller, &1u32, &0u32);
             client.update_reputation(&escrow.buyer, &1u32, &0u32);
-            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount);
+            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount, &escrow.token);
         }
     }
 
@@ -1343,7 +1367,7 @@ impl EscrowContract {
         if let Some(client) = Self::get_onboarding_client(&env) {
             client.update_reputation(&escrow.seller, &1u32, &0u32);
             client.update_reputation(&escrow.buyer, &1u32, &0u32);
-            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount);
+            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount, &escrow.token);
         }
     }
 
@@ -1396,12 +1420,13 @@ impl EscrowContract {
     }
 
     /// Propose a new WASM code for the contract (admin only).
-    /// Sets a 7-day grace period before the upgrade can be executed (#95).
+    /// Sets a configurable grace period before the upgrade can be executed (#95).
     pub fn propose_upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
-        let upgrade_at = env.ledger().timestamp() + WASM_UPGRADE_COOLDOWN;
+        let config = Self::get_platform_config_internal(&env);
+        let upgrade_at = env.ledger().timestamp() + config.wasm_upgrade_cooldown as u64;
         let proposal = WasmUpgradeProposal {
             wasm_hash: new_wasm_hash,
             upgrade_at,
@@ -1525,7 +1550,7 @@ impl EscrowContract {
         if let Some(client) = Self::get_onboarding_client(&env) {
             client.update_reputation(&escrow.buyer, &1u32, &0u32);
             client.update_reputation(&escrow.seller, &0u32, &1u32);
-            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount);
+            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount, &escrow.token);
         }
         Ok(())
     }
@@ -1755,13 +1780,13 @@ impl EscrowContract {
                     // Seller wins dispute: successful for seller, disputed for buyer
                     client.update_reputation(&escrow.seller, &1u32, &0u32);
                     client.update_reputation(&escrow.buyer, &0u32, &1u32);
-                    client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount);
+                    client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount, &escrow.token);
                 }
                 Resolution::RefundToBuyer => {
                     // Buyer wins dispute: successful for buyer, disputed for seller
                     client.update_reputation(&escrow.buyer, &1u32, &0u32);
                     client.update_reputation(&escrow.seller, &0u32, &1u32);
-                    client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount);
+                    client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount, &escrow.token);
                 }
             }
         }
@@ -1788,6 +1813,9 @@ impl EscrowContract {
             is_paused: config.is_paused,
             min_stake_required: config.min_stake_required,
             pending_admin: config.pending_admin,
+            wasm_upgrade_cooldown: config.wasm_upgrade_cooldown,
+            max_dispute_duration: config.max_dispute_duration,
+            stake_cooldown: config.stake_cooldown,
         };
 
         env.storage().persistent().set(&PLATFORM_FEE, &new_config);
@@ -1795,8 +1823,8 @@ impl EscrowContract {
         Self::emit_config_updated(
             &env,
             "platform_fee_bps",
-            Self::string_from_u32(&env, config.platform_fee_bps),
-            Self::string_from_u32(&env, new_fee_bps),
+            ConfigValue::U32(config.platform_fee_bps),
+            ConfigValue::U32(new_fee_bps),
         );
     }
 
@@ -1817,6 +1845,9 @@ impl EscrowContract {
             is_paused: config.is_paused,
             min_stake_required: config.min_stake_required,
             pending_admin: config.pending_admin,
+            wasm_upgrade_cooldown: config.wasm_upgrade_cooldown,
+            max_dispute_duration: config.max_dispute_duration,
+            stake_cooldown: config.stake_cooldown,
         };
 
         env.storage().persistent().set(&PLATFORM_FEE, &new_config);
@@ -1824,8 +1855,8 @@ impl EscrowContract {
         Self::emit_config_updated(
             &env,
             "platform_wallet",
-            config.platform_wallet.to_string(),
-            new_config.platform_wallet.to_string(),
+            ConfigValue::Address(config.platform_wallet),
+            ConfigValue::Address(new_config.platform_wallet),
         );
     }
 
@@ -1835,12 +1866,12 @@ impl EscrowContract {
         let previous = config
             .moderator
             .clone()
-            .map(|address| address.to_string())
-            .unwrap_or_else(|| String::from_str(&env, "unset"));
+            .map(|address| ConfigValue::Address(address))
+            .unwrap_or_else(|| ConfigValue::String(String::from_str(&env, "unset")));
         config.moderator = Some(moderator.clone());
         env.storage().persistent().set(&PLATFORM_FEE, &config);
         Self::extend_persistent(&env, &PLATFORM_FEE);
-        Self::emit_config_updated(&env, "moderator", previous, moderator.to_string());
+        Self::emit_config_updated(&env, "moderator", previous, ConfigValue::Address(moderator));
     }
 
     /// Set the minimum escrow amount for a specific token (admin only)
@@ -1860,8 +1891,8 @@ impl EscrowContract {
         Self::emit_config_updated(
             &env,
             "min_escrow_amount",
-            Self::string_from_i128(&env, old_amount),
-            Self::string_from_i128(&env, min_amount),
+            ConfigValue::I128(old_amount),
+            ConfigValue::I128(min_amount),
         );
         Ok(())
     }
@@ -1947,7 +1978,11 @@ impl EscrowContract {
             }
         }
 
-        // metadata_hash is Option<Bytes>; type guarantees 32 bytes, no runtime check needed
+        if let Some(hash) = &params.metadata_hash {
+            if hash.len() != 32 {
+                return Err(Error::InvalidFee); // Use invalid fee as proxy for invalid metadata hash
+            }
+        }
 
         Ok(())
     }
@@ -2191,6 +2226,34 @@ impl EscrowContract {
             i += 1;
         }
 
+        // Consolidate global index updates for the entire batch
+        if results.len() > 0 {
+            let ids_key = DataKey::AllEscrowIds;
+            let mut all_ids: soroban_sdk::Vec<u32> = env
+                .storage()
+                .persistent()
+                .get(&ids_key)
+                .unwrap_or(soroban_sdk::Vec::new(&env));
+            for j in 0..results.len() {
+                if let Some(id) = results.get(j) {
+                    all_ids.push_back(id as u32);
+                }
+            }
+            env.storage().persistent().set(&ids_key, &all_ids);
+            Self::extend_persistent(&env, &ids_key);
+
+            let count_key = DataKey::EscrowCount;
+            let count: u32 = env
+                .storage()
+                .persistent()
+                .get(&count_key)
+                .unwrap_or(0u32);
+            env.storage()
+                .persistent()
+                .set(&count_key, &(count + results.len()));
+            Self::extend_persistent(&env, &count_key);
+        }
+
         Self::exit_reentry_guard(&env);
         Ok(results)
     }
@@ -2362,7 +2425,8 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::ArtisanFeeTier(artisan.clone()), &fee_bps);
-        Self::extend_persistent(&env, &DataKey::ArtisanFeeTier(artisan));
+        Self::extend_persistent(&env, &DataKey::ArtisanFeeTier(artisan.clone()));
+        Self::emit_artisan_fee_tier_updated(&env, artisan, fee_bps);
     }
 
     /// Get the effective fee basis points for a seller.
@@ -2409,7 +2473,7 @@ impl EscrowContract {
 
     /// Resolve a dispute that has exceeded the maximum dispute duration.
     ///
-    /// If the dispute has been open for longer than MAX_DISPUTE_DURATION, the full
+    /// If the dispute has been open for longer than the configured max_dispute_duration, the full
     /// escrow amount is refunded to the buyer and the escrow is marked Resolved.
     /// Returns DisputeExpired error if the deadline has not yet passed.
     pub fn resolve_expired_dispute(env: Env, order_id: u32) -> Result<(), Error> {
@@ -2429,7 +2493,8 @@ impl EscrowContract {
             .ok_or(Error::InvalidEscrowState)?;
         let current_time = env.ledger().timestamp();
 
-        if initiated_at + MAX_DISPUTE_DURATION > current_time {
+        let config = Self::get_platform_config_internal(&env);
+        if initiated_at + config.max_dispute_duration as u64 > current_time {
             return Err(Error::DisputeExpired);
         }
 
@@ -2466,6 +2531,9 @@ impl EscrowContract {
     ///
     /// The artisan transfers `amount` of `token` to the contract. The stake is stored
     /// and a cooldown timer is set so the tokens cannot be unstaked immediately.
+    ///
+    /// Staked balances remain owned by the artisan. The contract does not accrue,
+    /// distribute, or sweep interest/yield from these reserved funds into platform fees.
     pub fn stake_tokens(env: Env, artisan: Address, token: Address, amount: i128) {
         artisan.require_auth();
 
@@ -2479,20 +2547,38 @@ impl EscrowContract {
 
         // Accumulate stake
         let stake_key = DataKey::ArtisanStake(artisan.clone());
+        let stake_token_key = DataKey::ArtisanStakeToken(artisan.clone());
         let current_stake: i128 = env.storage().persistent().get(&stake_key).unwrap_or(0);
+        if current_stake > 0 {
+            let staked_token: Address = env
+                .storage()
+                .persistent()
+                .get(&stake_token_key)
+                .expect("stake token must exist");
+            if staked_token != token {
+                env.panic_with_error(Error::StakeTokenMismatch);
+            }
+        } else {
+            env.storage().persistent().set(&stake_token_key, &token);
+            Self::extend_persistent(&env, &stake_token_key);
+        }
         env.storage()
             .persistent()
             .set(&stake_key, &(current_stake + amount));
         Self::extend_persistent(&env, &stake_key);
 
         // Set / reset cooldown end timestamp
+        let config = Self::get_platform_config_internal(&env);
         let cooldown_key = DataKey::StakeCooldownEnd(artisan.clone());
-        let cooldown_end = env.ledger().timestamp() + STAKE_COOLDOWN;
+        let cooldown_end = env.ledger().timestamp() + config.stake_cooldown as u64;
         env.storage().persistent().set(&cooldown_key, &cooldown_end);
         Self::extend_persistent(&env, &cooldown_key);
     }
 
     /// Unstake previously staked tokens after the cooldown period has elapsed.
+    ///
+    /// Stakes can only be returned in the exact token originally deposited, which
+    /// prevents reserved artisan collateral from being treated as platform-managed fees.
     pub fn unstake_tokens(env: Env, artisan: Address, token: Address) {
         artisan.require_auth();
 
@@ -2504,14 +2590,24 @@ impl EscrowContract {
         }
 
         let stake_key = DataKey::ArtisanStake(artisan.clone());
+        let stake_token_key = DataKey::ArtisanStakeToken(artisan.clone());
         let stake: i128 = env.storage().persistent().get(&stake_key).unwrap_or(0);
+        let staked_token: Address = env
+            .storage()
+            .persistent()
+            .get(&stake_token_key)
+            .expect("stake token must exist");
 
         if stake <= 0 {
             env.panic_with_error(Error::AmountBelowMinimum);
         }
+        if staked_token != token {
+            env.panic_with_error(Error::StakeTokenMismatch);
+        }
 
-        // Clear stake and cooldown
+        // Clear stake metadata before returning the reserved artisan funds.
         env.storage().persistent().set(&stake_key, &0i128);
+        env.storage().persistent().remove(&stake_token_key);
         env.storage().persistent().remove(&cooldown_key);
 
         // Return tokens to artisan
@@ -2536,6 +2632,66 @@ impl EscrowContract {
         config.min_stake_required = min_stake;
         env.storage().persistent().set(&PLATFORM_FEE, &config);
         Self::extend_persistent(&env, &PLATFORM_FEE);
+        Ok(())
+    }
+
+    /// Admin sets the WASM upgrade cooldown period (in seconds).
+    pub fn set_wasm_upgrade_cooldown(env: Env, cooldown_seconds: u32) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let mut config = Self::get_platform_config_internal(&env);
+        let old_value = config.wasm_upgrade_cooldown;
+        config.wasm_upgrade_cooldown = cooldown_seconds;
+        env.storage().persistent().set(&PLATFORM_FEE, &config);
+        Self::extend_persistent(&env, &PLATFORM_FEE);
+
+        Self::emit_config_updated(
+            &env,
+            "wasm_upgrade_cooldown",
+            ConfigValue::U32(old_value),
+            ConfigValue::U32(cooldown_seconds),
+        );
+        Ok(())
+    }
+
+    /// Admin sets the maximum dispute duration (in seconds).
+    pub fn set_max_dispute_duration(env: Env, duration_seconds: u32) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let mut config = Self::get_platform_config_internal(&env);
+        let old_value = config.max_dispute_duration;
+        config.max_dispute_duration = duration_seconds;
+        env.storage().persistent().set(&PLATFORM_FEE, &config);
+        Self::extend_persistent(&env, &PLATFORM_FEE);
+
+        Self::emit_config_updated(
+            &env,
+            "max_dispute_duration",
+            ConfigValue::U32(old_value),
+            ConfigValue::U32(duration_seconds),
+        );
+        Ok(())
+    }
+
+    /// Admin sets the stake cooldown period (in seconds).
+    pub fn set_stake_cooldown(env: Env, cooldown_seconds: u32) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let mut config = Self::get_platform_config_internal(&env);
+        let old_value = config.stake_cooldown;
+        config.stake_cooldown = cooldown_seconds;
+        env.storage().persistent().set(&PLATFORM_FEE, &config);
+        Self::extend_persistent(&env, &PLATFORM_FEE);
+
+        Self::emit_config_updated(
+            &env,
+            "stake_cooldown",
+            ConfigValue::U32(old_value),
+            ConfigValue::U32(cooldown_seconds),
+        );
         Ok(())
     }
 
@@ -2626,6 +2782,86 @@ impl EscrowContract {
         Self::extend_persistent(&env, &proposal_key);
 
         Ok(())
+    }
+
+    // ── Storage Explorer ──────────────────────────────────────
+
+    /// Returns the total number of escrows ever created on this platform.
+    ///
+    /// This is an O(1) read — safe to call at any scale. Pair with
+    /// `get_all_escrow_ids_iterative` to paginate the full ID set without
+    /// hitting Soroban CPU/memory resource limits.
+    pub fn get_escrow_count(env: Env) -> u32 {
+        let key = DataKey::EscrowCount;
+        let count = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u32>(&key)
+            .unwrap_or(0);
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(&env, &key);
+        }
+        count
+    }
+
+    /// Returns a page of all escrow order IDs created on the platform, in creation order.
+    ///
+    /// This is the recommended pattern for frontends to enumerate every escrow without
+    /// hitting Soroban resource limits. The function reads a bounded slice of the
+    /// globally maintained `AllEscrowIds` index; no on-chain loops proportional to
+    /// the total escrow count are performed at call time.
+    ///
+    /// # Usage pattern (frontend / off-chain)
+    /// ```text
+    /// total  = get_escrow_count()
+    /// pages  = ceil(total / PAGE_SIZE)
+    /// for p in 0..pages:
+    ///     ids = get_all_escrow_ids_iterative(p, PAGE_SIZE)
+    ///     for id in ids:
+    ///         escrow = get_escrow(id)
+    /// ```
+    ///
+    /// # Soroban RPC key browsing
+    /// To enumerate storage keys directly via the RPC without calling this function,
+    /// use the `getLedgerEntries` method or the experimental `getContractData` cursor
+    /// endpoint.  Relevant key patterns:
+    /// - `DataKey::AllEscrowIds`           – the full ordered ID list (this index)
+    /// - `DataKey::EscrowCount`            – u32 total count
+    /// - `(ESCROW, order_id: u32)`         – individual escrow struct
+    /// - `DataKey::BuyerEscrows(address)`  – Vec<u64> of IDs for a buyer
+    /// - `DataKey::SellerEscrows(address)` – Vec<u64> of IDs for a seller
+    ///
+    /// # Arguments
+    /// * `page`  – Zero-indexed page number
+    /// * `limit` – Page size; values above `MAX_BATCH_SIZE` (100) are silently capped
+    ///
+    /// # Returns
+    /// A `Vec<u32>` of escrow IDs for the requested page; empty when `page` is out of range.
+    pub fn get_all_escrow_ids_iterative(env: Env, page: u32, limit: u32) -> soroban_sdk::Vec<u32> {
+        let limit = limit.min(MAX_BATCH_SIZE);
+        if limit == 0 {
+            return soroban_sdk::Vec::new(&env);
+        }
+
+        let key = DataKey::AllEscrowIds;
+        let all_ids: soroban_sdk::Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(&env, &key);
+        }
+
+        let start = page * limit;
+        let len = all_ids.len();
+
+        if start >= len {
+            return soroban_sdk::Vec::new(&env);
+        }
+
+        let end = (start + limit).min(len);
+        all_ids.slice(start..end)
     }
 
     /// Accept the outstanding partial refund proposal for a disputed escrow.

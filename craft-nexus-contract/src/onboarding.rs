@@ -1,5 +1,6 @@
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, Map, String, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, token, Address, Env, Map, String, Symbol,
+    Vec,
 };
 use soroban_sdk::{IntoVal, TryFromVal, Val};
 
@@ -634,11 +635,7 @@ impl OnboardingContract {
     /// true if user has onboarded, false otherwise
     pub fn is_onboarded(env: Env, user: Address) -> bool {
         let key = DataKey::UserProfile(user.clone());
-        let has = env.storage().persistent().has(&key);
-        if has {
-            let _ = Self::get_user_profile(&env, user);
-        }
-        has
+        env.storage().persistent().has(&key)
     }
 
     /// Get user's role
@@ -861,6 +858,7 @@ impl OnboardingContract {
         address: Address,
         escrow_count_delta: u32,
         volume_delta: i128,
+        token_address: Address,
     ) {
         let config: OnboardingConfig = env
             .storage()
@@ -885,7 +883,23 @@ impl OnboardingContract {
         metrics.total_escrow_count = metrics
             .total_escrow_count
             .saturating_add(escrow_count_delta);
-        metrics.total_volume = metrics.total_volume.saturating_add(volume_delta);
+
+        // Normalize volume to 7 decimals (base decimal for auto-verification thresholds)
+        let token_client = token::Client::new(&env, &token_address);
+        let token_decimals = token_client.decimals();
+        let base_decimals = 7u32;
+
+        let normalized_delta = if token_decimals < base_decimals {
+            let diff = base_decimals - token_decimals;
+            volume_delta.saturating_mul(10i128.pow(diff))
+        } else if token_decimals > base_decimals {
+            let diff = token_decimals - base_decimals;
+            volume_delta / 10i128.pow(diff)
+        } else {
+            volume_delta
+        };
+
+        metrics.total_volume = metrics.total_volume.saturating_add(normalized_delta);
 
         env.storage().persistent().set(&key, &metrics);
         Self::extend_persistent(&env, &key);
@@ -1056,23 +1070,27 @@ impl OnboardingContract {
         env.storage().persistent().set(&profile_key, &profile);
         Self::extend_persistent(&env, &profile_key);
 
-        // Remove from queue
+        // Remove from queue - optimized to avoid full vector rebuild
         let queue_key = DataKey::VerificationQueue;
-        let queue: Vec<Address> = env
+        let mut queue: Vec<Address> = env
             .storage()
             .persistent()
             .get(&queue_key)
             .unwrap_or(Vec::new(&env));
-        let mut new_queue: Vec<Address> = Vec::new(&env);
-        for i in 0..queue.len() {
-            if let Some(addr) = queue.get(i) {
-                if addr != user {
-                    new_queue.push_back(addr);
+        
+        // Find and remove the user in a single pass
+        if let Some(index) = (0..queue.len()).find(|&i| queue.get(i) == Some(user.clone())) {
+            // Swap with last element and pop (O(1) removal)
+            let last_idx = queue.len() - 1;
+            if index != last_idx {
+                if let Some(last_addr) = queue.get(last_idx) {
+                    queue.set(index, last_addr);
                 }
             }
+            queue.pop_back();
+            env.storage().persistent().set(&queue_key, &queue);
+            Self::extend_persistent(&env, &queue_key);
         }
-        env.storage().persistent().set(&queue_key, &new_queue);
-        Self::extend_persistent(&env, &queue_key);
 
         // Append to history
         let action = if approve { "approved" } else { "rejected" };
