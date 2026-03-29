@@ -1120,7 +1120,7 @@
               }
             ],
             "data": {
-              "string": "caught panic 'No pending admin' from contract function 'Symbol(obj#241)'"
+              "string": "caught panic '' from contract function 'Symbol(obj#241)'"
             }
           }
         }

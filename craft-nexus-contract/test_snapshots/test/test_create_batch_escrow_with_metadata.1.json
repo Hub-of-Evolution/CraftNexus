@@ -667,6 +667,96 @@
             "key": {
               "vec": [
                 {
+                  "symbol": "ActiveObligations"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ActiveObligations"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 3
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "ActiveObligations"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ActiveObligations"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 3
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
                   "symbol": "AllEscrowIds"
                 }
               ]
@@ -2692,7 +2782,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "escrow_created"
+                "symbol": "escrow"
               },
               {
                 "u64": 500
@@ -2702,6 +2792,14 @@
               "map": [
                 {
                   "key": {
+                    "symbol": "action"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "amount"
                   },
                   "val": {
@@ -2725,28 +2823,6 @@
                   },
                   "val": {
                     "u64": 500
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "ipfs_hash"
-                  },
-                  "val": "void"
-                },
-                {
-                  "key": {
-                    "symbol": "metadata_hash"
-                  },
-                  "val": {
-                    "bytes": "836dc94468c731a95f54e3e9ad77f22bc08642d606b4fc62445ad9f5f2641d1a"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "release_window"
-                  },
-                  "val": {
-                    "u32": 3600
                   }
                 },
                 {
@@ -2789,14 +2865,22 @@
           "v0": {
             "topics": [
               {
-                "symbol": "batch_escrow_created"
+                "symbol": "escrow"
               },
               {
-                "u64": 3
+                "u64": 500
               }
             ],
             "data": {
               "map": [
+                {
+                  "key": {
+                    "symbol": "action"
+                  },
+                  "val": {
+                    "u32": 6
+                  }
+                },
                 {
                   "key": {
                     "symbol": "amount"
@@ -2806,14 +2890,6 @@
                       "hi": 0,
                       "lo": 10000
                     }
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "batch_id"
-                  },
-                  "val": {
-                    "u64": 3
                   }
                 },
                 {
@@ -2964,7 +3040,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "escrow_created"
+                "symbol": "escrow"
               },
               {
                 "u64": 501
@@ -2974,6 +3050,14 @@
               "map": [
                 {
                   "key": {
+                    "symbol": "action"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "amount"
                   },
                   "val": {
@@ -2997,28 +3081,6 @@
                   },
                   "val": {
                     "u64": 501
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "ipfs_hash"
-                  },
-                  "val": "void"
-                },
-                {
-                  "key": {
-                    "symbol": "metadata_hash"
-                  },
-                  "val": {
-                    "bytes": "836dc94468c731a95f54e3e9ad77f22bc08642d606b4fc62445ad9f5f2641d1a"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "release_window"
-                  },
-                  "val": {
-                    "u32": 3600
                   }
                 },
                 {
@@ -3061,14 +3123,22 @@
           "v0": {
             "topics": [
               {
-                "symbol": "batch_escrow_created"
+                "symbol": "escrow"
               },
               {
-                "u64": 3
+                "u64": 501
               }
             ],
             "data": {
               "map": [
+                {
+                  "key": {
+                    "symbol": "action"
+                  },
+                  "val": {
+                    "u32": 6
+                  }
+                },
                 {
                   "key": {
                     "symbol": "amount"
@@ -3078,14 +3148,6 @@
                       "hi": 0,
                       "lo": 10000
                     }
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "batch_id"
-                  },
-                  "val": {
-                    "u64": 3
                   }
                 },
                 {
@@ -3236,7 +3298,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "escrow_created"
+                "symbol": "escrow"
               },
               {
                 "u64": 502
@@ -3244,6 +3306,14 @@
             ],
             "data": {
               "map": [
+                {
+                  "key": {
+                    "symbol": "action"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
                 {
                   "key": {
                     "symbol": "amount"
@@ -3273,28 +3343,6 @@
                 },
                 {
                   "key": {
-                    "symbol": "ipfs_hash"
-                  },
-                  "val": "void"
-                },
-                {
-                  "key": {
-                    "symbol": "metadata_hash"
-                  },
-                  "val": {
-                    "bytes": "836dc94468c731a95f54e3e9ad77f22bc08642d606b4fc62445ad9f5f2641d1a"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "release_window"
-                  },
-                  "val": {
-                    "u32": 3600
-                  }
-                },
-                {
-                  "key": {
                     "symbol": "seller"
                   },
                   "val": {
@@ -3333,14 +3381,22 @@
           "v0": {
             "topics": [
               {
-                "symbol": "batch_escrow_created"
+                "symbol": "escrow"
               },
               {
-                "u64": 3
+                "u64": 502
               }
             ],
             "data": {
               "map": [
+                {
+                  "key": {
+                    "symbol": "action"
+                  },
+                  "val": {
+                    "u32": 6
+                  }
+                },
                 {
                   "key": {
                     "symbol": "amount"
@@ -3350,14 +3406,6 @@
                       "hi": 0,
                       "lo": 10000
                     }
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "batch_id"
-                  },
-                  "val": {
-                    "u64": 3
                   }
                 },
                 {
