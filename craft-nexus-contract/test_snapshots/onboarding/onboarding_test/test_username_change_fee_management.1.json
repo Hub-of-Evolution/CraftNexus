@@ -263,6 +263,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::Error;
 use soroban_sdk::{
     testutils::{Address as _, Events as _},
     Address, Env, String,
@@ -767,6 +768,7 @@ fn test_get_user_migrates_legacy_profile() {
         is_verified: false,
         successful_trades: 0,
         disputed_trades: 0,
+        portfolio_cid: None,
     };
 
     env.as_contract(&client.address, || {
@@ -820,6 +822,22 @@ fn test_change_username_success() {
     // Verify can retrieve user by new username
     let retrieved = client.get_user_by_username(&new_username);
     assert_eq!(retrieved.address, user);
+}
+
+#[test]
+#[should_panic(expected = "Username change cooldown active")]
+fn test_change_username_cooldown_active() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(&user, &String::from_str(&env, "original_user"), &UserRole::Buyer);
+    client.change_username(&user, &String::from_str(&env, "first_change"));
+
+    // Immediate second change should be blocked by cooldown.
+    client.change_username(&user, &String::from_str(&env, "second_change"));
 }
 
 #[test]
@@ -1330,4 +1348,246 @@ fn test_volume_normalization_across_decimals() {
     //     let diff = base_decimals - token_decimals;
     //     volume_delta.saturating_mul(10i128.pow(diff))
     // ...
+}
+
+// ===== Portfolio Tests (Issue #112) =====
+
+#[test]
+fn test_update_portfolio_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_jane");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Update portfolio with valid CIDv0
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    let updated = client.update_portfolio(&user, &Some(portfolio_cid.clone()));
+
+    assert_eq!(updated.portfolio_cid, Some(portfolio_cid));
+    assert_eq!(updated.role, UserRole::Artisan);
+}
+
+#[test]
+fn test_update_portfolio_with_cidv1() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_john");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Update portfolio with valid CIDv1 (base32)
+    let portfolio_cid = String::from_str(&env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
+    let updated = client.update_portfolio(&user, &Some(portfolio_cid.clone()));
+
+    assert_eq!(updated.portfolio_cid, Some(portfolio_cid));
+}
+
+#[test]
+fn test_update_portfolio_remove() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_bob");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Set portfolio
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    client.update_portfolio(&user, &Some(portfolio_cid));
+
+    // Remove portfolio
+    let updated = client.update_portfolio(&user, &None);
+    assert_eq!(updated.portfolio_cid, None);
+}
+
+#[test]
+#[should_panic(expected = "Only artisans can update portfolio")]
+fn test_update_portfolio_buyer_cannot_update() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "buyer_jane");
+
+    // Onboard as buyer
+    client.onboard_user(&user, &username, &UserRole::Buyer);
+
+    // Try to update portfolio (should fail)
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    client.update_portfolio(&user, &Some(portfolio_cid));
+}
+
+#[test]
+#[should_panic(expected = "Invalid portfolio CID format")]
+fn test_update_portfolio_invalid_cid() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_alice");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Try to update with invalid CID
+    let invalid_cid = String::from_str(&env, "invalid_cid_format");
+    client.update_portfolio(&user, &Some(invalid_cid));
+}
+
+#[test]
+#[should_panic(expected = "User not onboarded")]
+fn test_update_portfolio_not_onboarded() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    // Try to update portfolio without onboarding
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    client.update_portfolio(&user, &Some(portfolio_cid));
+}
+
+#[test]
+fn test_portfolio_accessible_via_get_user() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_carol");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Update portfolio
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    client.update_portfolio(&user, &Some(portfolio_cid.clone()));
+
+    // Verify portfolio is accessible via get_user
+    let profile = client.get_user(&user);
+    assert_eq!(profile.portfolio_cid, Some(portfolio_cid));
+}
+
+#[test]
+fn test_portfolio_accessible_via_get_user_by_username() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_dave");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Update portfolio
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    client.update_portfolio(&user, &Some(portfolio_cid.clone()));
+
+    // Verify portfolio is accessible via get_user_by_username
+    let profile = client.get_user_by_username(&username);
+    assert_eq!(profile.portfolio_cid, Some(portfolio_cid));
+}
+
+#[test]
+fn test_portfolio_none_by_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_eve");
+
+    // Onboard as artisan
+    let profile = client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Verify portfolio is None by default
+    assert_eq!(profile.portfolio_cid, None);
+}
+
+#[test]
+fn test_portfolio_preserves_other_fields() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_frank");
+
+    // Onboard as artisan
+    let original = client.onboard_user(&user, &username, &UserRole::Artisan);
+    assert_eq!(original.role, UserRole::Artisan);
+    assert_eq!(original.is_verified, false);
+
+    // Update portfolio
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    let updated = client.update_portfolio(&user, &Some(portfolio_cid));
+
+    // Verify other fields are preserved
+    assert_eq!(updated.role, UserRole::Artisan);
+    assert_eq!(updated.is_verified, false);
+    assert_eq!(updated.address, user);
+    assert_eq!(updated.registered_at, original.registered_at);
+}
+
+// ===== Error Enum Tests (Issue #120) =====
+
+#[test]
+fn test_error_enum_has_specific_variants() {
+    // Verify that specific error variants exist
+    assert_eq!(Error::InvalidIpfsHash as u32, 25);
+    assert_eq!(Error::InvalidMetadataHash as u32, 26);
+    assert_eq!(Error::BatchLimitExceeded as u32, 27);
+    assert_eq!(Error::InvalidPortfolioCid as u32, 28);
+    assert_eq!(Error::NotAnArtisan as u32, 29);
+    assert_eq!(Error::InvalidVerificationLevel as u32, 30);
+    assert_eq!(Error::UsernameChangeCooldownActive as u32, 31);
+    assert_eq!(Error::InvalidDisputeReason as u32, 32);
+    assert_eq!(Error::EscrowAmountBelowMinimum as u32, 33);
+    assert_eq!(Error::InvalidReleaseWindow as u32, 34);
+    assert_eq!(Error::UnauthorizedAdmin as u32, 35);
+}
+
+#[test]
+fn test_error_enum_backward_compatibility() {
+    // Verify that existing error variants maintain their numeric IDs
+    assert_eq!(Error::Unauthorized as u32, 1);
+    assert_eq!(Error::EscrowNotFound as u32, 2);
+    assert_eq!(Error::InvalidEscrowState as u32, 3);
+    assert_eq!(Error::UsernameAlreadyExists as u32, 4);
+    assert_eq!(Error::TokenNotWhitelisted as u32, 5);
+    assert_eq!(Error::AmountBelowMinimum as u32, 6);
+    assert_eq!(Error::ReleaseWindowTooLong as u32, 7);
+    assert_eq!(Error::NotInDispute as u32, 8);
+    assert_eq!(Error::AlreadyOnboarded as u32, 9);
+    assert_eq!(Error::InvalidFee as u32, 10);
+    assert_eq!(Error::SameBuyerSeller as u32, 11);
+    assert_eq!(Error::PlatformNotInitialized as u32, 12);
+    assert_eq!(Error::ReleaseWindowNotElapsed as u32, 13);
+    assert_eq!(Error::BatchOperationFailed as u32, 14);
+    assert_eq!(Error::ContractPaused as u32, 15);
+    assert_eq!(Error::DisputeExpired as u32, 16);
+    assert_eq!(Error::InsufficientStake as u32, 17);
+    assert_eq!(Error::StakeCooldownActive as u32, 18);
+    assert_eq!(Error::InvalidRefundAmount as u32, 19);
+    assert_eq!(Error::ProposalNotFound as u32, 20);
+    assert_eq!(Error::ProposalAlreadyExists as u32, 21);
+    assert_eq!(Error::ReentryDetected as u32, 22);
+    assert_eq!(Error::ReleaseWindowTooShort as u32, 23);
+    assert_eq!(Error::StakeTokenMismatch as u32, 24);
 }

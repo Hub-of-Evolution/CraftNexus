@@ -1349,6 +1349,31 @@ fn test_set_min_escrow_amount_unauthorized() {
 }
 
 #[test]
+fn test_contract_address_admin_is_authorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let platform_wallet = Address::generate(&env);
+    let admin_contract = env.register_contract(None, EscrowContract);
+    let arbitrator = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1711368000;
+    });
+
+    client.initialize(&platform_wallet, &admin_contract, &arbitrator, &500);
+    client.set_min_escrow_amount(&token_contract.address(), &0);
+
+    let config = client.get_platform_config();
+    assert_eq!(config.admin, admin_contract);
+}
+
+#[test]
 fn test_get_escrow_migrates_legacy_state() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2452,11 +2477,11 @@ fn test_validate_batch_creation_rejects_invalid_metadata_hash_length() {
     let errors = client.validate_batch_creation(&batch_params);
 
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors.get(0).unwrap(), Error::InvalidFee);
+    assert_eq!(errors.get(0).unwrap(), Error::InvalidMetadataHash);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #14)")]
+#[should_panic(expected = "Error(Contract, #27)")]
 fn test_validate_batch_creation_exceeds_limit() {
     let env = Env::default();
     env.mock_all_auths();

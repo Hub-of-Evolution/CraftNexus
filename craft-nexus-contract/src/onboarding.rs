@@ -13,6 +13,10 @@ const CURRENT_USER_PROFILE_VERSION: u32 = 3;
 /// Protected usernames that cannot be deactivated.
 const PROTECTED_USERNAME: &str = "admin";
 
+/// Cooldown period for username changes to prevent squatting and rapid identity rotation.
+/// 30 days in seconds.
+const USERNAME_CHANGE_COOLDOWN: u64 = 30 * 24 * 60 * 60;
+
 /// Errors for onboarding contract operations.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -114,6 +118,8 @@ pub struct UserProfile {
     pub disputed_trades: u32,
     /// Current status of the user profile (Active or Deactivated)
     pub status: UserProfileStatus,
+    /// Portfolio CID for artisan showcase (IPFS) - Issue #112
+    pub portfolio_cid: Option<String>,
 }
 
 #[contracttype]
@@ -128,6 +134,8 @@ struct LegacyUserProfile {
     pub successful_trades: u32,
     /// Count of escrows that ended in a dispute against this user (#100)
     pub disputed_trades: u32,
+    /// Portfolio CID for artisan showcase (IPFS) - Issue #112
+    pub portfolio_cid: Option<String>,
 }
 
 /// V2 profile (version=2) used for migration to V3. V2 has no `status` field.
@@ -341,6 +349,76 @@ fn utf8_char_len(first_byte: u8) -> usize {
     }
 }
 
+/// Validate IPFS CID format (v0 and v1 with multibase prefixes).
+///
+/// Supports:
+/// - CIDv0: 46-char Base58btc starting with "Qm"
+/// - CIDv1 base32lower (prefix 'b'): lowercase a-z + 2-7
+/// - CIDv1 base16lower (prefix 'f'): lowercase hex 0-9 + a-f
+/// - CIDv1 base58btc  (prefix 'z'): Base58 alphabet
+fn validate_ipfs_cid(cid: &String) -> bool {
+    let len = cid.len() as usize;
+    if len == 0 || len > 128 {
+        return false;
+    }
+
+    let mut buf = [0u8; 128];
+    cid.copy_into_slice(&mut buf[0..len]);
+    let cid_bytes = &buf[0..len];
+
+    // CIDv0: exactly 46 chars, starts with "Qm", Base58btc alphabet
+    let is_v0 = len == 46
+        && cid_bytes[0] == b'Q'
+        && cid_bytes[1] == b'm'
+        && cid_bytes.iter().all(|b| {
+            matches!(
+                *b,
+                b'1'..=b'9'
+                    | b'A'..=b'H'
+                    | b'J'..=b'N'
+                    | b'P'..=b'Z'
+                    | b'a'..=b'k'
+                    | b'm'..=b'z'
+            )
+        });
+
+    if is_v0 {
+        return true;
+    }
+
+    // CIDv1: minimum 3 chars (multibase prefix + version byte + codec)
+    if len < 3 {
+        return false;
+    }
+
+    let prefix = cid_bytes[0];
+    let payload = &cid_bytes[1..];
+
+    match prefix {
+        // base32lower (most common CIDv1 encoding)
+        b'b' => payload
+            .iter()
+            .all(|b| matches!(*b, b'a'..=b'z' | b'2'..=b'7')),
+        // base16lower (hex)
+        b'f' => payload
+            .iter()
+            .all(|b| matches!(*b, b'0'..=b'9' | b'a'..=b'f')),
+        // base58btc
+        b'z' => payload.iter().all(|b| {
+            matches!(
+                *b,
+                b'1'..=b'9'
+                    | b'A'..=b'H'
+                    | b'J'..=b'N'
+                    | b'P'..=b'Z'
+                    | b'a'..=b'k'
+                    | b'm'..=b'z'
+            )
+        }),
+        _ => false,
+    }
+}
+
 #[contract]
 pub struct OnboardingContract;
 
@@ -383,6 +461,7 @@ impl OnboardingContract {
                     successful_trades: v2.successful_trades,
                     disputed_trades: v2.disputed_trades,
                     status: UserProfileStatus::Active,
+                    portfolio_cid: None,
                 };
                 env.storage().persistent().set(&key, &upgraded);
                 Self::extend_persistent(env, &key);
@@ -417,11 +496,13 @@ impl OnboardingContract {
             successful_trades: legacy.successful_trades,
             disputed_trades: legacy.disputed_trades,
             status: UserProfileStatus::Active,
+            portfolio_cid: legacy.portfolio_cid,
         };
         env.storage().persistent().set(&key, &upgraded);
         Self::extend_persistent(env, &key);
         upgraded
     }
+
 
     /// Extend the TTL of a persistent storage entry using standardized values.
     fn extend_persistent(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
@@ -466,6 +547,7 @@ impl OnboardingContract {
             successful_trades: 0,
             disputed_trades: 0,
             status: UserProfileStatus::Active,
+            portfolio_cid: None,
         };
 
         env.storage()
@@ -555,6 +637,7 @@ impl OnboardingContract {
             successful_trades: 0,
             disputed_trades: 0,
             status: UserProfileStatus::Active,
+            portfolio_cid: None,
         };
 
         // Store profile
@@ -1260,6 +1343,19 @@ impl OnboardingContract {
             "Username too long"
         );
 
+        // Enforce cooldown between username changes for the same user.
+        if let Some(last_change) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::LastUsernameChange(user.clone()))
+        {
+            let current_time = env.ledger().timestamp();
+            assert!(
+                current_time > last_change.saturating_add(USERNAME_CHANGE_COOLDOWN),
+                "Username change cooldown active"
+            );
+        }
+
         // Check if new username is already taken
         assert!(
             !env.storage()
@@ -1330,43 +1426,66 @@ impl OnboardingContract {
     }
 
     // -----------------------------------------------------------------------
+    // Issue #112 – Artisan Portfolio Verification
+    // -----------------------------------------------------------------------
+
+    /// Update an artisan's portfolio CID (Issue #112)
+    ///
+    /// Allows artisans to update their portfolio showcase stored on IPFS.
+    /// Validates the CID format using the same validation as escrow metadata.
+    ///
+    /// # Arguments
+    /// * `user` - User's wallet address
+    /// * `portfolio_cid` - IPFS CID of the portfolio (or None to remove)
+    ///
+    /// # Reverts if
+    /// - User not onboarded
+    /// - User is not an artisan
+    /// - Invalid CID format (if provided)
+    pub fn update_portfolio(env: Env, user: Address, portfolio_cid: Option<String>) -> UserProfile {
+        user.require_auth();
+
+        // Get current user profile
+        let profile_key = DataKey::UserProfile(user.clone());
+        let mut profile: UserProfile = env
+            .storage()
+            .persistent()
+            .get(&profile_key)
+            .expect("User not onboarded");
+        Self::extend_persistent(&env, &profile_key);
+
+        // Only artisans can update their portfolio
+        assert!(
+            profile.role == UserRole::Artisan,
+            "Only artisans can update portfolio"
+        );
+
+        // Validate CID format if provided
+        if let Some(ref cid) = portfolio_cid {
+            assert!(validate_ipfs_cid(cid), "Invalid portfolio CID format");
+        }
+
+        // Update portfolio CID
+        profile.portfolio_cid = portfolio_cid;
+
+        // Store updated profile
+        env.storage().persistent().set(&profile_key, &profile);
+        Self::extend_persistent(&env, &profile_key);
+
+        // Emit event
+        env.events()
+            .publish((Symbol::new(&env, "PortfolioUpdated"),), &user);
+
+        profile
+    }
+
+    // -----------------------------------------------------------------------
     // Profile Deactivation
     // -----------------------------------------------------------------------
 
-    /// Deactivates a user profile and releases the username for future use.
-    ///
-    /// The user can then re-onboard with a different username. This is a
-    /// self-service operation: only the user themselves can deactivate their
-    /// own profile.
-    ///
-    /// # Business Rules
-    /// - The "admin" username is protected and cannot be deactivated.
-    /// - Users with active escrows (as buyer or seller) cannot deactivate
-    ///   until those escrows are completed, cancelled, or refunded.
-    /// - A deactivated profile retains its data (reputation, history) but
-    ///   its status is set to `Deactivated` and the username mapping is
-    ///   removed so the username becomes available again.
-    ///
-    /// # Security
-    /// - Requires user authentication (`require_auth`).
-    /// - Atomic: username removal and profile update succeed together or
-    ///   the entire transaction reverts.
-    /// - Cross-contract escrow query errors cause the deactivation to abort
-    ///   safely (fail-closed).
-    ///
-    /// # Arguments
-    /// * `user` - Address of the user requesting deactivation
-    ///
-    /// # Errors
-    /// - `UserNotFound` if no profile exists for the given address.
-    /// - `UsernameProtected` if the user's username is "admin".
-    /// - `ActiveEscrows` if the user has any active escrows.
-    /// - `AlreadyDeactivated` if the profile is already deactivated.
-    /// - `EscrowQueryFailed` if the cross-contract escrow query fails.
     pub fn deactivate_profile(env: Env, user: Address) -> Result<(), OnboardingError> {
         user.require_auth();
 
-        // Load profile (returns error if not found)
         let profile_key = DataKey::UserProfile(user.clone());
         let mut profile: UserProfile = env
             .storage()
@@ -1375,34 +1494,28 @@ impl OnboardingContract {
             .ok_or(OnboardingError::UserNotFound)?;
         Self::extend_persistent(&env, &profile_key);
 
-        // Check if already deactivated
         if profile.status == UserProfileStatus::Deactivated {
             return Err(OnboardingError::AlreadyDeactivated);
         }
 
-        // Check "admin" username protection
         let normalized_username = profile.username.clone();
         let admin_normalized = String::from_str(&env, PROTECTED_USERNAME);
         if normalized_username == admin_normalized {
             return Err(OnboardingError::UsernameProtected);
         }
 
-        // Check for active escrows via cross-contract call
         if Self::has_active_escrows(&env, &user)? {
             return Err(OnboardingError::ActiveEscrows);
         }
 
-        // Remove username mapping to release the username
         env.storage()
             .persistent()
             .remove(&DataKey::Username(normalized_username));
 
-        // Update profile status to Deactivated
         profile.status = UserProfileStatus::Deactivated;
         env.storage().persistent().set(&profile_key, &profile);
         Self::extend_persistent(&env, &profile_key);
 
-        // Emit audit event
         env.events().publish(
             (Symbol::new(&env, "ProfileDeactivated"), &user),
             profile.username.clone(),
@@ -1411,19 +1524,6 @@ impl OnboardingContract {
         Ok(())
     }
 
-    /// Query the registered escrow contract to determine whether `user` has
-    /// any active escrows (as buyer or seller).
-    ///
-    /// Returns `Ok(true)` if at least one active escrow is found,
-    /// `Ok(false)` if none are found, or `Err(EscrowQueryFailed)` if the
-    /// cross-contract call fails or no escrow contract is registered.
-    ///
-    /// # Design Notes
-    /// The query fetches all escrow IDs (paginated) and checks each one's
-    /// status. For efficiency it uses a page size of 100 and caps at 10 pages
-    /// (1000 escrows), which covers realistic usage. If a user has more than
-    /// 1000 escrows in-flight simultaneously, the admin can handle this edge
-    /// case manually.
     fn has_active_escrows(env: &Env, user: &Address) -> Result<bool, OnboardingError> {
         let config: OnboardingConfig = env
             .storage()
@@ -1434,23 +1534,16 @@ impl OnboardingContract {
 
         let escrow_addr = match config.escrow_contract {
             Some(addr) => addr,
-            None => {
-                // No escrow contract registered — no escrows can exist,
-                // so deactivation is permitted (graceful degradation).
-                return Ok(false);
-            }
+            None => return Ok(false),
         };
 
         let client = EscrowQueryClient::new(env, &escrow_addr);
         let page_size: u32 = 100;
         let max_pages: u32 = 10;
 
-        // Check as buyer
         for page in 0..max_pages {
             let ids = client.get_escrows_by_buyer(user, &page, &page_size);
-            if ids.is_empty() {
-                break;
-            }
+            if ids.is_empty() { break; }
             for i in 0..ids.len() {
                 if let Some(escrow_id) = ids.get(i) {
                     if Self::is_escrow_active(env, &escrow_addr, escrow_id as u32) {
@@ -1460,12 +1553,9 @@ impl OnboardingContract {
             }
         }
 
-        // Check as seller (artisan)
         for page in 0..max_pages {
             let ids = client.get_escrows_by_seller(user, &page, &page_size);
-            if ids.is_empty() {
-                break;
-            }
+            if ids.is_empty() { break; }
             for i in 0..ids.len() {
                 if let Some(escrow_id) = ids.get(i) {
                     if Self::is_escrow_active(env, &escrow_addr, escrow_id as u32) {
@@ -1478,21 +1568,13 @@ impl OnboardingContract {
         Ok(false)
     }
 
-    /// Check whether a single escrow is in an "active" state (Active or Disputed)
-    /// by querying the escrow contract's `get_escrow` function and inspecting
-    /// the `status` field.
     fn is_escrow_active(env: &Env, escrow_addr: &Address, order_id: u32) -> bool {
-        // Define a minimal struct matching the Escrow contract's status field.
-        // This avoids importing the full Escrow struct (which has Bytes fields
-        // that may not deserialize correctly cross-contract).
         #[contracttype]
         #[derive(Clone)]
         struct EscrowStatusView {
             pub status: crate::EscrowStatus,
         }
 
-        // Try to call get_escrow on the escrow contract.
-        // try_invoke_contract returns Result<Result<T, ConversionError>, soroban_sdk::Error>
         let order_id_val: Val = order_id.into_val(env);
         let result = env.try_invoke_contract::<EscrowStatusView, soroban_sdk::Error>(
             escrow_addr,
@@ -1511,14 +1593,6 @@ impl OnboardingContract {
         }
     }
 
-    /// Get the current status of a user profile.
-    ///
-    /// # Arguments
-    /// * `user` - User's wallet address
-    ///
-    /// # Returns
-    /// `UserProfileStatus::Active` or `UserProfileStatus::Deactivated`.
-    /// Returns `Active` for users who haven't onboarded (implicit default).
     pub fn get_user_status(env: Env, user: Address) -> UserProfileStatus {
         let key = DataKey::UserProfile(user.clone());
         if let Some(profile) = env.storage().persistent().get::<DataKey, UserProfile>(&key) {

@@ -240,6 +240,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
@@ -355,6 +361,12 @@
                       "val": {
                         "bool": true
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -864,6 +876,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "portfolio_cid"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "registered_at"
                   },
                   "val": {
@@ -1052,6 +1070,12 @@
                   "val": {
                     "bool": true
                   }
+                },
+                {
+                  "key": {
+                    "symbol": "portfolio_cid"
+                  },
+                  "val": "void"
                 },
                 {
                   "key": {

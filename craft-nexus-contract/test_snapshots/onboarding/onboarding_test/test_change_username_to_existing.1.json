@@ -245,6 +245,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
@@ -363,6 +369,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
@@ -478,6 +490,12 @@
                       "val": {
                         "bool": false
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -1032,6 +1050,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "portfolio_cid"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "registered_at"
                   },
                   "val": {
@@ -1184,6 +1208,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "portfolio_cid"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "registered_at"
                   },
                   "val": {
@@ -1285,7 +1315,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Username already taken' from contract function 'Symbol(obj#239)'"
+                  "string": "caught panic 'Username already taken' from contract function 'Symbol(obj#249)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"

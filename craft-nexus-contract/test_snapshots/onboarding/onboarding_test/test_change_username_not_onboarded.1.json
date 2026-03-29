@@ -195,6 +195,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
@@ -539,7 +545,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'User not onboarded' from contract function 'Symbol(obj#81)'"
+                  "string": "caught panic 'User not onboarded' from contract function 'Symbol(obj#83)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"

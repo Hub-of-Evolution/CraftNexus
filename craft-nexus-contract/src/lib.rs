@@ -35,7 +35,7 @@ pub enum Error {
     NotInDispute = 8,
     /// User already onboarded
     AlreadyOnboarded = 9,
-    /// Invalid fee amount
+    /// Invalid fee amount (must be <= MAX_PLATFORM_FEE_BPS)
     InvalidFee = 10,
     /// Buyer and seller cannot be the same
     SameBuyerSeller = 11,
@@ -43,7 +43,7 @@ pub enum Error {
     PlatformNotInitialized = 12,
     /// Release window not yet elapsed
     ReleaseWindowNotElapsed = 13,
-    /// Batch operation error
+    /// Batch operation error (deprecated: use BatchLimitExceeded)
     BatchOperationFailed = 14,
     /// Contract is paused
     ContractPaused = 15,
@@ -65,23 +65,44 @@ pub enum Error {
     ReleaseWindowTooShort = 23,
     /// Staked funds can only be withdrawn in the original staking token
     StakeTokenMismatch = 24,
+    /// Invalid IPFS CID format (must be valid CIDv0 or CIDv1)
+    InvalidIpfsHash = 25,
+    /// Invalid metadata hash length (must be 32 bytes)
+    InvalidMetadataHash = 26,
+    /// Batch size exceeds maximum allowed (MAX_BATCH_SIZE)
+    BatchLimitExceeded = 27,
+    /// Invalid portfolio CID format
+    InvalidPortfolioCid = 28,
+    /// User is not an artisan
+    NotAnArtisan = 29,
+    /// Invalid verification level
+    InvalidVerificationLevel = 30,
+    /// Username change cooldown not elapsed
+    UsernameChangeCooldownActive = 31,
+    /// Invalid dispute reason (empty or too long)
+    InvalidDisputeReason = 32,
+    /// Escrow amount below minimum for token
+    EscrowAmountBelowMinimum = 33,
+    /// Invalid release window (exceeds maximum)
+    InvalidReleaseWindow = 34,
+    /// Unauthorized admin operation
+    UnauthorizedAdmin = 35,
     /// Recurring escrow not found
-    RecurringEscrowNotFound = 25,
+    RecurringEscrowNotFound = 36,
     /// Invalid frequency (must be > 0)
-    InvalidFrequency = 26,
+    InvalidFrequency = 37,
     /// Invalid duration (must be > 0)
-    InvalidDuration = 27,
+    InvalidDuration = 38,
     /// Release not yet due (too early)
-    ReleaseNotDue = 28,
+    ReleaseNotDue = 39,
     /// All periods already released
-    AllPeriodsReleased = 29,
+    AllPeriodsReleased = 40,
 }
 
 const ESCROW: Symbol = symbol_short!("ESCROW");
 const PLATFORM_FEE: Symbol = symbol_short!("PLAT_FEE");
 const PLATFORM_WALLET: Symbol = symbol_short!("PLAT_WAL");
 const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
-const ADMIN: Symbol = symbol_short!("ADMIN");
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
@@ -591,10 +612,13 @@ impl EscrowContract {
     }
 
     fn get_admin(env: &Env) -> Result<Address, Error> {
-        env.storage()
+        let config: PlatformConfig = env
+            .storage()
             .persistent()
-            .get(&ADMIN)
-            .ok_or(Error::PlatformNotInitialized)
+            .get(&PLATFORM_FEE)
+            .ok_or(Error::PlatformNotInitialized)?;
+        Self::extend_persistent(env, &PLATFORM_FEE);
+        Ok(config.admin)
     }
 
     fn emit_escrow_created(env: &Env, event: EscrowCreatedEvent) {
@@ -863,9 +887,6 @@ impl EscrowContract {
             .set(&PLATFORM_WALLET, &platform_wallet);
         Self::extend_persistent(&env, &PLATFORM_WALLET);
 
-        env.storage().persistent().set(&ADMIN, &admin);
-        Self::extend_persistent(&env, &ADMIN);
-
         // Initialize total fees to 0
         let zero: i128 = 0;
         env.storage().persistent().set(&TOTAL_FEES, &zero);
@@ -915,8 +936,6 @@ impl EscrowContract {
         env.storage().persistent().set(&PLATFORM_FEE, &config);
         Self::extend_persistent(&env, &PLATFORM_FEE);
 
-        env.storage().persistent().set(&ADMIN, &config.admin);
-        Self::extend_persistent(&env, &ADMIN);
     }
     /// Create a new escrow for an order
     ///
@@ -1974,13 +1993,13 @@ impl EscrowContract {
         // Validate IPFS hash if provided
         if let Some(ref ipfs) = params.ipfs_hash {
             if !Self::validate_ipfs_cid(ipfs) {
-                return Err(Error::InvalidFee); // Use invalid fee as proxy for invalid CID
+                return Err(Error::InvalidIpfsHash);
             }
         }
 
         if let Some(hash) = &params.metadata_hash {
             if hash.len() != 32 {
-                return Err(Error::InvalidFee); // Use invalid fee as proxy for invalid metadata hash
+                return Err(Error::InvalidMetadataHash);
             }
         }
 
@@ -2063,7 +2082,7 @@ impl EscrowContract {
         let mut errors: Map<u32, Error> = Map::new(&env);
 
         if escrows.len() > MAX_BATCH_SIZE as u32 {
-            env.panic_with_error(Error::BatchOperationFailed);
+            env.panic_with_error(Error::BatchLimitExceeded);
         }
 
         for i in 0..escrows.len() {
@@ -2093,7 +2112,7 @@ impl EscrowContract {
     /// Vector of created escrow IDs
     ///
     /// # Errors
-    /// - BatchOperationFailed if batch exceeds MAX_BATCH_SIZE
+    /// - BatchLimitExceeded if batch exceeds MAX_BATCH_SIZE
     /// - Any validation error from individual escrows
     pub fn create_batch_escrow(
         env: Env,
@@ -2105,7 +2124,7 @@ impl EscrowContract {
 
         // Issue #111: Enforce batch size limit
         if escrows.len() > MAX_BATCH_SIZE as u32 {
-            return Err(Error::BatchOperationFailed);
+            return Err(Error::BatchLimitExceeded);
         }
 
         let mut results = soroban_sdk::Vec::new(&env);

@@ -195,6 +195,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
@@ -532,7 +538,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Username not found' from contract function 'Symbol(obj#79)'"
+                  "string": "caught panic 'Username not found' from contract function 'Symbol(obj#81)'"
                 },
                 {
                   "string": "nonexistent"

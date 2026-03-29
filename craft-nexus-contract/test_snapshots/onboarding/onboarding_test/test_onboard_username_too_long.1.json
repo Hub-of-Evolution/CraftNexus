@@ -195,6 +195,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
@@ -542,7 +548,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Username too long' from contract function 'Symbol(obj#81)'"
+                  "string": "caught panic 'Username too long' from contract function 'Symbol(obj#83)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"

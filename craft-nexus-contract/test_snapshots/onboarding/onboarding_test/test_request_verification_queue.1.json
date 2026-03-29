@@ -259,6 +259,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
@@ -374,6 +380,12 @@
                       "val": {
                         "bool": false
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -1030,6 +1042,12 @@
                   "val": {
                     "bool": false
                   }
+                },
+                {
+                  "key": {
+                    "symbol": "portfolio_cid"
+                  },
+                  "val": "void"
                 },
                 {
                   "key": {

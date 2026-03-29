@@ -220,6 +220,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
@@ -335,6 +341,12 @@
                       "val": {
                         "bool": false
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "portfolio_cid"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -811,6 +823,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "portfolio_cid"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "registered_at"
                   },
                   "val": {
@@ -915,7 +933,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'User already onboarded' from contract function 'Symbol(obj#159)'"
+                  "string": "caught panic 'User already onboarded' from contract function 'Symbol(obj#165)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
