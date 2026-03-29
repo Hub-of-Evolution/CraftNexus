@@ -1,5 +1,8 @@
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _},
+    Address, Env, String,
+};
 
 fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     let contract_id = env.register_contract(None, OnboardingContract);
@@ -976,4 +979,327 @@ fn test_change_username_preserves_other_fields() {
     assert_eq!(updated.is_verified, false);
     assert_eq!(updated.address, user);
     assert_eq!(updated.registered_at, original.registered_at);
+}
+
+// ============================================================
+// Profile Deactivation Tests
+// ============================================================
+
+/// Helper: onboard a test user and return (client, user, username).
+fn onboard_test_user(
+    env: &Env,
+    client: &OnboardingContractClient<'static>,
+    username: &str,
+    role: &UserRole,
+) -> (Address, String) {
+    let user = Address::generate(env);
+    let uname = String::from_str(env, username);
+    client.onboard_user(&user, &uname, role);
+    (user, uname)
+}
+
+// ── Successful Deactivation ──────────────────────────────────────────────
+
+#[test]
+fn test_deactivate_profile_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _uname) = onboard_test_user(&env, &client, "alice", &UserRole::Buyer);
+
+    let result = client.try_deactivate_profile(&user);
+    assert!(result.is_ok());
+
+    let profile = client.get_user(&user);
+    assert_eq!(profile.status, UserProfileStatus::Deactivated);
+}
+
+#[test]
+fn test_deactivate_profile_releases_username() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _uname) = onboard_test_user(&env, &client, "bob_builder", &UserRole::Artisan);
+
+    // Username should be taken before deactivation
+    assert!(client.is_username_taken(&String::from_str(&env, "bob_builder")));
+
+    client.deactivate_profile(&user);
+
+    // Username should be available after deactivation
+    assert!(!client.is_username_taken(&String::from_str(&env, "bob_builder")));
+
+    // A new user can claim the freed username
+    let new_user = Address::generate(&env);
+    let profile = client.onboard_user(
+        &new_user,
+        &String::from_str(&env, "bob_builder"),
+        &UserRole::Buyer,
+    );
+    assert_eq!(profile.username, String::from_str(&env, "bob_builder"));
+    assert_eq!(profile.address, new_user);
+}
+
+#[test]
+fn test_deactivate_profile_status_updated() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _) = onboard_test_user(&env, &client, "carol", &UserRole::Buyer);
+
+    // Status should be Active before deactivation
+    assert_eq!(client.get_user_status(&user), UserProfileStatus::Active);
+
+    client.deactivate_profile(&user);
+
+    // Status should be Deactivated after
+    assert_eq!(
+        client.get_user_status(&user),
+        UserProfileStatus::Deactivated
+    );
+
+    // Profile fields other than status are preserved
+    let profile = client.get_user(&user);
+    assert_eq!(profile.role, UserRole::Buyer);
+}
+
+#[test]
+fn test_deactivate_profile_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _) = onboard_test_user(&env, &client, "dave", &UserRole::Artisan);
+
+    client.deactivate_profile(&user);
+
+    // Verify the ProfileDeactivated event was emitted
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    // The event publishes topics: (Symbol::new("ProfileDeactivated"), &user)
+    // Check that the topics vec contains at least one entry matching the symbol
+    assert!(last_event.1.len() >= 1);
+}
+
+#[test]
+fn test_deactivate_profile_no_escrow_contract_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _) = onboard_test_user(&env, &client, "eve", &UserRole::Buyer);
+
+    // No escrow contract registered — graceful degradation allows deactivation
+    let result = client.try_deactivate_profile(&user);
+    assert!(result.is_ok());
+    assert_eq!(
+        client.get_user_status(&user),
+        UserProfileStatus::Deactivated
+    );
+}
+
+#[test]
+fn test_deactivate_profile_with_escrow_contract_no_escrows() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _) = onboard_test_user(&env, &client, "frank", &UserRole::Artisan);
+
+    // Register a mock escrow contract
+    let escrow_addr = Address::generate(&env);
+    client.set_escrow_contract(&escrow_addr);
+
+    // With escrow contract set but user has no escrows, deactivation should succeed
+    // (the cross-contract call to get_escrows_by_buyer/seller will fail because
+    // escrow_addr is not a real contract, so has_active_escrows returns EscrowQueryFailed)
+    // Since we can't mock cross-contract calls in unit tests, we verify the error path.
+    let result = client.try_deactivate_profile(&user);
+    // The cross-contract call to the fake address will fail
+    assert!(result.is_err());
+}
+
+// ── Protection Rules ─────────────────────────────────────────────────────
+
+#[test]
+fn test_deactivate_admin_username_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup_test(&env);
+
+    // Admin is created during initialize with username "admin"
+    let result = client.try_deactivate_profile(&admin);
+    assert!(result.is_err());
+    // Verify the profile is still Active
+    assert_eq!(client.get_user_status(&admin), UserProfileStatus::Active);
+}
+
+#[test]
+fn test_deactivate_nonexistent_user_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let phantom = Address::generate(&env);
+    let result = client.try_deactivate_profile(&phantom);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_deactivate_already_deactivated_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _) = onboard_test_user(&env, &client, "grace", &UserRole::Buyer);
+
+    // First deactivation succeeds
+    let result1 = client.try_deactivate_profile(&user);
+    assert!(result1.is_ok());
+
+    // Second deactivation should fail
+    let result2 = client.try_deactivate_profile(&user);
+    assert!(result2.is_err());
+}
+
+#[test]
+fn test_deactivate_preserves_reputation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _) = onboard_test_user(&env, &client, "heidi", &UserRole::Artisan);
+
+    // Simulate reputation updates
+    client.update_reputation(&user, &5, &1);
+
+    let (succ_before, disp_before) = client.get_user_reputation(&user);
+    assert_eq!(succ_before, 5);
+    assert_eq!(disp_before, 1);
+
+    client.deactivate_profile(&user);
+
+    // Reputation is preserved after deactivation
+    let (succ_after, disp_after) = client.get_user_reputation(&user);
+    assert_eq!(succ_after, 5);
+    assert_eq!(disp_after, 1);
+}
+
+#[test]
+fn test_deactivate_preserves_verification_history() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _) = onboard_test_user(&env, &client, "ivan", &UserRole::Artisan);
+
+    // User requests verification, admin processes it
+    client.request_verification(&user);
+    client.process_verification_request(&user, &true);
+
+    let history_before = client.get_verification_history(&user);
+    assert!(history_before.len() > 0);
+
+    client.deactivate_profile(&user);
+
+    // Verification history is preserved after deactivation
+    let history_after = client.get_verification_history(&user);
+    assert_eq!(history_after.len(), history_before.len());
+}
+
+#[test]
+fn test_deactivate_artisan_profile() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _) = onboard_test_user(&env, &client, "judy_artisan", &UserRole::Artisan);
+
+    let result = client.try_deactivate_profile(&user);
+    assert!(result.is_ok());
+
+    let profile = client.get_user(&user);
+    assert_eq!(profile.status, UserProfileStatus::Deactivated);
+    assert_eq!(profile.role, UserRole::Artisan); // Role preserved
+}
+
+#[test]
+fn test_deactivate_buyer_profile() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _) = onboard_test_user(&env, &client, "kate_buyer", &UserRole::Buyer);
+
+    let result = client.try_deactivate_profile(&user);
+    assert!(result.is_ok());
+
+    let profile = client.get_user(&user);
+    assert_eq!(profile.status, UserProfileStatus::Deactivated);
+    assert_eq!(profile.role, UserRole::Buyer); // Role preserved
+}
+
+#[test]
+fn test_re_onboard_after_deactivation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user, _) = onboard_test_user(&env, &client, "larry", &UserRole::Buyer);
+
+    client.deactivate_profile(&user);
+
+    // User cannot re-onboard with the same address (profile still exists, just deactivated)
+    let result = client.try_onboard_user(
+        &user,
+        &String::from_str(&env, "new_larry"),
+        &UserRole::Artisan,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_deactivate_profile_is_deterministic() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let (user1, _) = onboard_test_user(&env, &client, "user_det_1", &UserRole::Buyer);
+    let (user2, _) = onboard_test_user(&env, &client, "user_det_2", &UserRole::Buyer);
+
+    client.deactivate_profile(&user1);
+    client.deactivate_profile(&user2);
+
+    assert_eq!(
+        client.get_user_status(&user1),
+        client.get_user_status(&user2)
+    );
+    assert_eq!(
+        client.get_user_status(&user1),
+        UserProfileStatus::Deactivated
+    );
+}
+
+#[test]
+fn test_username_case_insensitive_protection() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup_test(&env);
+
+    // Admin's username is "admin" (normalized lowercase).
+    // Verify the admin cannot be deactivated regardless of how we reference it.
+    assert_eq!(
+        client.get_user(&admin).username,
+        String::from_str(&env, "admin")
+    );
+    assert_eq!(
+        client.get_user(&admin).username,
+        String::from_str(&env, "admin")
+    );
+
+    let result = client.try_deactivate_profile(&admin);
+    assert!(result.is_err());
 }

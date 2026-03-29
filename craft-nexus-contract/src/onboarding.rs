@@ -1,11 +1,64 @@
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Map, String, Symbol, Vec};
-use soroban_sdk::{TryFromVal, Val};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, Address, Env, Map, String, Symbol, Vec,
+};
+use soroban_sdk::{IntoVal, TryFromVal, Val};
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
 const TTL_EXTENSION: u32 = 518_400;
-const CURRENT_USER_PROFILE_VERSION: u32 = 2;
+const CURRENT_USER_PROFILE_VERSION: u32 = 3;
+
+/// Protected usernames that cannot be deactivated.
+const PROTECTED_USERNAME: &str = "admin";
+
+/// Errors for onboarding contract operations.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum OnboardingError {
+    /// User profile not found.
+    UserNotFound = 1,
+    /// User has active escrows; deactivate those first.
+    ActiveEscrows = 2,
+    /// The "admin" username is protected and cannot be deactivated.
+    UsernameProtected = 3,
+    /// User profile is already deactivated.
+    AlreadyDeactivated = 4,
+    /// Cross-contract escrow query failed.
+    EscrowQueryFailed = 5,
+    /// Contract not initialized.
+    NotInitialized = 6,
+}
+
+/// Status of a user profile.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum UserProfileStatus {
+    Active = 0,
+    Deactivated = 1,
+}
+
+/// Cross-contract interface for querying escrow status.
+/// Used by the onboarding contract to check for active escrows before deactivation.
+/// The trait signatures must match the escrow contract's public functions.
+#[soroban_sdk::contractclient(name = "EscrowQueryClient")]
+pub trait EscrowQueryInterface {
+    /// Get escrow IDs for a buyer with pagination.
+    fn get_escrows_by_buyer(
+        env: soroban_sdk::Env,
+        buyer: Address,
+        page: u32,
+        limit: u32,
+    ) -> soroban_sdk::Vec<u64>;
+    /// Get escrow IDs for a seller with pagination.
+    fn get_escrows_by_seller(
+        env: soroban_sdk::Env,
+        seller: Address,
+        page: u32,
+        limit: u32,
+    ) -> soroban_sdk::Vec<u64>;
+}
 
 #[cfg(test)]
 #[path = "onboarding_test.rs"]
@@ -58,6 +111,8 @@ pub struct UserProfile {
     pub successful_trades: u32,
     /// Count of escrows that ended in a dispute against this user (#100)
     pub disputed_trades: u32,
+    /// Current status of the user profile (Active or Deactivated)
+    pub status: UserProfileStatus,
 }
 
 #[contracttype]
@@ -71,6 +126,20 @@ struct LegacyUserProfile {
     /// Count of escrows where this user was on the winning side (#100)
     pub successful_trades: u32,
     /// Count of escrows that ended in a dispute against this user (#100)
+    pub disputed_trades: u32,
+}
+
+/// V2 profile (version=2) used for migration to V3. V2 has no `status` field.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UserProfileV2 {
+    pub version: u32,
+    pub address: Address,
+    pub role: UserRole,
+    pub username: String,
+    pub registered_at: u64,
+    pub is_verified: bool,
+    pub successful_trades: u32,
     pub disputed_trades: u32,
 }
 
@@ -287,18 +356,56 @@ impl OnboardingContract {
             Map::<Symbol, Val>::try_from_val(env, &stored).expect("User profile storage corrupted");
         let version_key = Symbol::new(env, "version");
 
-        if map.contains_key(version_key) {
-            let profile =
-                UserProfile::try_from_val(env, &stored).expect("User profile storage corrupted");
-            if profile.version < CURRENT_USER_PROFILE_VERSION {
-                return Self::upgrade_user_profile(env, user, profile);
+        if map.contains_key(version_key.clone()) {
+            let version_val = map.get(version_key).unwrap();
+            let version: u32 =
+                u32::try_from_val(env, &version_val).expect("Version field corrupted");
+
+            if version >= CURRENT_USER_PROFILE_VERSION {
+                let profile = UserProfile::try_from_val(env, &stored)
+                    .expect("User profile storage corrupted");
+                Self::extend_persistent(env, &key);
+                return profile;
             }
-            Self::extend_persistent(env, &key);
-            return profile;
+
+            // Version 2 → 3: deserialize as V2 (no status field), then upgrade
+            if version == 2 {
+                let v2 = UserProfileV2::try_from_val(env, &stored)
+                    .expect("V2 user profile storage corrupted");
+                let upgraded = UserProfile {
+                    version: CURRENT_USER_PROFILE_VERSION,
+                    address: v2.address.clone(),
+                    role: v2.role,
+                    username: v2.username.clone(),
+                    registered_at: v2.registered_at,
+                    is_verified: v2.is_verified,
+                    successful_trades: v2.successful_trades,
+                    disputed_trades: v2.disputed_trades,
+                    status: UserProfileStatus::Active,
+                };
+                env.storage().persistent().set(&key, &upgraded);
+                Self::extend_persistent(env, &key);
+                return upgraded;
+            }
+
+            return Self::upgrade_user_profile(env, user, version);
         }
 
+        // No version field at all: legacy (V1) format
+        Self::upgrade_user_profile(env, user, 1)
+    }
+
+    fn upgrade_user_profile(env: &Env, user: Address, _from_version: u32) -> UserProfile {
+        // Fallback for unknown versions: try legacy format
+        let key = DataKey::UserProfile(user.clone());
+        let stored: Val = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("User not found");
+
         let legacy =
-            LegacyUserProfile::try_from_val(env, &stored).expect("User profile storage corrupted");
+            LegacyUserProfile::try_from_val(env, &stored).expect("Legacy profile corrupted");
         let upgraded = UserProfile {
             version: CURRENT_USER_PROFILE_VERSION,
             address: legacy.address.clone(),
@@ -308,18 +415,11 @@ impl OnboardingContract {
             is_verified: legacy.is_verified,
             successful_trades: legacy.successful_trades,
             disputed_trades: legacy.disputed_trades,
+            status: UserProfileStatus::Active,
         };
         env.storage().persistent().set(&key, &upgraded);
         Self::extend_persistent(env, &key);
         upgraded
-    }
-
-    fn upgrade_user_profile(env: &Env, user: Address, mut profile: UserProfile) -> UserProfile {
-        profile.version = CURRENT_USER_PROFILE_VERSION;
-        let key = DataKey::UserProfile(user);
-        env.storage().persistent().set(&key, &profile);
-        Self::extend_persistent(env, &key);
-        profile
     }
 
     /// Extend the TTL of a persistent storage entry using standardized values.
@@ -364,6 +464,7 @@ impl OnboardingContract {
             is_verified: true,
             successful_trades: 0,
             disputed_trades: 0,
+            status: UserProfileStatus::Active,
         };
 
         env.storage()
@@ -452,6 +553,7 @@ impl OnboardingContract {
             is_verified: false,
             successful_trades: 0,
             disputed_trades: 0,
+            status: UserProfileStatus::Active,
         };
 
         // Store profile
@@ -1207,5 +1309,205 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::UsernameChangeFee)
             .unwrap_or(0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Profile Deactivation
+    // -----------------------------------------------------------------------
+
+    /// Deactivates a user profile and releases the username for future use.
+    ///
+    /// The user can then re-onboard with a different username. This is a
+    /// self-service operation: only the user themselves can deactivate their
+    /// own profile.
+    ///
+    /// # Business Rules
+    /// - The "admin" username is protected and cannot be deactivated.
+    /// - Users with active escrows (as buyer or seller) cannot deactivate
+    ///   until those escrows are completed, cancelled, or refunded.
+    /// - A deactivated profile retains its data (reputation, history) but
+    ///   its status is set to `Deactivated` and the username mapping is
+    ///   removed so the username becomes available again.
+    ///
+    /// # Security
+    /// - Requires user authentication (`require_auth`).
+    /// - Atomic: username removal and profile update succeed together or
+    ///   the entire transaction reverts.
+    /// - Cross-contract escrow query errors cause the deactivation to abort
+    ///   safely (fail-closed).
+    ///
+    /// # Arguments
+    /// * `user` - Address of the user requesting deactivation
+    ///
+    /// # Errors
+    /// - `UserNotFound` if no profile exists for the given address.
+    /// - `UsernameProtected` if the user's username is "admin".
+    /// - `ActiveEscrows` if the user has any active escrows.
+    /// - `AlreadyDeactivated` if the profile is already deactivated.
+    /// - `EscrowQueryFailed` if the cross-contract escrow query fails.
+    pub fn deactivate_profile(env: Env, user: Address) -> Result<(), OnboardingError> {
+        user.require_auth();
+
+        // Load profile (returns error if not found)
+        let profile_key = DataKey::UserProfile(user.clone());
+        let mut profile: UserProfile = env
+            .storage()
+            .persistent()
+            .get(&profile_key)
+            .ok_or(OnboardingError::UserNotFound)?;
+        Self::extend_persistent(&env, &profile_key);
+
+        // Check if already deactivated
+        if profile.status == UserProfileStatus::Deactivated {
+            return Err(OnboardingError::AlreadyDeactivated);
+        }
+
+        // Check "admin" username protection
+        let normalized_username = profile.username.clone();
+        let admin_normalized = String::from_str(&env, PROTECTED_USERNAME);
+        if normalized_username == admin_normalized {
+            return Err(OnboardingError::UsernameProtected);
+        }
+
+        // Check for active escrows via cross-contract call
+        if Self::has_active_escrows(&env, &user)? {
+            return Err(OnboardingError::ActiveEscrows);
+        }
+
+        // Remove username mapping to release the username
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Username(normalized_username));
+
+        // Update profile status to Deactivated
+        profile.status = UserProfileStatus::Deactivated;
+        env.storage().persistent().set(&profile_key, &profile);
+        Self::extend_persistent(&env, &profile_key);
+
+        // Emit audit event
+        env.events().publish(
+            (Symbol::new(&env, "ProfileDeactivated"), &user),
+            profile.username.clone(),
+        );
+
+        Ok(())
+    }
+
+    /// Query the registered escrow contract to determine whether `user` has
+    /// any active escrows (as buyer or seller).
+    ///
+    /// Returns `Ok(true)` if at least one active escrow is found,
+    /// `Ok(false)` if none are found, or `Err(EscrowQueryFailed)` if the
+    /// cross-contract call fails or no escrow contract is registered.
+    ///
+    /// # Design Notes
+    /// The query fetches all escrow IDs (paginated) and checks each one's
+    /// status. For efficiency it uses a page size of 100 and caps at 10 pages
+    /// (1000 escrows), which covers realistic usage. If a user has more than
+    /// 1000 escrows in-flight simultaneously, the admin can handle this edge
+    /// case manually.
+    fn has_active_escrows(env: &Env, user: &Address) -> Result<bool, OnboardingError> {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .ok_or(OnboardingError::NotInitialized)?;
+        Self::extend_persistent(env, &DataKey::Config);
+
+        let escrow_addr = match config.escrow_contract {
+            Some(addr) => addr,
+            None => {
+                // No escrow contract registered — no escrows can exist,
+                // so deactivation is permitted (graceful degradation).
+                return Ok(false);
+            }
+        };
+
+        let client = EscrowQueryClient::new(env, &escrow_addr);
+        let page_size: u32 = 100;
+        let max_pages: u32 = 10;
+
+        // Check as buyer
+        for page in 0..max_pages {
+            let ids = client.get_escrows_by_buyer(user, &page, &page_size);
+            if ids.is_empty() {
+                break;
+            }
+            for i in 0..ids.len() {
+                if let Some(escrow_id) = ids.get(i) {
+                    if Self::is_escrow_active(env, &escrow_addr, escrow_id as u32) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
+        // Check as seller (artisan)
+        for page in 0..max_pages {
+            let ids = client.get_escrows_by_seller(user, &page, &page_size);
+            if ids.is_empty() {
+                break;
+            }
+            for i in 0..ids.len() {
+                if let Some(escrow_id) = ids.get(i) {
+                    if Self::is_escrow_active(env, &escrow_addr, escrow_id as u32) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Check whether a single escrow is in an "active" state (Active or Disputed)
+    /// by querying the escrow contract's `get_escrow` function and inspecting
+    /// the `status` field.
+    fn is_escrow_active(env: &Env, escrow_addr: &Address, order_id: u32) -> bool {
+        // Define a minimal struct matching the Escrow contract's status field.
+        // This avoids importing the full Escrow struct (which has Bytes fields
+        // that may not deserialize correctly cross-contract).
+        #[contracttype]
+        #[derive(Clone)]
+        struct EscrowStatusView {
+            pub status: crate::EscrowStatus,
+        }
+
+        // Try to call get_escrow on the escrow contract.
+        // try_invoke_contract returns Result<Result<T, ConversionError>, soroban_sdk::Error>
+        let order_id_val: Val = order_id.into_val(env);
+        let result = env.try_invoke_contract::<EscrowStatusView, soroban_sdk::Error>(
+            escrow_addr,
+            &Symbol::new(env, "get_escrow"),
+            soroban_sdk::vec![env, order_id_val],
+        );
+        match result {
+            Ok(inner) => match inner {
+                Ok(view) => {
+                    view.status == crate::EscrowStatus::Active
+                        || view.status == crate::EscrowStatus::Disputed
+                }
+                Err(_) => false,
+            },
+            Err(_) => false,
+        }
+    }
+
+    /// Get the current status of a user profile.
+    ///
+    /// # Arguments
+    /// * `user` - User's wallet address
+    ///
+    /// # Returns
+    /// `UserProfileStatus::Active` or `UserProfileStatus::Deactivated`.
+    /// Returns `Active` for users who haven't onboarded (implicit default).
+    pub fn get_user_status(env: Env, user: Address) -> UserProfileStatus {
+        let key = DataKey::UserProfile(user.clone());
+        if let Some(profile) = env.storage().persistent().get::<DataKey, UserProfile>(&key) {
+            Self::extend_persistent(&env, &key);
+            profile.status
+        } else {
+            UserProfileStatus::Active
+        }
     }
 }

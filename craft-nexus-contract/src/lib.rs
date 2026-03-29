@@ -10,6 +10,8 @@ mod test;
 // artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
 #[cfg(not(target_family = "wasm"))]
 pub mod onboarding;
+#[cfg(test)]
+mod recurring_escrow_test;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -61,6 +63,16 @@ pub enum Error {
     ReentryDetected = 22,
     /// Release window is zero or negative
     ReleaseWindowTooShort = 23,
+    /// Recurring escrow not found
+    RecurringEscrowNotFound = 24,
+    /// Invalid frequency (must be > 0)
+    InvalidFrequency = 25,
+    /// Invalid duration (must be > 0)
+    InvalidDuration = 26,
+    /// Release not yet due (too early)
+    ReleaseNotDue = 27,
+    /// All periods already released
+    AllPeriodsReleased = 28,
 }
 
 const ESCROW: Symbol = symbol_short!("ESCROW");
@@ -117,6 +129,14 @@ pub enum DataKey {
     OnboardingContractAddress,
     /// Map of whitelisted token addresses (Address -> bool); enforcement active when non-empty
     WhitelistedTokens,
+    /// Recurring escrow storage by ID
+    RecurringEscrow(u64),
+    /// Next available recurring escrow ID counter
+    RecurringEscrowNextId,
+    /// List of recurring escrow IDs for a buyer
+    BuyerRecurringEscrows(Address),
+    /// List of recurring escrow IDs for an artisan (seller)
+    ArtisanRecurringEscrows(Address),
 }
 
 #[contracttype]
@@ -344,6 +364,104 @@ pub struct PartialRefundProposal {
     pub refund_amount: i128,
     pub proposed_by: Address,
     pub proposed_at: u64,
+}
+
+// ── Recurring Escrow Types ──────────────────────────────────────────────
+
+/// Status of a recurring escrow.
+#[contracttype]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RecurringEscrowStatus {
+    /// Escrow is active and funds are being released per schedule.
+    Active = 0,
+    /// All periods have been released; escrow is complete.
+    Completed = 1,
+    /// Buyer cancelled; remaining unreleased funds refunded.
+    Cancelled = 2,
+}
+
+/// A recurring escrow that releases funds to an artisan on a fixed schedule.
+///
+/// Funds are locked at creation and released in equal portions each period.
+/// The per-period amount is `total_amount / duration` (integer division).
+/// Any remainder from rounding is released with the final period.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringEscrow {
+    /// Unique identifier for this recurring escrow.
+    pub id: u64,
+    /// The buyer who funded the escrow.
+    pub buyer: Address,
+    /// The artisan (service provider) receiving periodic payments.
+    pub artisan: Address,
+    /// The token used for payments.
+    pub token: Address,
+    /// Total amount locked in escrow.
+    pub total_amount: i128,
+    /// Time interval between releases, in seconds.
+    pub frequency: u64,
+    /// Total number of periods over which funds are released.
+    pub duration: u64,
+    /// Amount already released to the artisan.
+    pub released_amount: i128,
+    /// Ledger timestamp when the escrow was created (first period starts).
+    pub start_time: u64,
+    /// Ledger timestamp when the next scheduled release occurs.
+    pub next_release_time: u64,
+    /// Current status of the recurring escrow.
+    pub status: RecurringEscrowStatus,
+}
+
+/// Event emitted when a recurring escrow is created.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringEscrowCreatedEvent {
+    pub escrow_id: u64,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub token: Address,
+    pub total_amount: i128,
+    pub frequency: u64,
+    pub duration: u64,
+    pub start_time: u64,
+}
+
+/// Event emitted when a recurring escrow releases funds for a period.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringFundsReleasedEvent {
+    pub escrow_id: u64,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub token: Address,
+    pub released_amount: i128,
+    pub total_released: i128,
+    pub period: u64,
+    pub timestamp: u64,
+}
+
+/// Event emitted when a recurring escrow is cancelled.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringEscrowCancelledEvent {
+    pub escrow_id: u64,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub token: Address,
+    pub refund_amount: i128,
+    pub timestamp: u64,
+}
+
+/// Event emitted when a recurring escrow completes all periods.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringEscrowCompletedEvent {
+    pub escrow_id: u64,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub token: Address,
+    pub total_released: i128,
+    pub timestamp: u64,
 }
 
 /// Minimal cross-contract interface for the OnboardingContract.
@@ -2597,5 +2715,565 @@ impl EscrowContract {
         );
 
         Ok(())
+    }
+
+    // ── Recurring Escrow ──────────────────────────────────────────────
+
+    /// Generate the next unique recurring escrow ID.
+    fn next_recurring_escrow_id(env: &Env) -> u64 {
+        let current: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RecurringEscrowNextId)
+            .unwrap_or(0);
+        let next = current + 1;
+        env.storage()
+            .persistent()
+            .set(&DataKey::RecurringEscrowNextId, &next);
+        Self::extend_persistent(env, &DataKey::RecurringEscrowNextId);
+        next
+    }
+
+    /// Emit a recurring escrow created event.
+    fn emit_recurring_escrow_created(env: &Env, event: RecurringEscrowCreatedEvent) {
+        env.events().publish(
+            (
+                Symbol::new(env, "recurring_escrow_created"),
+                event.escrow_id,
+            ),
+            event,
+        );
+    }
+
+    /// Emit a recurring funds released event.
+    fn emit_recurring_funds_released(env: &Env, event: RecurringFundsReleasedEvent) {
+        env.events().publish(
+            (
+                Symbol::new(env, "recurring_funds_released"),
+                event.escrow_id,
+            ),
+            event,
+        );
+    }
+
+    /// Emit a recurring escrow cancelled event.
+    fn emit_recurring_escrow_cancelled(env: &Env, event: RecurringEscrowCancelledEvent) {
+        env.events().publish(
+            (
+                Symbol::new(env, "recurring_escrow_cancelled"),
+                event.escrow_id,
+            ),
+            event,
+        );
+    }
+
+    /// Emit a recurring escrow completed event.
+    fn emit_recurring_escrow_completed(env: &Env, event: RecurringEscrowCompletedEvent) {
+        env.events().publish(
+            (
+                Symbol::new(env, "recurring_escrow_completed"),
+                event.escrow_id,
+            ),
+            event,
+        );
+    }
+
+    /// Load a recurring escrow from storage or panic with RecurringEscrowNotFound.
+    fn load_recurring_escrow(env: &Env, escrow_id: u64) -> RecurringEscrow {
+        let key = DataKey::RecurringEscrow(escrow_id);
+        let escrow: Option<RecurringEscrow> = env.storage().persistent().get(&key);
+        match escrow {
+            Some(e) => {
+                Self::extend_persistent(env, &key);
+                e
+            }
+            None => env.panic_with_error(Error::RecurringEscrowNotFound),
+        }
+    }
+
+    /// Save a recurring escrow to storage with TTL extension.
+    fn save_recurring_escrow(env: &Env, escrow: &RecurringEscrow) {
+        let key = DataKey::RecurringEscrow(escrow.id);
+        env.storage().persistent().set(&key, escrow);
+        Self::extend_persistent(env, &key);
+    }
+
+    /// Create a new recurring escrow.
+    ///
+    /// The buyer funds the full `total_amount` upfront, which is transferred to the contract.
+    /// Funds are released to the artisan in equal portions each `frequency` seconds over
+    /// `duration` periods. The per-period amount is `total_amount / duration` (integer
+    /// division); any remainder is released with the final period.
+    ///
+    /// # Arguments
+    /// * `buyer` - Address of the buyer funding the escrow
+    /// * `artisan` - Address of the artisan receiving periodic payments
+    /// * `token` - Token contract address
+    /// * `total_amount` - Total amount to escrow (transferred from buyer to contract)
+    /// * `frequency` - Time interval between releases in seconds (must be > 0)
+    /// * `duration` - Total number of release periods (must be > 0)
+    ///
+    /// # Errors
+    /// * `SameBuyerSeller` - If buyer and artisan are the same address
+    /// * `AmountBelowMinimum` - If amount is <= 0 or below token minimum
+    /// * `InvalidFrequency` - If frequency is 0
+    /// * `InvalidDuration` - If duration is 0
+    ///
+    /// # Security
+    /// - Requires buyer authorization
+    /// - Atomic transfer: funds move from buyer to contract before state is stored
+    /// - Re-entrancy guard prevents recursive calls during token transfer
+    pub fn create_recurring_escrow(
+        env: Env,
+        buyer: Address,
+        artisan: Address,
+        token: Address,
+        total_amount: i128,
+        frequency: u64,
+        duration: u64,
+    ) -> RecurringEscrow {
+        Self::enter_reentry_guard(&env);
+        Self::check_not_paused(&env);
+        buyer.require_auth();
+
+        // Validate inputs
+        if buyer == artisan {
+            env.panic_with_error(Error::SameBuyerSeller);
+        }
+        if total_amount <= 0 {
+            env.panic_with_error(Error::AmountBelowMinimum);
+        }
+        if frequency == 0 {
+            env.panic_with_error(Error::InvalidFrequency);
+        }
+        if duration == 0 {
+            env.panic_with_error(Error::InvalidDuration);
+        }
+
+        // Validate minimum amount
+        Self::check_min_amount(&env, token.clone(), total_amount).unwrap_or_else(|e| {
+            env.panic_with_error(e);
+        });
+
+        // Validate token is whitelisted
+        Self::check_token_whitelisted(&env, &token);
+
+        let escrow_id = Self::next_recurring_escrow_id(&env);
+        let start_time = env.ledger().timestamp();
+        let next_release_time = start_time + frequency;
+
+        let escrow = RecurringEscrow {
+            id: escrow_id,
+            buyer: buyer.clone(),
+            artisan: artisan.clone(),
+            token: token.clone(),
+            total_amount,
+            frequency,
+            duration,
+            released_amount: 0,
+            start_time,
+            next_release_time,
+            status: RecurringEscrowStatus::Active,
+        };
+
+        // Transfer funds from buyer to contract
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&buyer, &env.current_contract_address(), &total_amount);
+
+        // Store the escrow
+        Self::save_recurring_escrow(&env, &escrow);
+
+        // Index for buyer
+        let buyer_key = DataKey::BuyerRecurringEscrows(buyer.clone());
+        let mut buyer_list: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&buyer_key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        buyer_list.push_back(escrow_id);
+        env.storage().persistent().set(&buyer_key, &buyer_list);
+        Self::extend_persistent(&env, &buyer_key);
+
+        // Index for artisan
+        let artisan_key = DataKey::ArtisanRecurringEscrows(artisan.clone());
+        let mut artisan_list: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&artisan_key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        artisan_list.push_back(escrow_id);
+        env.storage().persistent().set(&artisan_key, &artisan_list);
+        Self::extend_persistent(&env, &artisan_key);
+
+        Self::emit_recurring_escrow_created(
+            &env,
+            RecurringEscrowCreatedEvent {
+                escrow_id,
+                buyer: buyer.clone(),
+                artisan: artisan.clone(),
+                token: token.clone(),
+                total_amount,
+                frequency,
+                duration,
+                start_time,
+            },
+        );
+
+        Self::exit_reentry_guard(&env);
+        escrow
+    }
+
+    /// Release the next scheduled payment(s) to the artisan.
+    ///
+    /// This function can be called by anyone. It checks the current ledger timestamp against
+    /// the escrow's `next_release_time`. If one or more periods have elapsed, all due periods
+    /// are released in a single atomic transfer. If all periods have been released, the escrow
+    /// is marked `Completed`.
+    ///
+    /// # Arguments
+    /// * `escrow_id` - ID of the recurring escrow
+    ///
+    /// # Errors
+    /// * `RecurringEscrowNotFound` - If no escrow exists with the given ID
+    /// * `InvalidEscrowState` - If the escrow is not `Active`
+    /// * `ReleaseNotDue` - If the current time is before `next_release_time`
+    /// * `AllPeriodsReleased` - If all periods have already been released
+    ///
+    /// # Security
+    /// - Re-entrancy guard prevents recursive calls
+    /// - Fund transfer is atomic (Stellar transaction atomicity)
+    /// - Uses checked arithmetic to prevent overflow
+    /// - Cannot release ahead of schedule; only past-due periods are released
+    pub fn release_next_recurring(env: Env, escrow_id: u64) -> Result<(), Error> {
+        Self::enter_reentry_guard(&env);
+        let mut escrow = Self::load_recurring_escrow(&env, escrow_id);
+
+        if escrow.status != RecurringEscrowStatus::Active {
+            Self::exit_reentry_guard(&env);
+            return Err(Error::InvalidEscrowState);
+        }
+
+        let current_time = env.ledger().timestamp();
+
+        if current_time < escrow.next_release_time {
+            Self::exit_reentry_guard(&env);
+            return Err(Error::ReleaseNotDue);
+        }
+
+        if escrow.released_amount >= escrow.total_amount {
+            Self::exit_reentry_guard(&env);
+            return Err(Error::AllPeriodsReleased);
+        }
+
+        // Calculate how many new periods are due for release.
+        // total_periods_elapsed = how many complete frequency intervals since start
+        let elapsed_since_start = current_time - escrow.start_time;
+        let total_periods_elapsed = elapsed_since_start / escrow.frequency;
+        // Cap at duration
+        let total_periods_elapsed = if total_periods_elapsed > escrow.duration {
+            escrow.duration
+        } else {
+            total_periods_elapsed
+        };
+
+        // How many periods have already been released.
+        // next_release_time is set to start_time + (periods_released + 1) * frequency
+        // after each release. At creation, next_release_time = start_time + frequency
+        // (periods_released = 0). So:
+        let periods_already_released = if escrow.next_release_time > escrow.start_time {
+            let intervals = (escrow.next_release_time - escrow.start_time) / escrow.frequency;
+            // intervals = periods_released + 1 (because next_release_time points to the NEXT due)
+            if intervals > 0 {
+                intervals - 1
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let periods_already_released = if periods_already_released > escrow.duration {
+            escrow.duration
+        } else {
+            periods_already_released
+        };
+
+        let new_periods = total_periods_elapsed.saturating_sub(periods_already_released);
+
+        if new_periods == 0 {
+            Self::exit_reentry_guard(&env);
+            return Err(Error::ReleaseNotDue);
+        }
+
+        let per_period = escrow.total_amount / (escrow.duration as i128);
+        let mut release_amount: i128;
+
+        // If releasing the final period(s), include the rounding remainder
+        if total_periods_elapsed >= escrow.duration {
+            release_amount = escrow.total_amount - escrow.released_amount;
+        } else {
+            release_amount = per_period * (new_periods as i128);
+        }
+
+        // Safety: ensure we never exceed total
+        if escrow.released_amount + release_amount > escrow.total_amount {
+            release_amount = escrow.total_amount - escrow.released_amount;
+        }
+
+        // When per_period is 0 (amount < duration), intermediate periods release nothing.
+        // Only the final period will have a non-zero release_amount (the remainder).
+        // We still advance state so that next_release_time tracks correctly.
+        if release_amount <= 0 {
+            // Advance next_release_time and state even for zero-amount periods
+            escrow.next_release_time = escrow
+                .start_time
+                .checked_add(total_periods_elapsed * escrow.frequency)
+                .expect("next_release_time overflow");
+            // Add frequency for the next pending period
+            if total_periods_elapsed < escrow.duration {
+                escrow.next_release_time = escrow
+                    .next_release_time
+                    .checked_add(escrow.frequency)
+                    .expect("next_release_time overflow");
+            }
+            Self::save_recurring_escrow(&env, &escrow);
+            Self::exit_reentry_guard(&env);
+            return Ok(());
+        }
+
+        // Transfer to artisan
+        let token_client = token::Client::new(&env, &escrow.token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &escrow.artisan,
+            &release_amount,
+        );
+
+        // Update state
+        escrow.released_amount = escrow
+            .released_amount
+            .checked_add(release_amount)
+            .expect("released_amount overflow");
+
+        // Advance next_release_time to point to the next unreleased period
+        escrow.next_release_time = escrow
+            .start_time
+            .checked_add(total_periods_elapsed * escrow.frequency)
+            .expect("next_release_time overflow");
+        // If not completed, add frequency for next pending period
+        if total_periods_elapsed < escrow.duration {
+            escrow.next_release_time = escrow
+                .next_release_time
+                .checked_add(escrow.frequency)
+                .expect("next_release_time overflow");
+        }
+
+        // Determine which period number we just released up to
+        let current_period = total_periods_elapsed;
+
+        // Check completion
+        if escrow.released_amount >= escrow.total_amount {
+            escrow.status = RecurringEscrowStatus::Completed;
+            Self::save_recurring_escrow(&env, &escrow);
+
+            Self::emit_recurring_funds_released(
+                &env,
+                RecurringFundsReleasedEvent {
+                    escrow_id,
+                    buyer: escrow.buyer.clone(),
+                    artisan: escrow.artisan.clone(),
+                    token: escrow.token.clone(),
+                    released_amount: release_amount,
+                    total_released: escrow.released_amount,
+                    period: current_period,
+                    timestamp: current_time,
+                },
+            );
+
+            Self::emit_recurring_escrow_completed(
+                &env,
+                RecurringEscrowCompletedEvent {
+                    escrow_id,
+                    buyer: escrow.buyer.clone(),
+                    artisan: escrow.artisan.clone(),
+                    token: escrow.token.clone(),
+                    total_released: escrow.released_amount,
+                    timestamp: current_time,
+                },
+            );
+        } else {
+            Self::save_recurring_escrow(&env, &escrow);
+
+            Self::emit_recurring_funds_released(
+                &env,
+                RecurringFundsReleasedEvent {
+                    escrow_id,
+                    buyer: escrow.buyer.clone(),
+                    artisan: escrow.artisan.clone(),
+                    token: escrow.token.clone(),
+                    released_amount: release_amount,
+                    total_released: escrow.released_amount,
+                    period: current_period,
+                    timestamp: current_time,
+                },
+            );
+        }
+
+        Self::exit_reentry_guard(&env);
+        Ok(())
+    }
+
+    /// Cancel a recurring escrow and refund the unreleased balance to the buyer.
+    ///
+    /// Only the buyer may cancel. Any funds that have not yet been released are
+    /// transferred back to the buyer. Already-released funds are not affected.
+    /// The escrow status is set to `Cancelled`.
+    ///
+    /// # Arguments
+    /// * `escrow_id` - ID of the recurring escrow to cancel
+    ///
+    /// # Errors
+    /// * `RecurringEscrowNotFound` - If no escrow exists with the given ID
+    /// * `Unauthorized` - If the caller is not the buyer
+    /// * `InvalidEscrowState` - If the escrow is not `Active`
+    ///
+    /// # Security
+    /// - Only the buyer (who funded the escrow) can cancel
+    /// - Refund amount is computed as `total_amount - released_amount` (safe arithmetic)
+    /// - Re-entrancy guard prevents recursive calls
+    /// - Atomic: either the full refund transfers and state updates, or nothing changes
+    pub fn cancel_recurring_escrow(env: Env, escrow_id: u64) -> Result<(), Error> {
+        Self::enter_reentry_guard(&env);
+        let mut escrow = Self::load_recurring_escrow(&env, escrow_id);
+
+        // Only buyer can cancel
+        escrow.buyer.require_auth();
+
+        if escrow.status != RecurringEscrowStatus::Active {
+            Self::exit_reentry_guard(&env);
+            return Err(Error::InvalidEscrowState);
+        }
+
+        let refund_amount = escrow
+            .total_amount
+            .checked_sub(escrow.released_amount)
+            .expect("refund underflow");
+
+        // Refund unreleased balance to buyer
+        if refund_amount > 0 {
+            let token_client = token::Client::new(&env, &escrow.token);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &escrow.buyer,
+                &refund_amount,
+            );
+        }
+
+        escrow.status = RecurringEscrowStatus::Cancelled;
+        Self::save_recurring_escrow(&env, &escrow);
+
+        Self::emit_recurring_escrow_cancelled(
+            &env,
+            RecurringEscrowCancelledEvent {
+                escrow_id,
+                buyer: escrow.buyer.clone(),
+                artisan: escrow.artisan.clone(),
+                token: escrow.token.clone(),
+                refund_amount,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        Self::exit_reentry_guard(&env);
+        Ok(())
+    }
+
+    /// Get the current status of a recurring escrow.
+    ///
+    /// # Arguments
+    /// * `escrow_id` - ID of the recurring escrow
+    ///
+    /// # Returns
+    /// The `RecurringEscrowStatus` (Active, Completed, or Cancelled).
+    pub fn get_recurring_escrow_status(env: Env, escrow_id: u64) -> RecurringEscrowStatus {
+        let escrow = Self::load_recurring_escrow(&env, escrow_id);
+        escrow.status
+    }
+
+    /// Get the remaining (unreleased) balance of a recurring escrow.
+    ///
+    /// # Arguments
+    /// * `escrow_id` - ID of the recurring escrow
+    ///
+    /// # Returns
+    /// The unreleased balance as `i128`. Returns 0 if the escrow is completed or cancelled.
+    pub fn get_recurring_remaining_balance(env: Env, escrow_id: u64) -> i128 {
+        let escrow = Self::load_recurring_escrow(&env, escrow_id);
+        escrow
+            .total_amount
+            .checked_sub(escrow.released_amount)
+            .unwrap_or(0)
+    }
+
+    /// Get the full details of a recurring escrow.
+    ///
+    /// # Arguments
+    /// * `escrow_id` - ID of the recurring escrow
+    ///
+    /// # Returns
+    /// The `RecurringEscrow` struct with all fields.
+    pub fn get_recurring_escrow(env: Env, escrow_id: u64) -> RecurringEscrow {
+        Self::load_recurring_escrow(&env, escrow_id)
+    }
+
+    /// Get recurring escrow IDs for a specific buyer with pagination.
+    pub fn get_recurring_escrows_by_buyer(
+        env: Env,
+        buyer: Address,
+        page: u32,
+        limit: u32,
+    ) -> Result<soroban_sdk::Vec<u64>, Error> {
+        let key = DataKey::BuyerRecurringEscrows(buyer);
+        let ids: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, 1000, 518400);
+        }
+
+        let start = page * limit;
+        let len = ids.len();
+        if start >= len {
+            return Ok(soroban_sdk::Vec::new(&env));
+        }
+        let end = (start + limit).min(len);
+        Ok(ids.slice(start..end))
+    }
+
+    /// Get recurring escrow IDs for a specific artisan with pagination.
+    pub fn get_recurring_escrows_by_artisan(
+        env: Env,
+        artisan: Address,
+        page: u32,
+        limit: u32,
+    ) -> Result<soroban_sdk::Vec<u64>, Error> {
+        let key = DataKey::ArtisanRecurringEscrows(artisan);
+        let ids: soroban_sdk::Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, 1000, 518400);
+        }
+
+        let start = page * limit;
+        let len = ids.len();
+        if start >= len {
+            return Ok(soroban_sdk::Vec::new(&env));
+        }
+        let end = (start + limit).min(len);
+        Ok(ids.slice(start..end))
     }
 }

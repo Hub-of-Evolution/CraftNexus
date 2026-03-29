@@ -2077,7 +2077,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Escrow not in dispute' from contract function 'Symbol(obj#467)'"
+                  "string": "caught panic 'Escrow not in dispute' from contract function 'Symbol(obj#473)'"
                 },
                 {
                   "u32": 1

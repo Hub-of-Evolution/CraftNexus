@@ -2019,6 +2019,8 @@ fn test_multiple_tokens_on_whitelist() {
     client.create_escrow(&buyer, &seller, &token2.address(), &10_000, &2, &Some(3600));
     assert_eq!(client.get_escrow(&1).status, EscrowStatus::Active);
     assert_eq!(client.get_escrow(&2).status, EscrowStatus::Active);
+}
+
 // ============================================================
 // Issue #111 – Batch Optimization Tests (Additional)
 // ============================================================
@@ -2356,7 +2358,8 @@ fn test_validate_batch_creation_exceeds_limit() {
     };
 
     let mut batch_params = soroban_sdk::Vec::new(&env);
-    for _ in 0..101 { // MAX_BATCH_SIZE is 100
+    for _ in 0..101 {
+        // MAX_BATCH_SIZE is 100
         batch_params.push_back(valid_param.clone());
     }
 
