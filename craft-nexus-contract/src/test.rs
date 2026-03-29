@@ -1050,6 +1050,8 @@ fn test_integration_multiple_tokens_and_escrows() {
     let fee_b = token_b.balance(&platform_wallet);
     assert_eq!(fee_a, 500_000);
     assert_eq!(fee_b, 500_000);
+    assert_eq!(client.get_total_fees_for_token(&token_a_contract.address()), 500_000);
+    assert_eq!(client.get_total_fees_for_token(&token_b_contract.address()), 500_000);
     assert_eq!(client.get_total_fees_collected(), 1_000_000);
 }
 

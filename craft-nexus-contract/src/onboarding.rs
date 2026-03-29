@@ -27,12 +27,22 @@ pub enum DataKey {
     Config,
     /// Activity metrics per user (escrow count and volume for auto-verification) (#63)
     UserMetrics(Address),
-    /// Queue of addresses that have requested manual verification (#63)
-    VerificationQueue,
+    /// Pending manual verification request marker keyed by user (#138)
+    VerificationRequest(Address),
+    /// Queue head pointer for manual verification requests (#138)
+    VerificationQueueHead,
+    /// Queue tail pointer for manual verification requests (#138)
+    VerificationQueueTail,
+    /// Queue index -> address mapping for manual verification requests (#138)
+    VerificationQueueIndex(u64),
     /// Verification history log per user (#63)
     VerificationHistory(Address),
     /// Username change fee (in stroops) - Issue #114
     UsernameChangeFee,
+    /// Token used to collect username change fees (#134)
+    UsernameChangeFeeToken,
+    /// Destination wallet for username change fees (#134)
+    UsernameChangeFeeWallet,
     /// Timestamp of last username change per user - Issue #114
     LastUsernameChange(Address),
 }
@@ -354,6 +364,117 @@ pub struct OnboardingContract;
 
 #[contractimpl]
 impl OnboardingContract {
+    fn get_queue_pointer(env: &Env, key: &DataKey) -> u64 {
+        let pointer = env.storage().persistent().get(key).unwrap_or(0u64);
+        if env.storage().persistent().has(key) {
+            Self::extend_persistent(env, key);
+        }
+        pointer
+    }
+
+    fn set_queue_pointer(env: &Env, key: DataKey, value: u64) {
+        env.storage().persistent().set(&key, &value);
+        Self::extend_persistent(env, &key);
+    }
+
+    fn is_verification_pending(env: &Env, user: &Address) -> bool {
+        let key = DataKey::VerificationRequest(user.clone());
+        let is_pending = env.storage().persistent().has(&key);
+        if is_pending {
+            Self::extend_persistent(env, &key);
+        }
+        is_pending
+    }
+
+    fn enqueue_verification_request(env: &Env, user: &Address) {
+        let tail = Self::get_queue_pointer(env, &DataKey::VerificationQueueTail);
+        let queue_index_key = DataKey::VerificationQueueIndex(tail);
+        env.storage().persistent().set(&queue_index_key, user);
+        Self::extend_persistent(env, &queue_index_key);
+
+        let pending_key = DataKey::VerificationRequest(user.clone());
+        env.storage()
+            .persistent()
+            .set(&pending_key, &env.ledger().timestamp());
+        Self::extend_persistent(env, &pending_key);
+
+        Self::set_queue_pointer(env, DataKey::VerificationQueueTail, tail + 1);
+    }
+
+    fn advance_verification_head(env: &Env) {
+        let mut head = Self::get_queue_pointer(env, &DataKey::VerificationQueueHead);
+        let tail = Self::get_queue_pointer(env, &DataKey::VerificationQueueTail);
+
+        while head < tail {
+            let queue_index_key = DataKey::VerificationQueueIndex(head);
+            let queued_user: Option<Address> = env.storage().persistent().get(&queue_index_key);
+
+            let Some(queued_user) = queued_user else {
+                head += 1;
+                continue;
+            };
+
+            if Self::is_verification_pending(env, &queued_user) {
+                Self::extend_persistent(env, &queue_index_key);
+                break;
+            }
+
+            env.storage().persistent().remove(&queue_index_key);
+            head += 1;
+        }
+
+        Self::set_queue_pointer(env, DataKey::VerificationQueueHead, head);
+    }
+
+    fn clear_verification_request(env: &Env, user: &Address) {
+        let pending_key = DataKey::VerificationRequest(user.clone());
+        env.storage().persistent().remove(&pending_key);
+        Self::advance_verification_head(env);
+    }
+
+    fn read_username_fee_token(env: &Env) -> Option<Address> {
+        let key = DataKey::UsernameChangeFeeToken;
+        let token = env.storage().persistent().get(&key);
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(env, &key);
+        }
+        token
+    }
+
+    fn read_username_fee_wallet(env: &Env, config: &OnboardingConfig) -> Address {
+        let key = DataKey::UsernameChangeFeeWallet;
+        let wallet = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(config.platform_admin.clone());
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(env, &key);
+        }
+        wallet
+    }
+
+    fn collect_username_change_fee(env: &Env, user: &Address, config: &OnboardingConfig) {
+        let fee_amount: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsernameChangeFee)
+            .unwrap_or(0);
+
+        if fee_amount <= 0 {
+            return;
+        }
+
+        Self::extend_persistent(env, &DataKey::UsernameChangeFee);
+
+        let fee_token = Self::read_username_fee_token(env)
+            .expect("Username change fee token not configured");
+        let fee_wallet = Self::read_username_fee_wallet(env, config);
+
+        let token_client = token::Client::new(env, &fee_token);
+        token_client.transfer(user, &fee_wallet, &fee_amount);
+    }
+
     fn get_user_profile(env: &Env, user: Address) -> UserProfile {
         let key = DataKey::UserProfile(user.clone());
         let stored: Val = env
@@ -992,23 +1113,11 @@ impl OnboardingContract {
             "User not found"
         );
 
-        let queue_key = DataKey::VerificationQueue;
-        let mut queue: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&queue_key)
-            .unwrap_or(Vec::new(&env));
-
-        // Idempotent — skip if already in queue.
-        for i in 0..queue.len() {
-            if queue.get(i).as_ref() == Some(&user) {
-                return;
-            }
+        if Self::is_verification_pending(&env, &user) {
+            return;
         }
 
-        queue.push_back(user.clone());
-        env.storage().persistent().set(&queue_key, &queue);
-        Self::extend_persistent(&env, &queue_key);
+        Self::enqueue_verification_request(&env, &user);
 
         // Append to history
         let hist_key = DataKey::VerificationHistory(user.clone());
@@ -1052,27 +1161,7 @@ impl OnboardingContract {
         env.storage().persistent().set(&profile_key, &profile);
         Self::extend_persistent(&env, &profile_key);
 
-        // Remove from queue - optimized to avoid full vector rebuild
-        let queue_key = DataKey::VerificationQueue;
-        let mut queue: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&queue_key)
-            .unwrap_or(Vec::new(&env));
-        
-        // Find and remove the user in a single pass
-        if let Some(index) = (0..queue.len()).find(|&i| queue.get(i) == Some(user.clone())) {
-            // Swap with last element and pop (O(1) removal)
-            let last_idx = queue.len() - 1;
-            if index != last_idx {
-                if let Some(last_addr) = queue.get(last_idx) {
-                    queue.set(index, last_addr);
-                }
-            }
-            queue.pop_back();
-            env.storage().persistent().set(&queue_key, &queue);
-            Self::extend_persistent(&env, &queue_key);
-        }
+        Self::clear_verification_request(&env, &user);
 
         // Append to history
         let action = if approve { "approved" } else { "rejected" };
@@ -1112,15 +1201,23 @@ impl OnboardingContract {
 
     /// Get all addresses currently awaiting manual verification (admin helper).
     pub fn get_verification_queue(env: Env) -> Vec<Address> {
-        let queue_key = DataKey::VerificationQueue;
-        let queue = env
-            .storage()
-            .persistent()
-            .get(&queue_key)
-            .unwrap_or(Vec::new(&env));
-        if env.storage().persistent().has(&queue_key) {
-            Self::extend_persistent(&env, &queue_key);
+        Self::advance_verification_head(&env);
+
+        let head = Self::get_queue_pointer(&env, &DataKey::VerificationQueueHead);
+        let tail = Self::get_queue_pointer(&env, &DataKey::VerificationQueueTail);
+        let mut queue = Vec::new(&env);
+
+        for index in head..tail {
+            let queue_index_key = DataKey::VerificationQueueIndex(index);
+            if let Some(user) = env.storage().persistent().get::<DataKey, Address>(&queue_index_key)
+            {
+                if Self::is_verification_pending(&env, &user) {
+                    queue.push_back(user);
+                    Self::extend_persistent(&env, &queue_index_key);
+                }
+            }
         }
+
         queue
     }
 
@@ -1263,6 +1360,8 @@ impl OnboardingContract {
             "Username already taken"
         );
 
+        Self::collect_username_change_fee(&env, &user, &config);
+
         // Atomically remove old username mapping and add new one
         let old_username = profile.username.clone();
         env.storage()
@@ -1309,11 +1408,46 @@ impl OnboardingContract {
         Self::extend_persistent(&env, &DataKey::Config);
 
         config.platform_admin.require_auth();
+        assert!(fee >= 0, "Username change fee cannot be negative");
 
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFee, &fee);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFee);
+    }
+
+    /// Set the token used to collect username change fees (admin only).
+    pub fn set_username_fee_token(env: Env, token: Address) {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .expect("Contract not initialized");
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        config.platform_admin.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::UsernameChangeFeeToken, &token);
+        Self::extend_persistent(&env, &DataKey::UsernameChangeFeeToken);
+    }
+
+    /// Set the wallet that receives username change fees (admin only).
+    pub fn set_username_fee_wallet(env: Env, wallet: Address) {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .expect("Contract not initialized");
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        config.platform_admin.require_auth();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::UsernameChangeFeeWallet, &wallet);
+        Self::extend_persistent(&env, &DataKey::UsernameChangeFeeWallet);
     }
 
     /// Get the current username change fee - Issue #114
@@ -1322,6 +1456,22 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::UsernameChangeFee)
             .unwrap_or(0)
+    }
+
+    /// Get the configured token used for username change fees.
+    pub fn get_username_fee_token(env: Env) -> Option<Address> {
+        Self::read_username_fee_token(&env)
+    }
+
+    /// Get the configured wallet used for username change fees.
+    pub fn get_username_fee_wallet(env: Env) -> Address {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .expect("Contract not initialized");
+        Self::extend_persistent(&env, &DataKey::Config);
+        Self::read_username_fee_wallet(&env, &config)
     }
 
     // -----------------------------------------------------------------------

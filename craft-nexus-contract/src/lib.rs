@@ -2,7 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
-    BytesN, Env, Map, String, Symbol, TryFromVal, Val,
+    BytesN, Env, Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
 mod test;
@@ -121,6 +121,8 @@ pub enum DataKey {
     BuyerEscrows(Address),
     SellerEscrows(Address),
     MinEscrowAmount(Address),
+    TotalFees(Address),
+    FeeTokenIndex,
     ContractVersion,
     /// Custom fee tier for an artisan (basis points)
     ArtisanFeeTier(Address),
@@ -1118,6 +1120,87 @@ impl EscrowContract {
         (amount * (fee_bps as i128)) / 10000
     }
 
+    fn add_fee_token_to_index(env: &Env, token: &Address) {
+        let key = DataKey::FeeTokenIndex;
+        let mut tracked_tokens: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+
+        for index in 0..tracked_tokens.len() {
+            if tracked_tokens.get(index) == Some(token.clone()) {
+                Self::extend_persistent(env, &key);
+                return;
+            }
+        }
+
+        tracked_tokens.push_back(token.clone());
+        env.storage().persistent().set(&key, &tracked_tokens);
+        Self::extend_persistent(env, &key);
+    }
+
+    fn record_total_fees(env: &Env, token: &Address, fee_amount: i128) {
+        if fee_amount <= 0 {
+            return;
+        }
+
+        let key = DataKey::TotalFees(token.clone());
+        let current_total: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&key, &(current_total + fee_amount));
+        Self::extend_persistent(env, &key);
+        Self::add_fee_token_to_index(env, token);
+    }
+
+    fn transfer_platform_fee(env: &Env, token: &Address, platform_wallet: &Address, fee_amount: i128) {
+        if fee_amount <= 0 {
+            return;
+        }
+
+        let token_client = token::Client::new(env, token);
+        token_client.transfer(&env.current_contract_address(), platform_wallet, &fee_amount);
+        Self::record_total_fees(env, token, fee_amount);
+    }
+
+    fn get_legacy_total_fees(env: &Env) -> i128 {
+        let fees = env.storage().persistent().get(&TOTAL_FEES).unwrap_or(0);
+        if env.storage().persistent().has(&TOTAL_FEES) {
+            Self::extend_persistent(env, &TOTAL_FEES);
+        }
+        fees
+    }
+
+    fn get_all_tracked_total_fees(env: &Env) -> i128 {
+        let key = DataKey::FeeTokenIndex;
+        let tracked_tokens: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+
+        if tracked_tokens.is_empty() {
+            return Self::get_legacy_total_fees(env);
+        }
+
+        Self::extend_persistent(env, &key);
+
+        let mut total_fees = 0i128;
+        for index in 0..tracked_tokens.len() {
+            if let Some(token) = tracked_tokens.get(index) {
+                let token_key = DataKey::TotalFees(token);
+                let token_total: i128 = env.storage().persistent().get(&token_key).unwrap_or(0);
+                if env.storage().persistent().has(&token_key) {
+                    Self::extend_persistent(env, &token_key);
+                }
+                total_fees += token_total;
+            }
+        }
+
+        total_fees
+    }
+
     /// Release funds to seller with platform fee deduction
     ///
     /// # Arguments
@@ -1150,22 +1233,12 @@ impl EscrowContract {
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
 
         // Transfer platform fee to platform wallet
-        let token_client = token::Client::new(&env, &escrow.token);
         if fee_amount > 0 {
-            token_client.transfer(
-                &env.current_contract_address(),
-                &config.platform_wallet,
-                &fee_amount,
-            );
-
-            // Update total fees collected
-            let mut total_fees: i128 = env.storage().persistent().get(&TOTAL_FEES).unwrap_or(0);
-            total_fees += fee_amount;
-            env.storage().persistent().set(&TOTAL_FEES, &total_fees);
-            Self::extend_persistent(&env, &TOTAL_FEES);
+            Self::transfer_platform_fee(&env, &escrow.token, &config.platform_wallet, fee_amount);
         }
 
         // Transfer remaining funds to seller
+        let token_client = token::Client::new(&env, &escrow.token);
         token_client.transfer(
             &env.current_contract_address(),
             &escrow.seller,
@@ -1229,22 +1302,12 @@ impl EscrowContract {
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
 
         // Transfer platform fee to platform wallet
-        let token_client = token::Client::new(&env, &escrow.token);
         if fee_amount > 0 {
-            token_client.transfer(
-                &env.current_contract_address(),
-                &config.platform_wallet,
-                &fee_amount,
-            );
-
-            // Update total fees collected
-            let mut total_fees: i128 = env.storage().persistent().get(&TOTAL_FEES).unwrap_or(0);
-            total_fees += fee_amount;
-            env.storage().persistent().set(&TOTAL_FEES, &total_fees);
-            Self::extend_persistent(&env, &TOTAL_FEES);
+            Self::transfer_platform_fee(&env, &escrow.token, &config.platform_wallet, fee_amount);
         }
 
         // Transfer remaining funds to seller
+        let token_client = token::Client::new(&env, &escrow.token);
         token_client.transfer(
             &env.current_contract_address(),
             &escrow.seller,
@@ -1463,14 +1526,7 @@ impl EscrowContract {
 
         let token_client = token::Client::new(env, &escrow.token);
         if fee_amount > 0 {
-            token_client.transfer(
-                &env.current_contract_address(),
-                &config.platform_wallet,
-                &fee_amount,
-            );
-            let mut total_fees: i128 = env.storage().persistent().get(&TOTAL_FEES).unwrap_or(0);
-            total_fees += fee_amount;
-            env.storage().persistent().set(&TOTAL_FEES, &total_fees);
+            Self::transfer_platform_fee(env, &escrow.token, &config.platform_wallet, fee_amount);
         }
 
         token_client.transfer(
@@ -1812,9 +1868,15 @@ impl EscrowContract {
 
     /// Get total fees collected by platform
     pub fn get_total_fees_collected(env: Env) -> i128 {
-        let fees = env.storage().persistent().get(&TOTAL_FEES).unwrap_or(0);
-        if env.storage().persistent().has(&TOTAL_FEES) {
-            Self::extend_persistent(&env, &TOTAL_FEES);
+        Self::get_all_tracked_total_fees(&env)
+    }
+
+    /// Get total fees collected for a specific token.
+    pub fn get_total_fees_for_token(env: Env, token: Address) -> i128 {
+        let key = DataKey::TotalFees(token);
+        let fees = env.storage().persistent().get(&key).unwrap_or(0);
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(&env, &key);
         }
         fees
     }
@@ -2225,22 +2287,17 @@ impl EscrowContract {
                     env.storage().persistent().set(&(ESCROW, order_id), &escrow);
 
                     // Transfer platform fee to platform wallet
-                    let token_client = token::Client::new(&env, &escrow.token);
                     if fee_amount > 0 {
-                        token_client.transfer(
-                            &env.current_contract_address(),
+                        Self::transfer_platform_fee(
+                            &env,
+                            &escrow.token,
                             &config.platform_wallet,
-                            &fee_amount,
+                            fee_amount,
                         );
-
-                        // Update total fees collected
-                        let mut total_fees: i128 =
-                            env.storage().persistent().get(&TOTAL_FEES).unwrap_or(0);
-                        total_fees += fee_amount;
-                        env.storage().persistent().set(&TOTAL_FEES, &total_fees);
                     }
 
                     // Transfer remaining funds to seller
+                    let token_client = token::Client::new(&env, &escrow.token);
                     token_client.transfer(
                         &env.current_contract_address(),
                         &escrow.seller,
@@ -2817,14 +2874,7 @@ impl EscrowContract {
 
         // Pay platform fee
         if fee_amount > 0 {
-            token_client.transfer(
-                &env.current_contract_address(),
-                &config.platform_wallet,
-                &fee_amount,
-            );
-            let mut total_fees: i128 = env.storage().persistent().get(&TOTAL_FEES).unwrap_or(0);
-            total_fees += fee_amount;
-            env.storage().persistent().set(&TOTAL_FEES, &total_fees);
+            Self::transfer_platform_fee(&env, &escrow.token, &config.platform_wallet, fee_amount);
         }
 
         // Pay seller

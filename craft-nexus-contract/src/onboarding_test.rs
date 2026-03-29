@@ -1,6 +1,6 @@
 use super::*;
 use crate::Error;
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, token, Address, Env, String};
 
 fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     let contract_id = env.register_contract(None, OnboardingContract);
@@ -541,8 +541,9 @@ fn test_auto_verify_triggers_on_threshold() {
 
     // Default thresholds: 5 escrows and 10_000_000_000 volume.
     // Call update_user_metrics with enough to cross both thresholds.
-    let token = env.register_stellar_asset_contract(Address::generate(&env));
-    client.update_user_metrics(&user, &5u32, &10_000_000_000i128, &token);
+    let token_admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(token_admin);
+    client.update_user_metrics(&user, &5u32, &10_000_000_000i128, &token.address());
 
     // Should now be auto-verified
     assert!(client.is_verified(&user));
@@ -600,8 +601,9 @@ fn test_configurable_thresholds() {
     client.set_verification_thresholds(&1u32, &1i128);
 
     // Providing minimal metrics should now trigger auto-verification
-    let token = env.register_stellar_asset_contract(Address::generate(&env));
-    client.update_user_metrics(&user, &1u32, &1i128, &token);
+    let token_admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(token_admin);
+    client.update_user_metrics(&user, &1u32, &1i128, &token.address());
     assert!(client.is_verified(&user));
 }
 
@@ -674,6 +676,35 @@ fn test_process_verification_request_reject() {
     assert!(!client.is_verified(&user));
     let queue = client.get_verification_queue();
     assert_eq!(queue.len(), 0);
+}
+
+#[test]
+fn test_process_verification_request_preserves_other_pending_users() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user_one = Address::generate(&env);
+    let user_two = Address::generate(&env);
+
+    client.onboard_user(
+        &user_one,
+        &String::from_str(&env, "queued4"),
+        &UserRole::Artisan,
+    );
+    client.onboard_user(
+        &user_two,
+        &String::from_str(&env, "queued5"),
+        &UserRole::Artisan,
+    );
+
+    client.request_verification(&user_one);
+    client.request_verification(&user_two);
+    client.process_verification_request(&user_one, &true);
+
+    let queue = client.get_verification_queue();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.get(0), Some(user_two));
 }
 
 /// Verification history is tracked across request, approve, and auto-verify actions.
@@ -952,6 +983,48 @@ fn test_username_change_fee_management() {
 }
 
 #[test]
+fn test_change_username_collects_configured_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let fee_wallet = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_contract.address());
+    let token_client = token::Client::new(&env, &token_contract.address());
+
+    token_admin_client.mint(&user, &5_000_000);
+
+    client.onboard_user(&user, &String::from_str(&env, "fee_user"), &UserRole::Buyer);
+    client.set_username_change_fee(&1_000_000);
+    client.set_username_fee_token(&token_contract.address());
+    client.set_username_fee_wallet(&fee_wallet);
+
+    client.change_username(&user, &String::from_str(&env, "fee_user_new"));
+
+    assert_eq!(token_client.balance(&user), 4_000_000);
+    assert_eq!(token_client.balance(&fee_wallet), 1_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Username change fee token not configured")]
+fn test_change_username_fee_requires_token_configuration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(&user, &String::from_str(&env, "needs_fee"), &UserRole::Buyer);
+    client.set_username_change_fee(&1_000_000);
+
+    client.change_username(&user, &String::from_str(&env, "still_needs_fee"));
+}
+
+#[test]
 fn test_change_username_with_special_characters() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1007,8 +1080,9 @@ fn test_volume_normalization_across_decimals() {
     client.onboard_user(&user, &String::from_str(&env, "normy"), &UserRole::Artisan);
 
     // 1. Test 7-decimal token (base)
-    let token_7 = env.register_stellar_asset_contract(Address::generate(&env));
-    client.update_user_metrics(&user, &1u32, &1_000_000_000i128, &token_7);
+    let token_admin = Address::generate(&env);
+    let token_7 = env.register_stellar_asset_contract_v2(token_admin);
+    client.update_user_metrics(&user, &1u32, &1_000_000_000i128, &token_7.address());
     
     let metrics = client.get_user_metrics(&user);
     assert_eq!(metrics.total_volume, 1_000_000_000); // 100.0000000 USDC -> 100.0000000 normalized
