@@ -2657,7 +2657,7 @@ impl EscrowContract {
         env: Env,
         order_id: u32,
         refund_amount: i128,
-        proposed_by: Address,
+        caller: Address,
     ) -> Result<(), Error> {
         let escrow_opt: Option<Escrow> = env.storage().persistent().get(&(ESCROW, order_id));
         if escrow_opt.is_none() {
@@ -2669,13 +2669,13 @@ impl EscrowContract {
             return Err(Error::InvalidEscrowState);
         }
 
-        // Verify proposed_by is either the buyer or seller
-        if proposed_by != escrow.buyer && proposed_by != escrow.seller {
+        // Verify caller is either the buyer or seller
+        if caller != escrow.buyer && caller != escrow.seller {
             return Err(Error::Unauthorized);
         }
 
         // Require auth from the proposing party
-        proposed_by.require_auth();
+        caller.require_auth();
 
         if refund_amount <= 0 || refund_amount > escrow.amount {
             return Err(Error::InvalidRefundAmount);
@@ -2689,7 +2689,7 @@ impl EscrowContract {
         let proposal = PartialRefundProposal {
             order_id,
             refund_amount,
-            proposed_by,
+            proposed_by: caller,
             proposed_at: env.ledger().timestamp(),
         };
 
