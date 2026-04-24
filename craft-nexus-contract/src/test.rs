@@ -1045,7 +1045,14 @@ fn test_integration_multiple_tokens_and_escrows() {
     let admin = Address::generate(&env);
     let arbitrator = Address::generate(&env);
 
-    client.initialize(&platform_wallet, &admin, &arbitrator, &500);
+    let onboarding_contract = Address::generate(&env);
+    client.initialize(
+        &platform_wallet,
+        &admin,
+        &arbitrator,
+        &500,
+        &onboarding_contract,
+    );
 
     // Token A
     let token_a_admin = Address::generate(&env);
