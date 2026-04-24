@@ -158,10 +158,8 @@ pub enum DataKey {
     ArtisanFeeTier(Address),
     /// Referral reward percentage in basis points
     ReferralRewardBps,
-    /// Staked token amount for an artisan
+    /// Staked token amount and asset for an artisan
     ArtisanStake(Address),
-    /// Token address backing an artisan's staked balance
-    ArtisanStakeToken(Address),
     /// Timestamp when the stake cooldown ends for an artisan
     StakeCooldownEnd(Address),
     /// Partial refund proposal for a disputed order
@@ -189,6 +187,14 @@ pub enum DataKey {
     /// Count of currently active (non-released, non-refunded) escrows or recurring escrows for a user address.
     /// Used as a barrier for profile deactivation.
     ActiveObligations(Address),
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArtisanStakeData {
+    pub amount: i128,
+    pub token: Address,
 }
 
 #[contracttype]
@@ -833,6 +839,7 @@ impl EscrowContract {
                 .storage()
                 .persistent()
                 .get(&DataKey::ArtisanStake(seller.clone()))
+                .map(|stake: ArtisanStakeData| stake.amount)
                 .unwrap_or(0);
             if artisan_stake < config.min_stake_required {
                 env.panic_with_error(crate::Error::InsufficientStake);
@@ -2482,26 +2489,22 @@ impl EscrowContract {
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&artisan, &env.current_contract_address(), &amount);
 
-        // Accumulate stake
+        // Accumulate stake in a single record with token metadata.
         let stake_key = DataKey::ArtisanStake(artisan.clone());
-        let stake_token_key = DataKey::ArtisanStakeToken(artisan.clone());
-        let current_stake: i128 = env.storage().persistent().get(&stake_key).unwrap_or(0);
-        if current_stake > 0 {
-            let staked_token: Address = env
-                .storage()
-                .persistent()
-                .get(&stake_token_key)
-                .unwrap_or_else(|| env.panic_with_error(crate::Error::StorageCorrupted));
-            if staked_token != token {
+        let current_stake: Option<ArtisanStakeData> = env.storage().persistent().get(&stake_key);
+        let new_stake = if let Some(existing_stake) = current_stake {
+            if existing_stake.token != token {
                 env.panic_with_error(crate::Error::StakeTokenMismatch);
             }
+            ArtisanStakeData {
+                amount: existing_stake.amount + amount,
+                token,
+            }
         } else {
-            env.storage().persistent().set(&stake_token_key, &token);
-            Self::extend_persistent(&env, &stake_token_key);
-        }
-        env.storage()
-            .persistent()
-            .set(&stake_key, &(current_stake + amount));
+            ArtisanStakeData { amount, token }
+        };
+
+        env.storage().persistent().set(&stake_key, &new_stake);
         Self::extend_persistent(&env, &stake_key);
 
         // Set / reset cooldown end timestamp
@@ -2527,36 +2530,34 @@ impl EscrowContract {
         }
 
         let stake_key = DataKey::ArtisanStake(artisan.clone());
-        let stake_token_key = DataKey::ArtisanStakeToken(artisan.clone());
-        let stake: i128 = env.storage().persistent().get(&stake_key).unwrap_or(0);
-        let staked_token: Address = env
+        let stake_data: ArtisanStakeData = env
             .storage()
             .persistent()
-            .get(&stake_token_key)
+            .get(&stake_key)
             .unwrap_or_else(|| env.panic_with_error(crate::Error::StorageCorrupted));
 
-        if stake <= 0 {
+        if stake_data.amount <= 0 {
             env.panic_with_error(crate::Error::AmountBelowMinimum);
         }
-        if staked_token != token {
+        if stake_data.token != token {
             env.panic_with_error(crate::Error::StakeTokenMismatch);
         }
 
         // Clear stake metadata before returning the reserved artisan funds.
-        env.storage().persistent().set(&stake_key, &0i128);
-        env.storage().persistent().remove(&stake_token_key);
+        env.storage().persistent().remove(&stake_key);
         env.storage().persistent().remove(&cooldown_key);
 
         // Return tokens to artisan
         let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&env.current_contract_address(), &artisan, &stake);
+        token_client.transfer(&env.current_contract_address(), &artisan, &stake_data.amount);
     }
 
     /// Return the current staked amount for an artisan.
     pub fn get_stake(env: Env, artisan: Address) -> i128 {
         env.storage()
             .persistent()
-            .get::<DataKey, i128>(&DataKey::ArtisanStake(artisan))
+            .get::<DataKey, ArtisanStakeData>(&DataKey::ArtisanStake(artisan))
+            .map(|stake: ArtisanStakeData| stake.amount)
             .unwrap_or(0)
     }
 
