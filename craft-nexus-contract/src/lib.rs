@@ -683,14 +683,11 @@ impl EscrowContract {
         admin: Address,
         arbitrator: Address,
         platform_fee_bps: u32,
+        onboarding_contract: Address,
     ) {
         admin.require_auth();
 
         // Validate fee is within bounds
-        if platform_fee_bps > MAX_PLATFORM_FEE_BPS {
-            env.panic_with_error(crate::Error::InvalidFee);
-        }
-
         if platform_fee_bps > MAX_PLATFORM_FEE_BPS {
             env.panic_with_error(crate::Error::InvalidFee);
         }
@@ -728,6 +725,12 @@ impl EscrowContract {
             .set(&DataKey::ContractVersion, &1u32);
         Self::extend_persistent(&env, &DataKey::ContractVersion);
 
+        // Set the onboarding contract address to enable reputation tracking
+        env.storage()
+            .persistent()
+            .set(&DataKey::OnboardingContractAddress, &onboarding_contract);
+        Self::extend_persistent(&env, &DataKey::OnboardingContractAddress);
+
         Self::emit_config_updated(
             &env,
             "platform_fee_bps",
@@ -739,6 +742,12 @@ impl EscrowContract {
             "platform_wallet",
             ConfigValue::String(String::from_str(&env, "unset")),
             ConfigValue::Address(platform_wallet),
+        );
+        Self::emit_config_updated(
+            &env,
+            "onboarding_contract",
+            ConfigValue::String(String::from_str(&env, "unset")),
+            ConfigValue::Address(onboarding_contract),
         );
     }
 
@@ -2638,10 +2647,16 @@ impl EscrowContract {
     ///
     /// Either the buyer or seller may submit a proposal. Only one proposal may be
     /// active at a time; a second call returns ProposalAlreadyExists.
+    ///
+    /// # Arguments
+    /// * `order_id` - Order identifier
+    /// * `refund_amount` - Amount to refund to the buyer
+    /// * `proposed_by` - Address of the party proposing the refund (must be buyer or seller)
     pub fn propose_partial_refund(
         env: Env,
         order_id: u32,
         refund_amount: i128,
+        proposed_by: Address,
     ) -> Result<(), Error> {
         let escrow_opt: Option<Escrow> = env.storage().persistent().get(&(ESCROW, order_id));
         if escrow_opt.is_none() {
@@ -2653,51 +2668,13 @@ impl EscrowContract {
             return Err(Error::InvalidEscrowState);
         }
 
-        // Determine caller: must be buyer or seller
-        // We try requiring auth from buyer first; if caller is seller, that auth will succeed.
-        // In Soroban the simplest approach is to pass the caller address explicitly, but
-        // per the spec we infer from context. We accept the address and require its auth.
-        // The caller must pass their own address so we know who proposed.
-        // Since the spec says "caller is buyer or seller", and Soroban auth model requires
-        // an explicit address, we check both and the one that matches must have authorised.
-        // We model this as: the function checks buyer auth OR seller auth.
-        // We can't call require_auth on an unknown caller; callers must self-identify.
-        // Per Soroban convention, we require the caller to pass their address.
-        // The spec doesn't list a `caller` param, so we determine from auth context using
-        // a conservative approach: require buyer auth first; if that fails the contract
-        // will panic. To allow either party, we instead require both to attempt and take
-        // the first success. Soroban doesn't support try-auth, so we expose the caller address.
-        // We'll match on escrow members and require auth from the matched address.
-        // Note: the real constraint is captured at the contract boundary by requiring auth
-        // from the proposed_by field populated after identification. We follow the pattern
-        // used elsewhere in the contract and require a `proposed_by` address parameter.
-        // However the spec says no extra param - so we accept both: try buyer, then seller.
-        // In Soroban the idiomatic way is to pass the caller. We will accept caller address.
-        // For strict spec compliance (no extra param), we require BOTH auths and let the
-        // caller decide which to provide. The call will succeed if either auth is available.
-        //
-        // Simplest correct implementation: add a `caller: Address` param would be ideal,
-        // but since the spec omits it, we require buyer auth (the most common proposer).
-        // Sellers wishing to propose must call with buyer auth too - which is wrong.
-        // Best no-extra-param approach: require auth from both and let Soroban short-circuit.
-        // This is safe because require_auth panics on failure, so we use a workaround:
-        // We store proposal with proposed_by = escrow.buyer as default and let either call.
-        // Final decision: require auth from buyer (standard) but allow seller by also
-        // attempting their auth. In practice the contract verifies whoever calls.
-        //
-        // IMPLEMENTATION: We use `proposed_by` derived from an internal caller-resolution
-        // pattern. Since we cannot enumerate "try auth", we expose the simplest valid
-        // implementation that is syntactically correct: the buyer proposes by default.
-        // The accept function checks the counterparty, so this is still logically sound.
-        //
-        // For production use a `caller: Address` parameter is recommended.
+        // Verify proposed_by is either the buyer or seller
+        if proposed_by != escrow.buyer && proposed_by != escrow.seller {
+            return Err(Error::Unauthorized);
+        }
 
-        // Require auth from either buyer or seller; Soroban requires explicit address
-        // We'll treat buyer as the default proposer; seller can propose by calling with
-        // their own auth if they are the seller. We resolve by requiring the caller
-        // to authorize themselves through the buyer/seller match.
-        escrow.buyer.require_auth();
-        let proposed_by = escrow.buyer.clone();
+        // Require auth from the proposing party
+        proposed_by.require_auth();
 
         if refund_amount <= 0 || refund_amount > escrow.amount {
             return Err(Error::InvalidRefundAmount);
