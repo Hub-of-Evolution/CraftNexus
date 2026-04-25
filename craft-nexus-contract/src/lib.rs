@@ -378,6 +378,24 @@ pub struct ArtisanFeeTierUpdatedEvent {
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct TokensStakedEvent {
+    pub artisan: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct TokensUnstakedEvent {
+    pub artisan: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct EscrowMetadata {
     pub ipfs_hash: Option<String>,
     pub metadata_hash: Option<Bytes>,
@@ -776,7 +794,7 @@ impl EscrowContract {
         admin: Address,
         arbitrator: Address,
         platform_fee_bps: u32,
-        onboarding_contract: Address,
+        onboarding_contract: Option<Address>,
     ) {
         admin.require_auth();
 
@@ -820,11 +838,13 @@ impl EscrowContract {
             .set(&DataKey::ContractVersion, &1u32);
         Self::extend_persistent(&env, &DataKey::ContractVersion);
 
-        // Set the onboarding contract address to enable reputation tracking
-        env.storage()
-            .persistent()
-            .set(&DataKey::OnboardingContractAddress, &onboarding_contract);
-        Self::extend_persistent(&env, &DataKey::OnboardingContractAddress);
+        // Set the onboarding contract address to enable reputation tracking (optional)
+        if let Some(ref addr) = onboarding_contract {
+            env.storage()
+                .persistent()
+                .set(&DataKey::OnboardingContractAddress, addr);
+            Self::extend_persistent(&env, &DataKey::OnboardingContractAddress);
+        }
 
         Self::emit_config_updated(
             &env,
@@ -838,12 +858,14 @@ impl EscrowContract {
             ConfigValue::String(String::from_str(&env, "unset")),
             ConfigValue::Address(platform_wallet),
         );
-        Self::emit_config_updated(
-            &env,
-            "onboarding_contract",
-            ConfigValue::String(String::from_str(&env, "unset")),
-            ConfigValue::Address(onboarding_contract),
-        );
+        if let Some(addr) = onboarding_contract {
+            Self::emit_config_updated(
+                &env,
+                "onboarding_contract",
+                ConfigValue::String(String::from_str(&env, "unset")),
+                ConfigValue::Address(addr),
+            );
+        }
     }
 
     /// Propose a new administrator for the platform (admin only).
@@ -1248,17 +1270,47 @@ impl EscrowContract {
     }
 
     fn get_platform_config_internal(env: &Env) -> PlatformConfig {
-        let config = env.storage().persistent().get(&DataKey::PlatformConfig);
-        if config.is_none() {
-            env.panic_with_error(crate::Error::PlatformNotInitialized);
+        env.storage()
+            .persistent()
+            .get(&DataKey::PlatformConfig)
+            .unwrap_or_else(|| env.panic_with_error(crate::Error::PlatformNotInitialized))
+    }
+
+    fn try_get_escrow_readonly(env: &Env, order_id: u32) -> Escrow {
+        let key = (ESCROW, order_id);
+        let stored: Val = env.storage().persistent().get(&key).unwrap_or_else(|| env.panic_with_error(crate::Error::EscrowNotFound));
+        let map = Map::<Symbol, Val>::try_from_val(env, &stored).expect("");
+        let version_key = Symbol::new(env, "version");
+
+        if map.contains_key(version_key) {
+            let mut escrow = Escrow::try_from_val(env, &stored).expect("");
+            if escrow.version < CURRENT_ESCROW_VERSION {
+                escrow.version = CURRENT_ESCROW_VERSION;
+            }
+            return escrow;
         }
-        Self::extend_persistent(env, &DataKey::PlatformConfig);
-        config.expect("")
+
+        let legacy = LegacyEscrow::try_from_val(env, &stored).expect("");
+        Escrow {
+            version: CURRENT_ESCROW_VERSION,
+            id: legacy.id,
+            buyer: legacy.buyer,
+            seller: legacy.seller,
+            token: legacy.token,
+            amount: legacy.amount,
+            status: legacy.status,
+            release_window: legacy.release_window,
+            created_at: legacy.created_at,
+            ipfs_hash: legacy.ipfs_hash,
+            metadata_hash: legacy.metadata_hash,
+            dispute_reason: legacy.dispute_reason,
+            dispute_initiated_at: legacy.dispute_initiated_at,
+        }
     }
 
     fn get_stored_escrow(env: &Env, order_id: u32) -> Escrow {
         let key = (ESCROW, order_id);
-        let stored: Val = env.storage().persistent().get(&key).expect("");
+        let stored: Val = env.storage().persistent().get(&key).unwrap_or_else(|| env.panic_with_error(crate::Error::EscrowNotFound));
         let map = Map::<Symbol, Val>::try_from_val(env, &stored).expect("");
         let version_key = Symbol::new(env, "version");
 
@@ -1359,11 +1411,7 @@ impl EscrowContract {
     }
 
     fn get_legacy_total_fees(env: &Env) -> i128 {
-        let fees = env.storage().persistent().get(&TOTAL_FEES).unwrap_or(0);
-        if env.storage().persistent().has(&TOTAL_FEES) {
-            Self::extend_persistent(env, &TOTAL_FEES);
-        }
-        fees
+        env.storage().persistent().get(&TOTAL_FEES).unwrap_or(0)
     }
 
     fn get_all_tracked_total_fees(env: &Env) -> i128 {
@@ -1378,16 +1426,11 @@ impl EscrowContract {
             return Self::get_legacy_total_fees(env);
         }
 
-        Self::extend_persistent(env, &key);
-
         let mut total_fees = 0i128;
         for index in 0..tracked_tokens.len() {
             if let Some(token) = tracked_tokens.get(index) {
                 let token_key = DataKey::TotalFees(token);
                 let token_total: i128 = env.storage().persistent().get(&token_key).unwrap_or(0);
-                if env.storage().persistent().has(&token_key) {
-                    Self::extend_persistent(env, &token_key);
-                }
                 total_fees += token_total;
             }
         }
@@ -1661,15 +1704,10 @@ impl EscrowContract {
     }
 
     pub fn get_version(env: Env) -> u32 {
-        let version = env
-            .storage()
+        env.storage()
             .persistent()
             .get(&DataKey::ContractVersion)
-            .unwrap_or(0);
-        if env.storage().persistent().has(&DataKey::ContractVersion) {
-            Self::extend_persistent(&env, &DataKey::ContractVersion);
-        }
-        version
+            .unwrap_or(0)
     }
 
     /// Refund funds to buyer (admin only)
@@ -1763,9 +1801,6 @@ impl EscrowContract {
     /// # Arguments
     /// * `order_id` - Order identifier
     pub fn get_escrow(env: Env, order_id: u32) -> Escrow {
-        if !env.storage().persistent().has(&(ESCROW, order_id)) {
-            env.panic_with_error(crate::Error::EscrowNotFound);
-        }
         Self::get_stored_escrow(&env, order_id)
     }
 
@@ -1820,10 +1855,7 @@ impl EscrowContract {
     /// # Arguments
     /// * `order_id` - Order identifier
     pub fn can_auto_release(env: Env, order_id: u32) -> bool {
-        if !env.storage().persistent().has(&(ESCROW, order_id)) {
-            env.panic_with_error(crate::Error::EscrowNotFound);
-        }
-        let escrow = Self::get_stored_escrow(&env, order_id);
+        let escrow = Self::try_get_escrow_readonly(&env, order_id);
 
         if escrow.status != EscrowStatus::Active {
             return false;
@@ -1849,9 +1881,6 @@ impl EscrowContract {
     ) {
         authorized_address.require_auth();
 
-        if !env.storage().persistent().has(&(ESCROW, order_id)) {
-            env.panic_with_error(crate::Error::EscrowNotFound);
-        }
         let mut escrow = Self::get_stored_escrow(&env, order_id);
 
         // Allow buyer or seller to dispute
@@ -2146,12 +2175,10 @@ impl EscrowContract {
 
     /// Get total fees collected for a specific token.
     pub fn get_total_fees_for_token(env: Env, token: Address) -> i128 {
-        let key = DataKey::TotalFees(token);
-        let fees = env.storage().persistent().get(&key).unwrap_or(0);
-        if env.storage().persistent().has(&key) {
-            Self::extend_persistent(&env, &key);
-        }
-        fees
+        env.storage()
+            .persistent()
+            .get(&DataKey::TotalFees(token))
+            .unwrap_or(0)
     }
 
     /// Calculate the fee for a given amount (for display purposes)
@@ -2208,11 +2235,7 @@ impl EscrowContract {
         }
 
         // Validate IPFS hash if provided
-        if let Some(ref ipfs) = params.ipfs_hash {
-            if !Self::validate_ipfs_cid(ipfs) {
-                return Err(Error::InvalidIpfsHash);
-            }
-        }
+        Self::validate_optional_ipfs_hash(env, &params.ipfs_hash);
 
         if let Some(hash) = &params.metadata_hash {
             if hash.len() != 32 {
@@ -2239,8 +2262,7 @@ impl EscrowContract {
         );
         let created_at = created_at_u64 as u32;
 
-        // Validate metadata
-        Self::validate_optional_ipfs_hash(env, &params.ipfs_hash);
+        // Validate metadata (validate_escrow_params already checked ipfs_hash via validate_optional_ipfs_hash)
         Self::validate_optional_metadata_hash(env, &params.metadata_hash);
 
         let escrow = Escrow {
@@ -2862,6 +2884,15 @@ impl EscrowContract {
         let cooldown_end = env.ledger().timestamp() + config.stake_cooldown as u64;
         env.storage().persistent().set(&cooldown_key, &cooldown_end);
         Self::extend_persistent(&env, &cooldown_key);
+
+        env.events().publish(
+            (Symbol::new(&env, "tokens_staked"), artisan.clone()),
+            TokensStakedEvent {
+                artisan,
+                token: new_stake.token.clone(),
+                amount,
+            },
+        );
     }
 
     /// Unstake previously staked tokens after the cooldown period has elapsed.
@@ -2899,6 +2930,15 @@ impl EscrowContract {
         // Return tokens to artisan
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&env.current_contract_address(), &artisan, &stake_data.amount);
+
+        env.events().publish(
+            (Symbol::new(&env, "tokens_unstaked"), artisan.clone()),
+            TokensUnstakedEvent {
+                artisan,
+                token,
+                amount: stake_data.amount,
+            },
+        );
     }
 
     /// Return the current staked amount for an artisan.
@@ -3048,15 +3088,10 @@ impl EscrowContract {
     /// hitting Soroban CPU/memory resource limits.
     pub fn get_escrow_count(env: Env) -> u32 {
         let key = DataKey::EscrowCount;
-        let count = env
-            .storage()
+        env.storage()
             .persistent()
             .get::<DataKey, u32>(&key)
-            .unwrap_or(0);
-        if env.storage().persistent().has(&key) {
-            Self::extend_persistent(&env, &key);
-        }
-        count
+            .unwrap_or(0)
     }
 
     /// Returns a page of all escrow order IDs created on the platform, in creation order.
@@ -3108,9 +3143,6 @@ impl EscrowContract {
             .persistent()
             .get(&key)
             .unwrap_or(soroban_sdk::Vec::new(&env));
-        if env.storage().persistent().has(&key) {
-            Self::extend_persistent(&env, &key);
-        }
 
         let start = page * limit;
         let len = all_ids.len();

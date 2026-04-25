@@ -504,15 +504,10 @@ impl OnboardingContract {
 
     fn read_username_fee_wallet(env: &Env, config: &OnboardingConfig) -> Address {
         let key = DataKey::UsernameChangeFeeWallet;
-        let wallet = env
-            .storage()
+        env.storage()
             .persistent()
             .get(&key)
-            .unwrap_or(config.platform_admin.clone());
-        if env.storage().persistent().has(&key) {
-            Self::extend_persistent(env, &key);
-        }
-        wallet
+            .unwrap_or(config.platform_admin.clone())
     }
 
     fn collect_username_change_fee(env: &Env, user: &Address, config: &OnboardingConfig) {
@@ -536,23 +531,18 @@ impl OnboardingContract {
         token_client.transfer(user, &fee_wallet, &fee_amount);
     }
 
-    fn get_user_profile(env: &Env, user: Address) -> UserProfile {
+    fn try_get_user_profile(env: &Env, user: Address) -> Option<UserProfile> {
         let key = DataKey::UserProfile(user.clone());
-        let stored: Val = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound));
+        let stored: Val = env.storage().persistent().get(&key)?;
         let map = Map::<Symbol, Val>::try_from_val(env, &stored).expect("");
         let version_key = Symbol::new(env, "version");
 
         if map.contains_key(version_key) {
             let profile = UserProfile::try_from_val(env, &stored).expect("");
             if profile.version < CURRENT_USER_PROFILE_VERSION {
-                return Self::upgrade_user_profile(env, user, profile);
+                return Some(Self::upgrade_user_profile(env, user, profile));
             }
-            Self::extend_persistent(env, &key);
-            return profile;
+            return Some(profile);
         }
 
         let legacy =
@@ -571,7 +561,11 @@ impl OnboardingContract {
         };
         env.storage().persistent().set(&key, &upgraded);
         Self::extend_persistent(env, &key);
-        upgraded
+        Some(upgraded)
+    }
+
+    fn get_user_profile(env: &Env, user: Address) -> UserProfile {
+        Self::try_get_user_profile(env, user).unwrap_or_else(|| env.panic_with_error(Error::UserNotFound))
     }
 
     fn upgrade_user_profile(env: &Env, user: Address, mut profile: UserProfile) -> UserProfile {
@@ -813,12 +807,8 @@ impl OnboardingContract {
     /// # Returns
     /// UserRole if user exists, UserRole::None otherwise
     pub fn get_user_role(env: Env, user: Address) -> UserRole {
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::UserProfile(user.clone()))
-        {
-            Self::get_user_profile(&env, user).role
+        if let Some(profile) = Self::try_get_user_profile(&env, user) {
+            profile.role
         } else {
             UserRole::None
         }
@@ -966,13 +956,10 @@ impl OnboardingContract {
     /// # Returns
     /// OnboardingConfig struct
     pub fn get_config(env: Env) -> OnboardingConfig {
-        let config: OnboardingConfig = env
-            .storage()
+        env.storage()
             .persistent()
             .get(&DataKey::Config)
-            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
-        config
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized))
     }
 
     /// Check if user has specific role
@@ -995,12 +982,8 @@ impl OnboardingContract {
     /// # Returns
     /// true if user is verified, false otherwise
     pub fn is_verified(env: Env, user: Address) -> bool {
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::UserProfile(user.clone()))
-        {
-            Self::get_user_profile(&env, user).is_verified
+        if let Some(profile) = Self::try_get_user_profile(&env, user) {
+            profile.is_verified
         } else {
             false
         }
@@ -1051,22 +1034,13 @@ impl OnboardingContract {
     /// Get activity metrics for a user.
     /// Returns zeroed metrics if no escrow activity has been recorded yet.
     pub fn get_user_metrics(env: Env, address: Address) -> UserMetrics {
-        let metrics = env
-            .storage()
+        env.storage()
             .persistent()
             .get::<DataKey, UserMetrics>(&DataKey::UserMetrics(address.clone()))
             .unwrap_or(UserMetrics {
                 total_escrow_count: 0,
                 total_volume: 0,
-            });
-        if env
-            .storage()
-            .persistent()
-            .has(&DataKey::UserMetrics(address.clone()))
-        {
-            Self::extend_persistent(&env, &DataKey::UserMetrics(address));
-        }
-        metrics
+            })
     }
 
     /// Increment a user's activity metrics (called by the escrow contract).
@@ -1164,6 +1138,9 @@ impl OnboardingContract {
                 action: String::from_str(env, "auto_verified"),
                 by: None,
             });
+            if history.len() > 10 {
+                history.remove(0);
+            }
             env.storage().persistent().set(&hist_key, &history);
             Self::extend_persistent(env, &hist_key);
 
@@ -1247,6 +1224,9 @@ impl OnboardingContract {
             action: String::from_str(&env, "requested"),
             by: Some(user.clone()),
         });
+        if history.len() > 10 {
+            history.remove(0);
+        }
         env.storage().persistent().set(&hist_key, &history);
         Self::extend_persistent(&env, &hist_key);
     }
@@ -1292,6 +1272,9 @@ impl OnboardingContract {
             action: String::from_str(&env, action),
             by: Some(config.platform_admin.clone()),
         });
+        if history.len() > 10 {
+            history.remove(0);
+        }
         env.storage().persistent().set(&hist_key, &history);
         Self::extend_persistent(&env, &hist_key);
 
@@ -1304,15 +1287,10 @@ impl OnboardingContract {
     /// Get the full verification history for a user.
     pub fn get_verification_history(env: Env, user: Address) -> Vec<VerificationEntry> {
         let hist_key = DataKey::VerificationHistory(user.clone());
-        let history = env
-            .storage()
+        env.storage()
             .persistent()
             .get(&hist_key)
-            .unwrap_or(Vec::new(&env));
-        if env.storage().persistent().has(&hist_key) {
-            Self::extend_persistent(&env, &hist_key);
-        }
-        history
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Get all addresses currently awaiting manual verification (admin helper).
@@ -1332,7 +1310,6 @@ impl OnboardingContract {
             {
                 if Self::is_verification_pending(&env, &user) {
                     queue.push_back(user);
-                    Self::extend_persistent(&env, &queue_index_key);
                 }
             }
         }
@@ -1399,7 +1376,6 @@ impl OnboardingContract {
             .get::<DataKey, UserProfile>(&DataKey::UserProfile(address.clone()))
         {
             Some(profile) => {
-                Self::extend_persistent(&env, &DataKey::UserProfile(address));
                 (profile.successful_trades, profile.disputed_trades)
             }
             None => (0, 0),
@@ -1495,6 +1471,7 @@ impl OnboardingContract {
 
         // Update profile with new username
         profile.username = normalized_new;
+        profile.is_verified = false;
 
         // Store updated profile
         env.storage().persistent().set(&profile_key, &profile);
@@ -1506,6 +1483,24 @@ impl OnboardingContract {
             &env.ledger().timestamp(),
         );
         Self::extend_persistent(&env, &DataKey::LastUsernameChange(user.clone()));
+
+        // Add history entry for revocation
+        let hist_key = DataKey::VerificationHistory(user.clone());
+        let mut history: Vec<VerificationEntry> = env
+            .storage()
+            .persistent()
+            .get(&hist_key)
+            .unwrap_or(Vec::new(&env));
+        history.push_back(VerificationEntry {
+            timestamp: env.ledger().timestamp(),
+            action: String::from_str(&env, "username_changed_revoked"),
+            by: Some(user.clone()),
+        });
+        if history.len() > 10 {
+            history.remove(0);
+        }
+        env.storage().persistent().set(&hist_key, &history);
+        Self::extend_persistent(&env, &hist_key);
 
         // Emit event
         env.events()
@@ -1591,7 +1586,6 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
         Self::read_username_fee_wallet(&env, &config)
     }
 

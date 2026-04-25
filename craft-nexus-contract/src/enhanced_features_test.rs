@@ -38,7 +38,7 @@ fn setup_enhanced_test(
     onboarding_client.set_escrow_contract(&escrow_id);
 
     // Initialize Escrow with onboarding contract address
-    escrow_client.initialize(&platform_wallet, &admin, &arbitrator, &500, &onboarding_id);
+    escrow_client.initialize(&platform_wallet, &admin, &arbitrator, &500, &Some(onboarding_id.clone()));
 
     let buyer = Address::generate(env);
     let artisan = Address::generate(env);

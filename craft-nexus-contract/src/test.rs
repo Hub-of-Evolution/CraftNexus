@@ -35,21 +35,20 @@ fn setup_test(
     let token_admin_client = token::StellarAssetClient::new(env, &token_contract.address());
 
     let arbitrator = Address::generate(env);
-    let onboarding_contract = Address::generate(env);
 
     // Set a non-zero timestamp for event tests
     env.ledger().with_mut(|li| {
         li.timestamp = 1711368000; // 2024-03-25
     });
 
-    // Initialize contract with platform config
+    // Initialize contract with platform config (no onboarding contract for unit tests)
     client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &500,
-        &onboarding_contract,
-    ).unwrap();
+        &None,
+    );
 
     // Set min amount to 0 for tests to pass with small amounts
     client.set_min_escrow_amount(&token_contract.address(), &0);
@@ -576,13 +575,12 @@ fn test_platform_fee_deduction_10_percent() {
     let arbitrator = Address::generate(&env);
 
     // Initialize with 10% fee
-    let onboarding_contract = Address::generate(&env);
     client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &1000,
-        &onboarding_contract,
+        &None,
     );
 
     token_admin_client.mint(&buyer, &10_000_000);
@@ -649,14 +647,13 @@ fn test_update_platform_fee() {
     let arbitrator = Address::generate(&env);
 
     // Initialize with 5% fee
-    let onboarding_contract = Address::generate(&env);
     client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &500,
-        &onboarding_contract,
-    ).unwrap();
+        &None,
+    );
 
     // Get initial fee
     assert_eq!(client.get_platform_fee(), 500);
@@ -713,14 +710,13 @@ fn test_update_platform_fee_too_high() {
     let arbitrator = Address::generate(&env);
 
     // Initialize with 5% fee
-    let onboarding_contract = Address::generate(&env);
     client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &500,
-        &onboarding_contract,
-    ).unwrap();
+        &None,
+    );
 
     // Try to set fee above max (10%)
     client.update_platform_fee(&1500);
@@ -757,14 +753,13 @@ fn test_initialize_emits_config_events() {
     let platform_wallet = Address::generate(&env);
     let arbitrator = Address::generate(&env);
 
-    let onboarding_contract = Address::generate(&env);
     client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &500,
-        &onboarding_contract,
-    ).unwrap();
+        &None,
+    );
 
     let events = env.events().all();
     let fee_event: ConfigUpdatedEvent = events
@@ -1019,13 +1014,12 @@ fn test_fee_rounding_custom_bps_025_percent() {
     let arbitrator = Address::generate(&env);
 
     // 25 bps = 0.25%
-    let onboarding_contract = Address::generate(&env);
     client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &25,
-        &onboarding_contract,
+        &None,
     );
     assert_eq!(client.calculate_fee_for_amount(&1000), 2); // floor(2.5) => 2
     assert_eq!(client.calculate_fee_for_amount(&399), 0); // floor(0.9975) => 0
@@ -1045,13 +1039,12 @@ fn test_integration_multiple_tokens_and_escrows() {
     let admin = Address::generate(&env);
     let arbitrator = Address::generate(&env);
 
-    let onboarding_contract = Address::generate(&env);
     client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &500,
-        &onboarding_contract,
+        &None,
     );
 
     // Token A
@@ -1422,13 +1415,12 @@ fn test_contract_address_admin_is_authorized() {
         li.timestamp = 1711368000;
     });
 
-    let onboarding_contract = Address::generate(&env);
     client.initialize(
         &platform_wallet,
         &admin_contract,
         &arbitrator,
         &500,
-        &onboarding_contract,
+        &None,
     );
     client.set_min_escrow_amount(&token_contract.address(), &0);
 
