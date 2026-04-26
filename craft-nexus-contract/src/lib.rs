@@ -456,7 +456,91 @@ impl EscrowContract {
     /// - CIDv1 base58btc  (prefix 'z'): Base58 alphabet
     fn validate_ipfs_cid(cid: &String) -> bool {
         let len = cid.len() as usize;
-        len > 0 && len <= 128
+        if len == 0 || len > 128 {
+            return false;
+        }
+
+        let mut buf = [0u8; 128];
+        cid.copy_into_slice(&mut buf[0..len]);
+        let cid_bytes = &buf[0..len];
+
+        // CIDv0: exactly 46 chars, starts with "Qm", Base58btc alphabet
+        let is_v0 = len == 46
+            && cid_bytes[0] == b'Q'
+            && cid_bytes[1] == b'm'
+            && cid_bytes.iter().all(|b| {
+                matches!(
+                    *b,
+                    b'1'..=b'9'
+                        | b'A'..=b'H'
+                        | b'J'..=b'N'
+                        | b'P'..=b'Z'
+                        | b'a'..=b'k'
+                        | b'm'..=b'z'
+                )
+            });
+
+        if is_v0 {
+            return true;
+        }
+
+        // CIDv1: minimum 3 chars (multibase prefix + version byte + codec)
+        if len < 3 {
+            return false;
+        }
+
+        let prefix = cid_bytes[0];
+        let payload = &cid_bytes[1..];
+
+        match prefix {
+            // base32lower (most common CIDv1 encoding)
+            b'b' => {
+                // Stricter length check for typical CIDv1 base32 (sha256/dag-pb is 59 chars)
+                if len < 50 || len > 100 {
+                    return false;
+                }
+                // Logic check: CIDv1 base32 ALWAYS starts with 'ba'
+                if cid_bytes[1] != b'a' {
+                    return false;
+                }
+                payload
+                    .iter()
+                    .all(|b| matches!(*b, b'a'..=b'z' | b'2'..=b'7'))
+            }
+            // base16lower (hex)
+            b'f' => {
+                // CIDv1 base16 typically ~73 chars
+                if len < 60 || len > 120 {
+                    return false;
+                }
+                // Logic check: CIDv1 base16 ALWAYS starts with 'f01'
+                if cid_bytes[1] != b'0' || cid_bytes[2] != b'1' {
+                    return false;
+                }
+                payload
+                    .iter()
+                    .all(|b| matches!(*b, b'0'..=b'9' | b'a'..=b'f'))
+            }
+            // base58btc
+            b'z' => {
+                // CIDv1 base58 typically ~50 chars
+                if len < 40 || len > 100 {
+                    return false;
+                }
+                payload.iter().all(|b| {
+                    matches!(
+                        *b,
+                        b'1'..=b'9'
+                            | b'A'..=b'H'
+                            | b'J'..=b'N'
+                            | b'P'..=b'Z'
+                            | b'a'..=b'k'
+                            | b'm'..=b'z'
+                    )
+                })
+            }
+            _ => false,
+        }
     }
 
     fn validate_optional_ipfs_hash(env: &Env, ipfs_hash: &Option<String>) {
@@ -1196,8 +1280,9 @@ impl EscrowContract {
         // Get platform config
         let config = Self::get_platform_config_internal(&env);
 
-        // Calculate platform fee
-        let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
+        // Calculate platform fee using effective fee bps for the seller
+        let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
+        let fee_amount = Self::calculate_fee(escrow.amount, fee_bps);
         let seller_amount = escrow.amount - fee_amount;
 
         // Update status
@@ -1271,7 +1356,8 @@ impl EscrowContract {
         let config = Self::get_platform_config_internal(&env);
 
         // Calculate platform fee
-        let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
+        let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
+        let fee_amount = Self::calculate_fee(escrow.amount, fee_bps);
         let seller_amount = escrow.amount - fee_amount;
 
         // Update status
@@ -1512,7 +1598,8 @@ impl EscrowContract {
 
     fn release_funds_to_seller(env: &Env, escrow: &Escrow) {
         let config = Self::get_platform_config_internal(env);
-        let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
+        let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
+        let fee_amount = Self::calculate_fee(escrow.amount, fee_bps);
         let seller_amount = escrow.amount - fee_amount;
 
         let token_client = token::Client::new(env, &escrow.token);
@@ -2282,7 +2369,8 @@ impl EscrowContract {
                     let config = Self::get_platform_config_internal(&env);
 
                     // Calculate platform fee
-                    let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
+                    let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
+                    let fee_amount = Self::calculate_fee(escrow.amount, fee_bps);
                     let seller_amount = escrow.amount - fee_amount;
 
                     // Update status
@@ -2815,9 +2903,10 @@ impl EscrowContract {
         let refund_amount = proposal.refund_amount;
         let seller_gross = escrow.amount - refund_amount;
 
-        // Deduct platform fee from seller's portion
+        // Deduct platform fee from seller's portion using effective fee bps
         let config = Self::get_platform_config_internal(&env);
-        let fee_amount = Self::calculate_fee(seller_gross, config.platform_fee_bps);
+        let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
+        let fee_amount = Self::calculate_fee(seller_gross, fee_bps);
         let seller_net = seller_gross - fee_amount;
 
         let token_client = token::Client::new(&env, &escrow.token);
@@ -2987,7 +3076,8 @@ impl EscrowContract {
 
         // Calculate and transfer platform fee
         let config = Self::get_platform_config_internal(&env);
-        let fee_amount = Self::calculate_fee(cycle_amount, config.platform_fee_bps);
+        let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.artisan.clone());
+        let fee_amount = Self::calculate_fee(cycle_amount, fee_bps);
         let artisan_amount = cycle_amount - fee_amount;
 
         if fee_amount > 0 {

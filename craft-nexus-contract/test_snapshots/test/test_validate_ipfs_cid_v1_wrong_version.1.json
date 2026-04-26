@@ -94,7 +94,7 @@
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 10000000
+                    "lo": 100000000
                   }
                 }
               ]
@@ -104,6 +104,7 @@
         }
       ]
     ],
+    [],
     []
   ],
   "ledger": {
@@ -670,7 +671,7 @@
                       "val": {
                         "i128": {
                           "hi": 0,
-                          "lo": 10000000
+                          "lo": 100000000
                         }
                       }
                     },
@@ -1355,7 +1356,7 @@
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 10000000
+                    "lo": 100000000
                   }
                 }
               ]
@@ -1389,7 +1390,7 @@
             "data": {
               "i128": {
                 "hi": 0,
-                "lo": 10000000
+                "lo": 100000000
               }
             }
           }
@@ -1433,7 +1434,54 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "create_escrow"
+                "symbol": "get_platform_fee"
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "get_platform_fee"
+              }
+            ],
+            "data": {
+              "u32": 500
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_call"
+              },
+              {
+                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
+              },
+              {
+                "symbol": "create_escrow_with_metadata"
               }
             ],
             "data": {
@@ -1450,11 +1498,17 @@
                 {
                   "i128": {
                     "hi": 0,
-                    "lo": 0
+                    "lo": 1000
                   }
                 },
                 {
                   "u32": 1
+                },
+                {
+                  "u32": 3600
+                },
+                {
+                  "string": "bbfybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4"
                 },
                 "void"
               ]
@@ -1477,7 +1531,7 @@
               },
               {
                 "error": {
-                  "contract": 6
+                  "contract": 25
                 }
               }
             ],
@@ -1487,7 +1541,7 @@
                   "string": "failing with contract error"
                 },
                 {
-                  "u32": 6
+                  "u32": 25
                 }
               ]
             }
@@ -1509,7 +1563,7 @@
               },
               {
                 "error": {
-                  "contract": 6
+                  "contract": 25
                 }
               }
             ],
@@ -1534,7 +1588,7 @@
               },
               {
                 "error": {
-                  "contract": 6
+                  "contract": 25
                 }
               }
             ],
@@ -1559,7 +1613,7 @@
               },
               {
                 "error": {
-                  "contract": 6
+                  "contract": 25
                 }
               }
             ],
@@ -1569,7 +1623,7 @@
                   "string": "contract call failed"
                 },
                 {
-                  "symbol": "create_escrow"
+                  "symbol": "create_escrow_with_metadata"
                 },
                 {
                   "vec": [
@@ -1585,11 +1639,17 @@
                     {
                       "i128": {
                         "hi": 0,
-                        "lo": 0
+                        "lo": 1000
                       }
                     },
                     {
                       "u32": 1
+                    },
+                    {
+                      "u32": 3600
+                    },
+                    {
+                      "string": "bbfybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4"
                     },
                     "void"
                   ]
@@ -1614,7 +1674,7 @@
               },
               {
                 "error": {
-                  "contract": 6
+                  "contract": 25
                 }
               }
             ],

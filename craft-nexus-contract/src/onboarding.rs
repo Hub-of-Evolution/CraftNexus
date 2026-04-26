@@ -397,25 +397,53 @@ fn validate_ipfs_cid(cid: &String) -> bool {
 
     match prefix {
         // base32lower (most common CIDv1 encoding)
-        b'b' => payload
-            .iter()
-            .all(|b| matches!(*b, b'a'..=b'z' | b'2'..=b'7')),
+        b'b' => {
+            // Stricter length check for typical CIDv1 base32 (sha256/dag-pb is 59 chars)
+            // Allow range for different hash types but enforce minimum for valid multihash payload
+            if len < 50 || len > 100 {
+                return false;
+            }
+            // Logic check: CIDv1 base32 ALWAYS starts with 'ba' because version byte 0x01
+            // starts with 'a' in base32 bit-alignment.
+            if cid_bytes[1] != b'a' {
+                return false;
+            }
+            payload
+                .iter()
+                .all(|b| matches!(*b, b'a'..=b'z' | b'2'..=b'7'))
+        }
         // base16lower (hex)
-        b'f' => payload
-            .iter()
-            .all(|b| matches!(*b, b'0'..=b'9' | b'a'..=b'f')),
+        b'f' => {
+            // CIDv1 base16 typically ~73 chars for sha256
+            if len < 60 || len > 120 {
+                return false;
+            }
+            // Logic check: CIDv1 base16 ALWAYS starts with 'f01' (0x01 version byte)
+            if cid_bytes[1] != b'0' || cid_bytes[2] != b'1' {
+                return false;
+            }
+            payload
+                .iter()
+                .all(|b| matches!(*b, b'0'..=b'9' | b'a'..=b'f'))
+        }
         // base58btc
-        b'z' => payload.iter().all(|b| {
-            matches!(
-                *b,
-                b'1'..=b'9'
-                    | b'A'..=b'H'
-                    | b'J'..=b'N'
-                    | b'P'..=b'Z'
-                    | b'a'..=b'k'
-                    | b'm'..=b'z'
-            )
-        }),
+        b'z' => {
+            // CIDv1 base58 typically ~50 chars
+            if len < 40 || len > 100 {
+                return false;
+            }
+            payload.iter().all(|b| {
+                matches!(
+                    *b,
+                    b'1'..=b'9'
+                        | b'A'..=b'H'
+                        | b'J'..=b'N'
+                        | b'P'..=b'Z'
+                        | b'a'..=b'k'
+                        | b'm'..=b'z'
+                )
+            })
+        }
         _ => false,
     }
 }
