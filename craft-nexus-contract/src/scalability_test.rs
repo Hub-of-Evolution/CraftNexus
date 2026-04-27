@@ -97,25 +97,25 @@ fn test_indexed_storage_scalability() {
     assert_eq!(count, 100);
 
     // Test pagination - first page
-    let page1 = client.get_escrows_by_buyer(&buyer, &0, &10).unwrap();
+    let page1 = client.get_escrows_by_buyer(&buyer, &0, &10, &false).unwrap();
     assert_eq!(page1.len(), 10);
     assert_eq!(page1.get_unchecked(0), 1);
     assert_eq!(page1.get_unchecked(9), 10);
 
     // Test pagination - middle page
-    let page5 = client.get_escrows_by_buyer(&buyer, &5, &10).unwrap();
+    let page5 = client.get_escrows_by_buyer(&buyer, &5, &10, &false).unwrap();
     assert_eq!(page5.len(), 10);
     assert_eq!(page5.get_unchecked(0), 51);
     assert_eq!(page5.get_unchecked(9), 60);
 
     // Test pagination - last page
-    let page10 = client.get_escrows_by_buyer(&buyer, &9, &10).unwrap();
+    let page10 = client.get_escrows_by_buyer(&buyer, &9, &10, &false).unwrap();
     assert_eq!(page10.len(), 10);
     assert_eq!(page10.get_unchecked(0), 91);
     assert_eq!(page10.get_unchecked(9), 100);
 
     // Test pagination - beyond last page
-    let page11 = client.get_escrows_by_buyer(&buyer, &10, &10).unwrap();
+    let page11 = client.get_escrows_by_buyer(&buyer, &10, &10, &false).unwrap();
     assert_eq!(page11.len(), 0);
 
     // Verify individual indexed entries exist
@@ -183,11 +183,11 @@ fn test_indexed_storage_multiple_users() {
     assert_eq!(count2, 30);
 
     // Verify buyer1 escrows
-    let buyer1_escrows = client.get_escrows_by_buyer(&buyer1, &0, &100).unwrap();
+    let buyer1_escrows = client.get_escrows_by_buyer(&buyer1, &0, &100, &false).unwrap();
     assert_eq!(buyer1_escrows.len(), 50);
 
     // Verify buyer2 escrows
-    let buyer2_escrows = client.get_escrows_by_buyer(&buyer2, &0, &100).unwrap();
+    let buyer2_escrows = client.get_escrows_by_buyer(&buyer2, &0, &100, &false).unwrap();
     assert_eq!(buyer2_escrows.len(), 30);
 
     // Verify no cross-contamination
@@ -230,7 +230,7 @@ fn test_migration_from_legacy_storage() {
     assert!(!env.storage().persistent().has(&legacy_key));
 
     // Verify query function works with migrated data
-    let escrows = client.get_escrows_by_buyer(&buyer, &0, &10).unwrap();
+    let escrows = client.get_escrows_by_buyer(&buyer, &0, &10, &false).unwrap();
     assert_eq!(escrows.len(), 3);
     assert_eq!(escrows.get_unchecked(0), 1);
     assert_eq!(escrows.get_unchecked(1), 2);
@@ -250,19 +250,19 @@ fn test_backward_compatibility_query() {
     env.storage().persistent().set(&legacy_key, &legacy_vec);
 
     // Query should work with legacy storage (backward compatibility)
-    let escrows = client.get_escrows_by_buyer(&buyer, &0, &10).unwrap();
+    let escrows = client.get_escrows_by_buyer(&buyer, &0, &10, &false).unwrap();
     assert_eq!(escrows.len(), 3);
     assert_eq!(escrows.get_unchecked(0), 10);
     assert_eq!(escrows.get_unchecked(1), 20);
     assert_eq!(escrows.get_unchecked(2), 30);
 
     // Test pagination with legacy storage
-    let page1 = client.get_escrows_by_buyer(&buyer, &0, &2).unwrap();
+    let page1 = client.get_escrows_by_buyer(&buyer, &0, &2, &false).unwrap();
     assert_eq!(page1.len(), 2);
     assert_eq!(page1.get_unchecked(0), 10);
     assert_eq!(page1.get_unchecked(1), 20);
 
-    let page2 = client.get_escrows_by_buyer(&buyer, &1, &2).unwrap();
+    let page2 = client.get_escrows_by_buyer(&buyer, &1, &2, &false).unwrap();
     assert_eq!(page2.len(), 1);
     assert_eq!(page2.get_unchecked(0), 30);
 }
@@ -303,7 +303,7 @@ fn test_batch_create_with_indexed_storage() {
     }
 
     // Verify query returns all escrows
-    let escrows = client.get_escrows_by_buyer(&buyer, &0, &100).unwrap();
+    let escrows = client.get_escrows_by_buyer(&buyer, &0, &100, &false).unwrap();
     assert_eq!(escrows.len(), 10);
 }
 
@@ -331,10 +331,10 @@ fn test_no_storage_limit_with_indexed_pattern() {
     assert_eq!(count, 500);
 
     // Verify we can still query efficiently
-    let page1 = client.get_escrows_by_buyer(&buyer, &0, &50).unwrap();
+    let page1 = client.get_escrows_by_buyer(&buyer, &0, &50, &false).unwrap();
     assert_eq!(page1.len(), 50);
 
-    let page10 = client.get_escrows_by_buyer(&buyer, &9, &50).unwrap();
+    let page10 = client.get_escrows_by_buyer(&buyer, &9, &50, &false).unwrap();
     assert_eq!(page10.len(), 50);
     assert_eq!(page10.get_unchecked(0), 451);
     assert_eq!(page10.get_unchecked(49), 500);

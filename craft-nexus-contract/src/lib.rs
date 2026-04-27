@@ -1307,6 +1307,7 @@ impl EscrowContract {
         buyer: Address,
         page: u32,
         limit: u32,
+        reverse: bool,
     ) -> Result<soroban_sdk::Vec<u64>, Error> {
         let mut result = soroban_sdk::Vec::new(&env);
 
@@ -1322,8 +1323,13 @@ impl EscrowContract {
 
             let end = (start + limit).min(total_count);
 
-            for i in start..end {
-                let index_key = DataKey::BuyerEscrowIndexed(buyer.clone(), i);
+            for position in start..end {
+                let storage_index = if reverse {
+                    total_count - 1 - position
+                } else {
+                    position
+                };
+                let index_key = DataKey::BuyerEscrowIndexed(buyer.clone(), storage_index);
                 if let Some(escrow_id) = env.storage().persistent().get::<_, u64>(&index_key) {
                     result.push_back(escrow_id);
                     env.storage().persistent().extend_ttl(&index_key, 1000, 518400);
@@ -1354,7 +1360,16 @@ impl EscrowContract {
         }
 
         let end = (start + limit).min(len);
-        Ok(escrow_ids.slice(start..end))
+        if reverse {
+            for position in start..end {
+                if let Some(escrow_id) = escrow_ids.get(len - 1 - position) {
+                    result.push_back(escrow_id);
+                }
+            }
+            Ok(result)
+        } else {
+            Ok(escrow_ids.slice(start..end))
+        }
     }
 
     /// Get escrows for a specific seller with pagination.
@@ -1364,6 +1379,7 @@ impl EscrowContract {
         seller: Address,
         page: u32,
         limit: u32,
+        reverse: bool,
     ) -> Result<soroban_sdk::Vec<u64>, Error> {
         let mut result = soroban_sdk::Vec::new(&env);
 
@@ -1379,8 +1395,13 @@ impl EscrowContract {
 
             let end = (start + limit).min(total_count);
 
-            for i in start..end {
-                let index_key = DataKey::SellerEscrowIndexed(seller.clone(), i);
+            for position in start..end {
+                let storage_index = if reverse {
+                    total_count - 1 - position
+                } else {
+                    position
+                };
+                let index_key = DataKey::SellerEscrowIndexed(seller.clone(), storage_index);
                 if let Some(escrow_id) = env.storage().persistent().get::<_, u64>(&index_key) {
                     result.push_back(escrow_id);
                     env.storage().persistent().extend_ttl(&index_key, 1000, 518400);
@@ -1411,7 +1432,16 @@ impl EscrowContract {
         }
 
         let end = (start + limit).min(len);
-        Ok(escrow_ids.slice(start..end))
+        if reverse {
+            for position in start..end {
+                if let Some(escrow_id) = escrow_ids.get(len - 1 - position) {
+                    result.push_back(escrow_id);
+                }
+            }
+            Ok(result)
+        } else {
+            Ok(escrow_ids.slice(start..end))
+        }
     }
 
     /// Get platform configuration

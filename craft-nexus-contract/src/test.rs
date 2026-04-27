@@ -1280,25 +1280,25 @@ fn test_escrow_search_by_buyer() {
     client.create_escrow(&buyer, &seller, &token_id, &30_000_000, &3, &None);
 
     // Get all (limit 10)
-    let b1 = client.get_escrows_by_buyer(&buyer, &0, &10);
+    let b1 = client.get_escrows_by_buyer(&buyer, &0, &10, &false);
     assert_eq!(b1.len(), 3);
     assert_eq!(b1.get_unchecked(0), 1);
     assert_eq!(b1.get_unchecked(1), 2);
     assert_eq!(b1.get_unchecked(2), 3);
 
     // Pagination: page 0, limit 2
-    let b2 = client.get_escrows_by_buyer(&buyer, &0, &2);
+    let b2 = client.get_escrows_by_buyer(&buyer, &0, &2, &false);
     assert_eq!(b2.len(), 2);
     assert_eq!(b2.get_unchecked(0), 1);
     assert_eq!(b2.get_unchecked(1), 2);
 
     // Pagination: page 1, limit 2
-    let b3 = client.get_escrows_by_buyer(&buyer, &1, &2);
+    let b3 = client.get_escrows_by_buyer(&buyer, &1, &2, &false);
     assert_eq!(b3.len(), 1);
     assert_eq!(b3.get_unchecked(0), 3);
 
     // Pagination: out of bounds
-    let b4 = client.get_escrows_by_buyer(&buyer, &2, &2);
+    let b4 = client.get_escrows_by_buyer(&buyer, &2, &2, &false);
     assert_eq!(b4.len(), 0);
 }
 
@@ -1317,19 +1317,47 @@ fn test_escrow_search_by_seller() {
     client.create_escrow(&buyer, &seller, &token_id, &30_000_000, &3, &None);
 
     // Check seller 1
-    let s1 = client.get_escrows_by_seller(&seller, &0, &10);
+    let s1 = client.get_escrows_by_seller(&seller, &0, &10, &false);
     assert_eq!(s1.len(), 2);
     assert_eq!(s1.get_unchecked(0), 1);
     assert_eq!(s1.get_unchecked(1), 3);
 
     // Check seller 2
-    let s2 = client.get_escrows_by_seller(&seller2, &0, &10);
+    let s2 = client.get_escrows_by_seller(&seller2, &0, &10, &false);
     assert_eq!(s2.len(), 1);
     assert_eq!(s2.get_unchecked(0), 2);
 
     // Check non-existent seller
-    let s3 = client.get_escrows_by_seller(&Address::generate(&env), &0, &10);
+    let s3 = client.get_escrows_by_seller(&Address::generate(&env), &0, &10, &false);
     assert_eq!(s3.len(), 0);
+}
+
+#[test]
+fn test_escrow_search_reverse_pagination() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &200_000_000);
+
+    client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &1, &None);
+    client.create_escrow(&buyer, &seller, &token_id, &20_000_000, &2, &None);
+    client.create_escrow(&buyer, &seller, &token_id, &30_000_000, &3, &None);
+
+    let buyer_page_1 = client.get_escrows_by_buyer(&buyer, &0, &2, &true);
+    assert_eq!(buyer_page_1.len(), 2);
+    assert_eq!(buyer_page_1.get_unchecked(0), 3);
+    assert_eq!(buyer_page_1.get_unchecked(1), 2);
+
+    let buyer_page_2 = client.get_escrows_by_buyer(&buyer, &1, &2, &true);
+    assert_eq!(buyer_page_2.len(), 1);
+    assert_eq!(buyer_page_2.get_unchecked(0), 1);
+
+    let seller_page = client.get_escrows_by_seller(&seller, &0, &3, &true);
+    assert_eq!(seller_page.len(), 3);
+    assert_eq!(seller_page.get_unchecked(0), 3);
+    assert_eq!(seller_page.get_unchecked(1), 2);
+    assert_eq!(seller_page.get_unchecked(2), 1);
 }
 
 #[test]
@@ -2222,11 +2250,11 @@ fn test_create_batch_escrow_consolidates_storage() {
     assert_eq!(results.len(), 10);
 
     // Verify buyer's escrow list contains all 10
-    let buyer_escrows = client.get_escrows_by_buyer(&buyer, &0, &100);
+    let buyer_escrows = client.get_escrows_by_buyer(&buyer, &0, &100, &false);
     assert_eq!(buyer_escrows.len(), 10);
 
     // Verify seller's escrow list contains all 10
-    let seller_escrows = client.get_escrows_by_seller(&seller, &0, &100);
+    let seller_escrows = client.get_escrows_by_seller(&seller, &0, &100, &false);
     assert_eq!(seller_escrows.len(), 10);
 }
 
@@ -2980,4 +3008,3 @@ fn test_accept_partial_refund_with_custom_fee_tier() {
     let token_client = token::Client::new(&env, &token_id);
     assert_eq!(token_client.balance(&seller), 490);
 }
-
