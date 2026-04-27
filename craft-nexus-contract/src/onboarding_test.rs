@@ -553,6 +553,35 @@ fn test_auto_verify_triggers_on_threshold() {
     assert_eq!(metrics.total_volume, 10_000_000_000);
 }
 
+#[test]
+fn test_auto_verify_can_be_disabled() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "manualonly"),
+        &UserRole::Artisan,
+    );
+
+    client.set_auto_verify_enabled(&false);
+
+    let token_admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(token_admin);
+    client.update_user_metrics(&user, &5u32, &10_000_000_000i128, &token.address());
+
+    assert!(!client.is_verified(&user));
+    assert!(!client.auto_verify_user(&user));
+
+    client.verify_user(&user);
+    assert!(client.is_verified(&user));
+
+    let config = client.get_config();
+    assert!(!config.auto_verify_enabled);
+}
+
 /// auto_verify_user is a no-op on an already verified user.
 #[test]
 fn test_auto_verify_no_op_when_already_verified() {

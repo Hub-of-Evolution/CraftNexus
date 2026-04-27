@@ -149,6 +149,8 @@ pub struct OnboardingConfig {
     pub min_username_length: u32,
     pub max_username_length: u32,
     pub platform_admin: Address,
+    /// Whether threshold-based verification should run automatically.
+    pub auto_verify_enabled: bool,
     /// Minimum completed escrow count for auto-verification (#63; default 5)
     pub min_escrow_count_for_verify: u32,
     /// Minimum total USDC volume (in stroops) for auto-verification (#63; default 10_000_000_000)
@@ -639,6 +641,7 @@ impl OnboardingContract {
             min_username_length: 3,
             max_username_length: 50,
             platform_admin: admin.clone(),
+            auto_verify_enabled: true,
             min_escrow_count_for_verify: 5,
             min_volume_for_verify: 10_000_000_000, // 1000 USDC at 7 decimals
             escrow_contract: None,
@@ -1074,6 +1077,22 @@ impl OnboardingContract {
         Self::extend_persistent(&env, &DataKey::Config);
     }
 
+    /// Enable or disable threshold-based automatic verification (admin only).
+    pub fn set_auto_verify_enabled(env: Env, enabled: bool) {
+        let mut config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        config.platform_admin.require_auth();
+        config.auto_verify_enabled = enabled;
+
+        env.storage().persistent().set(&DataKey::Config, &config);
+        Self::extend_persistent(&env, &DataKey::Config);
+    }
+
     /// Get activity metrics for a user.
     /// Returns zeroed metrics if no escrow activity has been recorded yet.
     pub fn get_user_metrics(env: Env, address: Address) -> UserMetrics {
@@ -1141,7 +1160,9 @@ impl OnboardingContract {
         Self::extend_persistent(&env, &key);
 
         // Check whether the user now meets the auto-verification threshold.
-        Self::try_auto_verify(&env, &address, &config, &metrics);
+        if config.auto_verify_enabled {
+            Self::try_auto_verify(&env, &address, &config, &metrics);
+        }
     }
 
     /// Internal helper: verify a user automatically if they meet the configured thresholds.
@@ -1205,6 +1226,10 @@ impl OnboardingContract {
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
         Self::extend_persistent(&env, &DataKey::Config);
 
+        if !config.auto_verify_enabled {
+            return false;
+        }
+
         let profile_key = DataKey::UserProfile(address.clone());
         let profile: UserProfile = env
             .storage()
@@ -1226,7 +1251,8 @@ impl OnboardingContract {
                 total_volume: 0,
             });
 
-        if metrics.total_escrow_count >= config.min_escrow_count_for_verify
+        if config.auto_verify_enabled
+            && metrics.total_escrow_count >= config.min_escrow_count_for_verify
             && metrics.total_volume >= config.min_volume_for_verify
         {
             Self::try_auto_verify(&env, &address, &config, &metrics);
