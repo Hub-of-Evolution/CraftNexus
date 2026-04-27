@@ -146,7 +146,7 @@ const DEFAULT_MIN_RELEASE_WINDOW: u32 = 24 * 60 * 60;
 /// Maximum platform fee in basis points (10000 = 100%)
 const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
 const MAX_TOTAL_RELEASE_WINDOW: u32 = 2592000; // 30 days
-const CURRENT_ESCROW_VERSION: u32 = 2;
+const CURRENT_ESCROW_VERSION: u32 = 3;
 /// Maximum number of escrows per batch operation (Issue #111)
 const MAX_BATCH_SIZE: u32 = 100;
 
@@ -290,6 +290,7 @@ pub enum Resolution {
 pub struct Escrow {
     pub version: u32,
     pub id: u64,
+    pub batch_id: Option<u64>,
     pub buyer: Address,
     pub seller: Address,
     pub token: Address,
@@ -307,6 +308,25 @@ pub struct Escrow {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 struct LegacyEscrow {
+    pub id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<String>,
+    pub dispute_initiated_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct EscrowWithoutBatch {
+    pub version: u32,
     pub id: u64,
     pub buyer: Address,
     pub seller: Address,
@@ -1205,6 +1225,7 @@ impl EscrowContract {
         let escrow = Escrow {
             version: CURRENT_ESCROW_VERSION,
             id: order_id as u64,
+            batch_id: None,
             buyer: buyer.clone(),
             seller: seller.clone(),
             token: token.clone(),
@@ -1463,7 +1484,17 @@ impl EscrowContract {
         let version_key = Symbol::new(env, "version");
 
         if map.contains_key(version_key) {
-            let mut escrow = Escrow::try_from_val(env, &stored).expect("");
+            let batch_id_key = Symbol::new(env, "batch_id");
+            if map.contains_key(batch_id_key) {
+                let mut escrow = Escrow::try_from_val(env, &stored).expect("");
+                if escrow.version < CURRENT_ESCROW_VERSION {
+                    escrow.version = CURRENT_ESCROW_VERSION;
+                }
+                return escrow;
+            }
+
+            let previous = EscrowWithoutBatch::try_from_val(env, &stored).expect("");
+            let mut escrow = Self::escrow_from_without_batch(previous);
             if escrow.version < CURRENT_ESCROW_VERSION {
                 escrow.version = CURRENT_ESCROW_VERSION;
             }
@@ -1474,6 +1505,7 @@ impl EscrowContract {
         Escrow {
             version: CURRENT_ESCROW_VERSION,
             id: legacy.id,
+            batch_id: None,
             buyer: legacy.buyer,
             seller: legacy.seller,
             token: legacy.token,
@@ -1495,7 +1527,13 @@ impl EscrowContract {
         let version_key = Symbol::new(env, "version");
 
         if map.contains_key(version_key) {
-            let escrow = Escrow::try_from_val(env, &stored).expect("");
+            let batch_id_key = Symbol::new(env, "batch_id");
+            let escrow = if map.contains_key(batch_id_key) {
+                Escrow::try_from_val(env, &stored).expect("")
+            } else {
+                let previous = EscrowWithoutBatch::try_from_val(env, &stored).expect("");
+                Self::escrow_from_without_batch(previous)
+            };
             if escrow.version < CURRENT_ESCROW_VERSION {
                 return Self::upgrade_escrow(env, order_id, escrow);
             }
@@ -1507,6 +1545,7 @@ impl EscrowContract {
         let upgraded = Escrow {
             version: CURRENT_ESCROW_VERSION,
             id: legacy.id,
+            batch_id: None,
             buyer: legacy.buyer,
             seller: legacy.seller,
             token: legacy.token,
@@ -1530,6 +1569,25 @@ impl EscrowContract {
         env.storage().persistent().set(&key, &escrow);
         Self::extend_persistent(env, &key);
         escrow
+    }
+
+    fn escrow_from_without_batch(escrow: EscrowWithoutBatch) -> Escrow {
+        Escrow {
+            version: escrow.version,
+            id: escrow.id,
+            batch_id: None,
+            buyer: escrow.buyer,
+            seller: escrow.seller,
+            token: escrow.token,
+            amount: escrow.amount,
+            status: escrow.status,
+            release_window: escrow.release_window,
+            created_at: escrow.created_at,
+            ipfs_hash: escrow.ipfs_hash,
+            metadata_hash: escrow.metadata_hash,
+            dispute_reason: escrow.dispute_reason,
+            dispute_initiated_at: escrow.dispute_initiated_at,
+        }
     }
 
     /// Calculate platform fee for a given amount
@@ -2462,7 +2520,11 @@ impl EscrowContract {
     /// Create a single escrow from parameters (internal helper)
     /// Note: For batch operations, buyer/seller escrow list updates are consolidated
     /// by the caller to minimize storage writes (Issue #111)
-    fn create_single_escrow(env: &Env, params: EscrowCreateParams) -> Result<u64, Error> {
+    fn create_single_escrow(
+        env: &Env,
+        params: EscrowCreateParams,
+        batch_id: Option<u64>,
+    ) -> Result<u64, Error> {
         // Validate first
         Self::validate_escrow_params(env, &params)?;
 
@@ -2481,6 +2543,7 @@ impl EscrowContract {
         let escrow = Escrow {
             version: CURRENT_ESCROW_VERSION,
             id: params.order_id as u64,
+            batch_id,
             buyer: params.buyer.clone(),
             seller: params.seller.clone(),
             token: params.token.clone(),
@@ -2571,7 +2634,7 @@ impl EscrowContract {
     /// - Any validation error from individual escrows
     pub fn create_batch_escrow(
         env: Env,
-        _batch_id: u64,
+        batch_id: u64,
         escrows: soroban_sdk::Vec<EscrowCreateParams>,
     ) -> Result<soroban_sdk::Vec<u64>, Error> {
         Self::enter_reentry_guard(&env);
@@ -2609,7 +2672,7 @@ impl EscrowContract {
         // Create all escrows
         for i in 0..escrows.len() {
             if let Some(params) = escrows.get(i) {
-                match Self::create_single_escrow(&env, params.clone()) {
+                match Self::create_single_escrow(&env, params.clone(), Some(batch_id)) {
                     Ok(id) => {
                         let buyer_key = params.buyer.clone();
                         let seller_key = params.seller.clone();

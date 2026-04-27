@@ -1483,11 +1483,13 @@ fn test_get_escrow_migrates_legacy_state() {
     let escrow = client.get_escrow(&77);
     assert_eq!(escrow.version, CURRENT_ESCROW_VERSION);
     assert_eq!(escrow.amount, 123);
+    assert_eq!(escrow.batch_id, None);
 
     let stored: Escrow = env.as_contract(&client.address, || {
         env.storage().persistent().get(&(ESCROW, 77u32)).unwrap()
     });
     assert_eq!(stored.version, CURRENT_ESCROW_VERSION);
+    assert_eq!(stored.batch_id, None);
 }
 
 #[test]
@@ -1589,14 +1591,17 @@ fn test_create_batch_escrow_success() {
     let escrow1 = client.get_escrow(&100);
     assert_eq!(escrow1.amount, 100_000_000);
     assert_eq!(escrow1.status, EscrowStatus::Active);
+    assert_eq!(escrow1.batch_id, Some(batch_id));
 
     let escrow2 = client.get_escrow(&101);
     assert_eq!(escrow2.amount, 200_000_000);
     assert_eq!(escrow2.status, EscrowStatus::Active);
+    assert_eq!(escrow2.batch_id, Some(batch_id));
 
     let escrow3 = client.get_escrow(&102);
     assert_eq!(escrow3.amount, 150_000_000);
     assert_eq!(escrow3.release_window, 604800); // Default 7 days
+    assert_eq!(escrow3.batch_id, Some(batch_id));
 
     // Verify events were emitted
     let events = env.events().all();
