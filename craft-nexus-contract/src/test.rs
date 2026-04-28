@@ -1507,7 +1507,7 @@ fn test_contract_upgrade_success() {
     let dummy_wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
     let _new_wasm_hash = env.deployer().upload_contract_wasm(dummy_wasm);
 
-    client.update_wasm();
+    client.execute_upgrade();
 
     // Version should be 2
     assert_eq!(client.get_version(), 2);
@@ -1523,7 +1523,7 @@ fn test_contract_upgrade_unauthorized() {
     let _dummy_hash = BytesN::from_array(&env, &[1u8; 32]);
 
     // Attempt upgrade without admin auth
-    client.update_wasm();
+    client.execute_upgrade();
 }
 
 #[test]
@@ -2333,7 +2333,7 @@ fn test_verify_metadata_reveal_success() {
         secret: None,
     };
 
-    let is_valid = client.verify_metadata_reveal(&1, &proof);
+    let is_valid = client.verify_metadata_reveal(&1, &proof, &buyer);
     assert!(is_valid);
 }
 
@@ -2457,7 +2457,7 @@ fn test_verify_metadata_reveal_invalid_content() {
         secret: None,
     };
 
-    let is_valid = client.verify_metadata_reveal(&1, &proof);
+    let is_valid = client.verify_metadata_reveal(&1, &proof, &buyer);
     assert!(!is_valid);
 }
 
@@ -2479,7 +2479,7 @@ fn test_verify_metadata_reveal_no_hash() {
         secret: None,
     };
 
-    let is_valid = client.verify_metadata_reveal(&1, &proof);
+    let is_valid = client.verify_metadata_reveal(&1, &proof, &buyer);
     assert!(!is_valid);
 }
 
