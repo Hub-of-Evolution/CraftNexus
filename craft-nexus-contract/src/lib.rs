@@ -153,7 +153,9 @@ const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
 const MAX_TOTAL_RELEASE_WINDOW: u32 = 2592000; // 30 days
 const CURRENT_ESCROW_VERSION: u32 = 3;
 /// Maximum number of escrows per batch operation (Issue #111)
-const MAX_BATCH_SIZE: u32 = 100;
+// Conservative batch size to avoid exceeding instruction/read-write limits
+// observed on Soroban testnets. Reduced from 100 to 20 (Issue #198).
+const MAX_BATCH_SIZE: u32 = 20;
 /// Timeout for unfunded escrows before they can be cancelled (24 hours) (#213)
 const UNFUNDED_CANCEL_TIMEOUT: u64 = 24 * 60 * 60;
 
@@ -181,8 +183,14 @@ pub enum DataKey {
     ReferralRewardBps,
     /// Staked token amount and asset for an artisan
     ArtisanStake(Address),
-    /// Timestamp when the stake cooldown ends for an artisan
+    /// Timestamp when the stake cooldown ends for an artisan (DEPRECATED)
+    /// Backwards-compatible single timestamp kept for older clients.
     StakeCooldownEnd(Address),
+    /// Per-deposit stake queue for an artisan. Each entry represents an
+    /// individual deposit and its cooldown end timestamp. This allows
+    /// accurate tracking of staking timeframes when multiple deposits
+    /// are made at different times.
+    ArtisanStakeQueue(Address),
     /// Partial refund proposal for a disputed order
     PartialRefundProposal(u32),
     /// Re-entrancy guard key
@@ -231,6 +239,14 @@ pub enum DataKey {
 pub struct ArtisanStakeData {
     pub amount: i128,
     pub token: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct StakeDeposit {
+    pub amount: i128,
+    pub cooldown_end: u64,
 }
 
 #[contracttype]
@@ -377,6 +393,9 @@ pub struct EscrowEvent {
     pub action: EscrowAction,
     pub buyer: Address,
     pub seller: Address,
+    /// Monetary fields are emitted as raw integer types (i128/u64). Avoid
+    /// converting integers to strings inside the contract — emit numeric
+    /// values and perform human-friendly formatting off-chain (UI/indexer).
     pub amount: i128,
     pub token: Address,
     pub timestamp: u64,
@@ -973,6 +992,12 @@ impl EscrowContract {
 
     /// Internal helper: panics with TokenNotWhitelisted when enforcement is active
     /// and the token is not on the whitelist.
+    /// NOTE: whitelist enforcement is intentionally performed only during
+    /// escrow creation (and related locking operations). State transitions
+    /// such as `release`, `refund`, or recurring cycle releases MUST NOT
+    /// re-check the whitelist to avoid locking funds for escrows created
+    /// before whitelist changes. Keep this helper private and call it only
+    /// in creation-time validation paths.
     fn check_token_whitelisted(env: &Env, token: &Address) {
         let whitelist: Map<Address, bool> = env
             .storage()
@@ -3389,11 +3414,34 @@ impl EscrowContract {
         env.storage().persistent().set(&stake_key, &new_stake);
         Self::extend_persistent(&env, &stake_key);
 
-        // Set / reset cooldown end timestamp
+        // Per-deposit cooldown queue: push a new deposit entry with its own cooldown_end.
         let config = Self::get_platform_config_internal(&env);
-        let cooldown_key = DataKey::StakeCooldownEnd(artisan.clone());
         let cooldown_end = env.ledger().timestamp() + config.stake_cooldown as u64;
-        env.storage().persistent().set(&cooldown_key, &cooldown_end);
+        let deposit = StakeDeposit { amount, cooldown_end };
+        let queue_key = DataKey::ArtisanStakeQueue(artisan.clone());
+        let mut queue: soroban_sdk::Vec<StakeDeposit> = env
+            .storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+        queue.push_back(deposit);
+        env.storage().persistent().set(&queue_key, &queue);
+        Self::extend_persistent(&env, &queue_key);
+
+        // Maintain deprecated single timestamp for backwards compatibility: set to
+        // the maximum cooldown_end across deposits (i.e., time when all current
+        // deposits will be matured). This ensures older clients still see a
+        // conservative cooldown value.
+        let mut max_end: u64 = 0;
+        for i in 0..queue.len() {
+            if let Some(d) = queue.get(i) {
+                if d.cooldown_end > max_end {
+                    max_end = d.cooldown_end;
+                }
+            }
+        }
+        let cooldown_key = DataKey::StakeCooldownEnd(artisan.clone());
+        env.storage().persistent().set(&cooldown_key, &max_end);
         Self::extend_persistent(&env, &cooldown_key);
 
         env.events().publish(
@@ -3413,34 +3461,70 @@ impl EscrowContract {
     pub fn unstake_tokens(env: Env, artisan: Address, token: Address) {
         artisan.require_auth();
 
-        let cooldown_key = DataKey::StakeCooldownEnd(artisan.clone());
-        let cooldown_end: u64 = env.storage().persistent().get(&cooldown_key).unwrap_or(0);
+        // Use per-deposit queue: only matured deposits can be unstaked.
+        let queue_key = DataKey::ArtisanStakeQueue(artisan.clone());
+        let mut queue: soroban_sdk::Vec<StakeDeposit> = env
+            .storage()
+            .persistent()
+            .get(&queue_key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
 
-        if env.ledger().timestamp() < cooldown_end {
+        let now = env.ledger().timestamp();
+        let mut matured_amount: i128 = 0;
+
+        // Build a new queue with only non-matured deposits preserved.
+        let mut remaining: soroban_sdk::Vec<StakeDeposit> = soroban_sdk::Vec::new(&env);
+        for i in 0..queue.len() {
+            if let Some(d) = queue.get(i) {
+                if now >= d.cooldown_end {
+                    matured_amount += d.amount;
+                } else {
+                    remaining.push_back(d);
+                }
+            }
+        }
+
+        if matured_amount <= 0 {
             env.panic_with_error(crate::Error::StakeCooldownActive);
         }
 
-        let stake_key = DataKey::ArtisanStake(artisan.clone());
-        let stake_data: ArtisanStakeData = env
-            .storage()
-            .persistent()
-            .get(&stake_key)
-            .unwrap_or_else(|| env.panic_with_error(crate::Error::StorageCorrupted));
+        // Update stored queue and total stake record.
+        if remaining.is_empty() {
+            // No remaining deposits: remove both queue and stake record
+            env.storage().persistent().remove(&queue_key);
+            env.storage().persistent().remove(&DataKey::ArtisanStake(artisan.clone()));
+            env.storage().persistent().remove(&DataKey::StakeCooldownEnd(artisan.clone()));
+        } else {
+            env.storage().persistent().set(&queue_key, &remaining);
+            Self::extend_persistent(&env, &queue_key);
 
-        if stake_data.amount <= 0 {
-            env.panic_with_error(crate::Error::AmountBelowMinimum);
+            // Update deprecated single cooldown to max of remaining
+            let mut max_end: u64 = 0;
+            for i in 0..remaining.len() {
+                if let Some(d) = remaining.get(i) {
+                    if d.cooldown_end > max_end {
+                        max_end = d.cooldown_end;
+                    }
+                }
+            }
+            env.storage().persistent().set(&DataKey::StakeCooldownEnd(artisan.clone()), &max_end);
+            Self::extend_persistent(&env, &DataKey::StakeCooldownEnd(artisan.clone()));
+
+            // Update total stake amount (subtract matured)
+            let stake_key = DataKey::ArtisanStake(artisan.clone());
+            let mut stake_data: ArtisanStakeData = env
+                .storage()
+                .persistent()
+                .get(&stake_key)
+                .unwrap_or_else(|| env.panic_with_error(crate::Error::StorageCorrupted));
+            stake_data.amount -= matured_amount;
+            env.storage().persistent().set(&stake_key, &stake_data);
+            Self::extend_persistent(&env, &stake_key);
         }
-        if stake_data.token != token {
-            env.panic_with_error(crate::Error::StakeTokenMismatch);
-        }
 
-        // Clear stake metadata before returning the reserved artisan funds.
-        env.storage().persistent().remove(&stake_key);
-        env.storage().persistent().remove(&cooldown_key);
-
-        // Return tokens to artisan
+        // Return matured tokens to artisan
         let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&env.current_contract_address(), &artisan, &stake_data.amount);
+        token_client.transfer(&env.current_contract_address(), &artisan, &matured_amount);
 
         // Track staked funds (#212)
         Self::update_total_staked(&env, &token, -stake_data.amount);
@@ -3450,7 +3534,7 @@ impl EscrowContract {
             TokensUnstakedEvent {
                 artisan,
                 token,
-                amount: stake_data.amount,
+                amount: matured_amount,
             },
         );
     }
@@ -3641,7 +3725,7 @@ impl EscrowContract {
     ///
     /// # Arguments
     /// * `page`  – Zero-indexed page number
-    /// * `limit` – Page size; values above `MAX_BATCH_SIZE` (100) are silently capped
+    /// * `limit` – Page size; values above `MAX_BATCH_SIZE` are silently capped
     ///
     /// # Returns
     /// A `Vec<u32>` of escrow IDs for the requested page; empty when `page` is out of range.

@@ -2197,6 +2197,39 @@ fn test_batch_escrow_non_whitelisted_token_rejected() {
     assert!(result.is_err());
 }
 
+// Ensure that removing a token from the whitelist does not prevent state
+// transitions (release/refund) for escrows that were created while the
+// token was whitelisted. This prevents funds from being locked if the
+// whitelist changes after escrow creation (Issue #201 acceptance).
+#[test]
+fn test_release_succeeds_after_whitelist_removal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
+
+    // Mint funds to buyer and whitelist the token
+    token_admin.mint(&buyer, &100_000_000);
+    client.whitelist_token(&token_id);
+
+    // Create escrow while token is whitelisted
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+
+    // Admin removes token from whitelist (enforcement now changes)
+    client.remove_token_from_whitelist(&token_id);
+
+    // Release funds — must succeed even though token is no longer whitelisted
+    client.release_funds(&1);
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+
+    let token_client = token::Client::new(&env, &token_id);
+    // Seller receives 50_000_000 - fee (5%) = 47_500_000
+    assert_eq!(token_client.balance(&seller), 47_500_000);
+    // Platform receives fee
+    assert_eq!(token_client.balance(&platform_wallet), 2_500_000);
+}
+
 /// Multiple tokens can be whitelisted independently.
 #[test]
 fn test_multiple_tokens_on_whitelist() {

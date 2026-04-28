@@ -282,7 +282,8 @@ export class EscrowService implements IEscrowService {
         nativeToScVal(buyer, { type: "address" }),
         nativeToScVal(seller, { type: "address" }),
         nativeToScVal(token, { type: "address" }),
-        nativeToScVal(amountStroops.toString(), { type: "i128" }),
+        // Provide BigInt directly for i128 to avoid JS string conversions
+        nativeToScVal(amountStroops, { type: "i128" }),
         nativeToScVal(orderId, { type: "u32" }),
         nativeToScVal(window, { type: "u64" }),
       ];

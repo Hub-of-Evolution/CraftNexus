@@ -71,7 +71,8 @@ export async function invokeEscrowCreate(
     const invokeArgs = [
       nativeToScVal(buyer, { type: "address" }),
       nativeToScVal(seller, { type: "address" }),
-      nativeToScVal(amountStroops.toString(), { type: "i128" }),
+      // Pass BigInt directly for i128 values to avoid unnecessary string conversions
+      nativeToScVal(amountStroops, { type: "i128" }),
       nativeToScVal(0, { type: "u32" }), // orderId - placeholder
       nativeToScVal(604800, { type: "u64" }), // releaseWindow - 7 days default
     ];
