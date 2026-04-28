@@ -406,6 +406,32 @@ pub struct EscrowEvent {
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowResolvedEvent {
+    pub escrow_id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub arbitrator: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReputationUpdateEvent {
+    pub address: Address,
+    pub successful_delta: u32,
+    pub disputed_delta: u32,
+    pub metrics_sales_delta: u32,
+    pub metrics_amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub enum ConfigValue {
     U32(u32),
     I128(i128),
@@ -702,16 +728,25 @@ impl EscrowContract {
     fn get_admin(env: &Env) -> Result<Address, Error> {
         let config: PlatformConfig = env
             .storage()
-            .persistent()
+            .instance()
             .get(&DataKey::PlatformConfig)
             .ok_or(Error::PlatformNotInitialized)?;
-        Self::extend_persistent(env, &DataKey::PlatformConfig);
         Ok(config.admin)
     }
 
     fn emit_escrow_event(env: &Env, event: EscrowEvent) {
         env.events()
             .publish((Symbol::new(env, "escrow"), event.escrow_id), event);
+    }
+
+    fn emit_escrow_resolved_event(env: &Env, event: EscrowResolvedEvent) {
+        env.events()
+            .publish((Symbol::new(env, "escrow_resolved"), event.escrow_id), event);
+    }
+
+    fn emit_reputation_update(env: &Env, event: ReputationUpdateEvent) {
+        env.events()
+            .publish((Symbol::new(env, "reputation_update"), event.address.clone()), event);
     }
 
     fn emit_config_updated(
@@ -885,7 +920,6 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::MaxReleaseWindow, &max_window);
-        Self::extend_persistent(&env, &DataKey::MaxReleaseWindow);
     }
 
     /// Set the minimum release window to prevent "flash" auto-releases (admin only).
@@ -912,8 +946,7 @@ impl EscrowContract {
         let old_min = config.min_release_window;
         config.min_release_window = min_window;
 
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
 
         Self::emit_config_updated(
             &env,
@@ -960,7 +993,6 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::WhitelistedTokens, &whitelist);
-        Self::extend_persistent(&env, &DataKey::WhitelistedTokens);
     }
 
     /// Remove a token from the platform whitelist (admin only).
@@ -980,7 +1012,6 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::WhitelistedTokens, &whitelist);
-        Self::extend_persistent(&env, &DataKey::WhitelistedTokens);
     }
 
     /// Check whether a specific token is on the whitelist.
@@ -1052,8 +1083,7 @@ impl EscrowContract {
             min_release_window: DEFAULT_MIN_RELEASE_WINDOW,
         };
 
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
 
         env.storage()
             .persistent()
@@ -1108,8 +1138,7 @@ impl EscrowContract {
         config.admin.require_auth();
 
         config.pending_admin = Some(new_admin);
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
     }
 
     /// Claim the administrative role (pending admin only).
@@ -1122,8 +1151,7 @@ impl EscrowContract {
         config.admin = pending.clone();
         config.pending_admin = None;
 
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
     }
 
     /// Cancel an in-progress two-step admin transfer (current admin only).
@@ -1136,8 +1164,7 @@ impl EscrowContract {
         }
 
         config.pending_admin = None;
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
         Ok(())
     }
 
@@ -1707,8 +1734,9 @@ impl EscrowContract {
     }
 
     fn get_platform_config_internal(env: &Env) -> PlatformConfig {
+        env.storage().instance().extend_ttl(TTL_THRESHOLD, TTL_EXTENSION);
         env.storage()
-            .persistent()
+            .instance()
             .get(&DataKey::PlatformConfig)
             .unwrap_or_else(|| env.panic_with_error(crate::Error::PlatformNotInitialized))
     }
@@ -1983,12 +2011,26 @@ impl EscrowContract {
         );
         Self::exit_reentry_guard(&env);
 
-        // Update reputation and activity metrics in onboarding contract (#100, #63)
-        if let Some(client) = Self::get_onboarding_client(&env) {
-            client.update_reputation(&escrow.seller, &1u32, &0u32);
-            client.update_reputation(&escrow.buyer, &1u32, &0u32);
-            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount, &escrow.token);
-        }
+        // Emit reputation update events — decoupled from onboarding contract (#211)
+        let ts = env.ledger().timestamp();
+        Self::emit_reputation_update(&env, ReputationUpdateEvent {
+            address: escrow.seller.clone(),
+            successful_delta: 1,
+            disputed_delta: 0,
+            metrics_sales_delta: 1,
+            metrics_amount: escrow.amount,
+            token: escrow.token.clone(),
+            timestamp: ts,
+        });
+        Self::emit_reputation_update(&env, ReputationUpdateEvent {
+            address: escrow.buyer.clone(),
+            successful_delta: 1,
+            disputed_delta: 0,
+            metrics_sales_delta: 0,
+            metrics_amount: 0,
+            token: escrow.token.clone(),
+            timestamp: ts,
+        });
     }
 
     /// Auto-release funds after release window (seller can call)
@@ -2058,12 +2100,26 @@ impl EscrowContract {
         );
         Self::exit_reentry_guard(&env);
 
-        // Update reputation and activity metrics in onboarding contract (#100, #63)
-        if let Some(client) = Self::get_onboarding_client(&env) {
-            client.update_reputation(&escrow.seller, &1u32, &0u32);
-            client.update_reputation(&escrow.buyer, &1u32, &0u32);
-            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount, &escrow.token);
-        }
+        // Emit reputation update events — decoupled from onboarding contract (#211)
+        let ts = env.ledger().timestamp();
+        Self::emit_reputation_update(&env, ReputationUpdateEvent {
+            address: escrow.seller.clone(),
+            successful_delta: 1,
+            disputed_delta: 0,
+            metrics_sales_delta: 1,
+            metrics_amount: escrow.amount,
+            token: escrow.token.clone(),
+            timestamp: ts,
+        });
+        Self::emit_reputation_update(&env, ReputationUpdateEvent {
+            address: escrow.buyer.clone(),
+            successful_delta: 1,
+            disputed_delta: 0,
+            metrics_sales_delta: 0,
+            metrics_amount: 0,
+            token: escrow.token.clone(),
+            timestamp: ts,
+        });
     }
 
     /// Extend the release window for an escrow (only buyer can call)
@@ -2248,12 +2304,26 @@ impl EscrowContract {
         );
         Self::exit_reentry_guard(&env);
 
-        // Buyer wins refund (successful for buyer, disputed for seller) (#100, #63)
-        if let Some(client) = Self::get_onboarding_client(&env) {
-            client.update_reputation(&escrow.buyer, &1u32, &0u32);
-            client.update_reputation(&escrow.seller, &0u32, &1u32);
-            client.update_user_metrics(&escrow.seller, &1u32, &escrow.amount, &escrow.token);
-        }
+        // Emit reputation update events — decoupled from onboarding contract (#211)
+        let ts = env.ledger().timestamp();
+        Self::emit_reputation_update(&env, ReputationUpdateEvent {
+            address: escrow.buyer.clone(),
+            successful_delta: 1,
+            disputed_delta: 0,
+            metrics_sales_delta: 0,
+            metrics_amount: 0,
+            token: escrow.token.clone(),
+            timestamp: ts,
+        });
+        Self::emit_reputation_update(&env, ReputationUpdateEvent {
+            address: escrow.seller.clone(),
+            successful_delta: 0,
+            disputed_delta: 1,
+            metrics_sales_delta: 0,
+            metrics_amount: 0,
+            token: escrow.token.clone(),
+            timestamp: ts,
+        });
         Ok(())
     }
 
@@ -2512,33 +2582,62 @@ impl EscrowContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
+        Self::emit_escrow_resolved_event(
+            &env,
+            EscrowResolvedEvent {
+                escrow_id: order_id as u64,
+                buyer: escrow.buyer.clone(),
+                seller: escrow.seller.clone(),
+                arbitrator: authorized_address.clone(),
+                amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
         Self::exit_reentry_guard(&env);
 
-        // Update reputation based on resolution outcome (#100, #63)
-        if let Some(client) = Self::get_onboarding_client(&env) {
-            match resolution {
-                Resolution::ReleaseToSeller => {
-                    // Seller wins dispute: successful for seller, disputed for buyer
-                    client.update_reputation(&escrow.seller, &1u32, &0u32);
-                    client.update_reputation(&escrow.buyer, &0u32, &1u32);
-                    client.update_user_metrics(
-                        &escrow.seller,
-                        &1u32,
-                        &escrow.amount,
-                        &escrow.token,
-                    );
-                }
-                Resolution::RefundToBuyer => {
-                    // Buyer wins dispute: successful for buyer, disputed for seller
-                    client.update_reputation(&escrow.buyer, &1u32, &0u32);
-                    client.update_reputation(&escrow.seller, &0u32, &1u32);
-                    client.update_user_metrics(
-                        &escrow.seller,
-                        &1u32,
-                        &escrow.amount,
-                        &escrow.token,
-                    );
-                }
+        // Emit reputation update events — decoupled from onboarding contract (#211)
+        let ts = env.ledger().timestamp();
+        match resolution {
+            Resolution::ReleaseToSeller => {
+                Self::emit_reputation_update(&env, ReputationUpdateEvent {
+                    address: escrow.seller.clone(),
+                    successful_delta: 1,
+                    disputed_delta: 0,
+                    metrics_sales_delta: 1,
+                    metrics_amount: escrow.amount,
+                    token: escrow.token.clone(),
+                    timestamp: ts,
+                });
+                Self::emit_reputation_update(&env, ReputationUpdateEvent {
+                    address: escrow.buyer.clone(),
+                    successful_delta: 0,
+                    disputed_delta: 1,
+                    metrics_sales_delta: 0,
+                    metrics_amount: 0,
+                    token: escrow.token.clone(),
+                    timestamp: ts,
+                });
+            }
+            Resolution::RefundToBuyer => {
+                Self::emit_reputation_update(&env, ReputationUpdateEvent {
+                    address: escrow.buyer.clone(),
+                    successful_delta: 1,
+                    disputed_delta: 0,
+                    metrics_sales_delta: 0,
+                    metrics_amount: 0,
+                    token: escrow.token.clone(),
+                    timestamp: ts,
+                });
+                Self::emit_reputation_update(&env, ReputationUpdateEvent {
+                    address: escrow.seller.clone(),
+                    successful_delta: 0,
+                    disputed_delta: 1,
+                    metrics_sales_delta: 0,
+                    metrics_amount: 0,
+                    token: escrow.token.clone(),
+                    timestamp: ts,
+                });
             }
         }
     }
@@ -2571,8 +2670,7 @@ impl EscrowContract {
             min_release_window: config.min_release_window,
         };
 
-        env.storage().persistent().set(&DataKey::PlatformConfig, &new_config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &new_config);
         Self::emit_config_updated(
             &env,
             "platform_fee_bps",
@@ -2605,8 +2703,7 @@ impl EscrowContract {
             min_release_window: config.min_release_window,
         };
 
-        env.storage().persistent().set(&DataKey::PlatformConfig, &new_config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &new_config);
         Self::emit_config_updated(
             &env,
             "platform_wallet",
@@ -2637,8 +2734,7 @@ impl EscrowContract {
         let old_policy = config.expired_dispute_fee_policy;
         config.expired_dispute_fee_policy = policy;
 
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
 
         Self::emit_config_updated(
             &env,
@@ -2665,8 +2761,7 @@ impl EscrowContract {
             .map(ConfigValue::Address)
             .unwrap_or_else(|| ConfigValue::String(String::from_str(&env, "unset")));
         config.moderator = Some(moderator.clone());
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
         Self::emit_config_updated(&env, "moderator", previous, ConfigValue::Address(moderator));
     }
 
@@ -3188,7 +3283,7 @@ impl EscrowContract {
     fn check_not_paused(env: &Env) {
         if let Some(config) = env
             .storage()
-            .persistent()
+            .instance()
             .get::<DataKey, PlatformConfig>(&DataKey::PlatformConfig)
         {
             if config.is_paused {
@@ -3205,8 +3300,7 @@ impl EscrowContract {
 
         let mut config = Self::get_platform_config_internal(&env);
         config.is_paused = paused;
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
 
         if paused {
             Self::emit_platform_paused(&env, admin);
@@ -3579,8 +3673,7 @@ impl EscrowContract {
 
         let mut config = Self::get_platform_config_internal(&env);
         config.min_stake_required = min_stake;
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
         Ok(())
     }
 
@@ -3592,8 +3685,7 @@ impl EscrowContract {
         let mut config = Self::get_platform_config_internal(&env);
         let old_value = config.wasm_upgrade_cooldown;
         config.wasm_upgrade_cooldown = cooldown_seconds;
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
 
         Self::emit_config_updated(
             &env,
@@ -3612,8 +3704,7 @@ impl EscrowContract {
         let mut config = Self::get_platform_config_internal(&env);
         let old_value = config.max_dispute_duration;
         config.max_dispute_duration = duration_seconds;
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
 
         Self::emit_config_updated(
             &env,
@@ -3632,8 +3723,7 @@ impl EscrowContract {
         let mut config = Self::get_platform_config_internal(&env);
         let old_value = config.stake_cooldown;
         config.stake_cooldown = cooldown_seconds;
-        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
-        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
 
         Self::emit_config_updated(
             &env,
@@ -4074,13 +4164,27 @@ impl EscrowContract {
             },
         );
 
-        // Update reputation
-        if let Some(client) = Self::get_onboarding_client(&env) {
-            client.update_user_metrics(&escrow.artisan, &1u32, &cycle_amount, &escrow.token);
-            if !escrow.is_active {
-                client.update_reputation(&escrow.artisan, &1u32, &0u32);
-                client.update_reputation(&escrow.buyer, &1u32, &0u32);
-            }
+        // Emit reputation update events — decoupled from onboarding contract (#211)
+        let ts = env.ledger().timestamp();
+        Self::emit_reputation_update(&env, ReputationUpdateEvent {
+            address: escrow.artisan.clone(),
+            successful_delta: if !escrow.is_active { 1 } else { 0 },
+            disputed_delta: 0,
+            metrics_sales_delta: 1,
+            metrics_amount: cycle_amount,
+            token: escrow.token.clone(),
+            timestamp: ts,
+        });
+        if !escrow.is_active {
+            Self::emit_reputation_update(&env, ReputationUpdateEvent {
+                address: escrow.buyer.clone(),
+                successful_delta: 1,
+                disputed_delta: 0,
+                metrics_sales_delta: 0,
+                metrics_amount: 0,
+                token: escrow.token.clone(),
+                timestamp: ts,
+            });
         }
 
         Self::exit_reentry_guard(&env);
