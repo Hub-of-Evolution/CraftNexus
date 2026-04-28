@@ -406,6 +406,19 @@ pub struct EscrowEvent {
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowResolvedEvent {
+    pub escrow_id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub arbitrator: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub enum ConfigValue {
     U32(u32),
     I128(i128),
@@ -712,6 +725,11 @@ impl EscrowContract {
     fn emit_escrow_event(env: &Env, event: EscrowEvent) {
         env.events()
             .publish((Symbol::new(env, "escrow"), event.escrow_id), event);
+    }
+
+    fn emit_escrow_resolved_event(env: &Env, event: EscrowResolvedEvent) {
+        env.events()
+            .publish((Symbol::new(env, "escrow_resolved"), event.escrow_id), event);
     }
 
     fn emit_config_updated(
@@ -2507,6 +2525,18 @@ impl EscrowContract {
                 action: EscrowAction::Resolved,
                 buyer: escrow.buyer.clone(),
                 seller: escrow.seller.clone(),
+                amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        Self::emit_escrow_resolved_event(
+            &env,
+            EscrowResolvedEvent {
+                escrow_id: order_id as u64,
+                buyer: escrow.buyer.clone(),
+                seller: escrow.seller.clone(),
+                arbitrator: authorized_address.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
                 timestamp: env.ledger().timestamp(),
