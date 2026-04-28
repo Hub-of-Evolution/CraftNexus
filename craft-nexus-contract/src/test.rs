@@ -946,6 +946,32 @@ fn test_admin_transfer_flow() {
 }
 
 #[test]
+fn test_admin_transfer_can_be_cancelled() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let new_admin = Address::generate(&env);
+    client.update_admin(&new_admin);
+
+    client.cancel_admin_transfer().unwrap();
+
+    let config = client.get_platform_config();
+    assert_eq!(config.admin, admin);
+    assert_eq!(config.pending_admin, None);
+}
+
+#[test]
+fn test_cancel_admin_transfer_without_pending_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let result = client.try_cancel_admin_transfer();
+    assert!(result.is_err());
+}
+
+#[test]
 #[should_panic]
 fn test_claim_admin_no_pending_fails() {
     let env = Env::default();
@@ -1410,6 +1436,34 @@ fn test_create_escrow_below_custom_minimum() {
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &40_000_000, &1, &None); // Should panic
+}
+
+#[test]
+fn test_partial_refund_allows_dust_after_minimum_increase() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+
+    // Creation-time minimum check: escrow is valid at creation.
+    client.set_min_escrow_amount(&token_id, &10_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000, &1, &None);
+
+    // Admin raises minimum above any potential remainder after split.
+    client.set_min_escrow_amount(&token_id, &100_000);
+
+    // Dispute + partial refund leaves only a dust remainder for seller.
+    client.dispute_escrow(&1, &String::from_str(&env, "Dust split"), &buyer);
+    client.propose_partial_refund(&1, &49_990, &buyer);
+    client.accept_partial_refund(&1);
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Resolved);
+
+    let token_client = token::Client::new(&env, &token_id);
+    assert_eq!(token_client.balance(&buyer), 99_999_990);
+    assert_eq!(token_client.balance(&seller), 10);
 }
 
 #[test]
@@ -2004,6 +2058,33 @@ fn test_set_max_release_window_zero_panics() {
     let (client, _, _, _, _, _, _) = setup_test(&env, true);
 
     client.set_max_release_window(&0u32);
+}
+
+/// set_max_release_window above the hard safety ceiling must be rejected.
+#[test]
+#[should_panic]
+fn test_set_max_release_window_above_absolute_ceiling_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    // 366 days > hardcoded 365-day ceiling.
+    client.set_max_release_window(&(366u32 * 24 * 60 * 60));
+}
+
+#[test]
+fn test_set_max_release_window_at_absolute_ceiling_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    let ceiling = 365u32 * 24 * 60 * 60;
+    client.set_max_release_window(&ceiling);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(ceiling));
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.release_window, ceiling);
 }
 
 // ============================================================
@@ -3045,4 +3126,23 @@ fn test_accept_partial_refund_with_custom_fee_tier() {
 
     let token_client = token::Client::new(&env, &token_id);
     assert_eq!(token_client.balance(&seller), 490);
+}
+
+#[test]
+fn test_partial_refund_full_gross_amount_is_valid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.dispute_escrow(&1, &String::from_str(&env, "Full gross refund"), &buyer);
+
+    // refund_amount is interpreted as gross and is valid when it equals escrow.amount.
+    client.propose_partial_refund(&1, &1000, &buyer);
+    client.accept_partial_refund(&1);
+
+    let token_client = token::Client::new(&env, &token_id);
+    assert_eq!(token_client.balance(&buyer), 1000);
+    assert_eq!(token_client.balance(&seller), 0);
 }

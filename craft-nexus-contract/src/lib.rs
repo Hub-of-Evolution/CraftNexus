@@ -147,6 +147,8 @@ const DEFAULT_STAKE_COOLDOWN: u32 = 7 * 24 * 60 * 60;
 
 /// Default minimum release window to prevent "flash" auto-releases (1 day in seconds)
 const DEFAULT_MIN_RELEASE_WINDOW: u32 = 24 * 60 * 60;
+/// Absolute safety ceiling for admin-configurable max release window (365 days).
+const ABSOLUTE_MAX_RELEASE_WINDOW: u32 = 365 * 24 * 60 * 60;
 
 /// Maximum platform fee in basis points (10000 = 100%)
 const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
@@ -792,7 +794,10 @@ impl EscrowContract {
         env.storage().temporary().remove(&DataKey::ReentryGuard);
     }
 
-    pub fn check_min_amount(env: &Env, token: Address, amount: i128) -> Result<(), Error> {
+    // IMPORTANT: this validation is intentionally scoped to escrow creation-time
+    // flows only. Do not call from payout/distribution paths, or dynamic minimum
+    // changes could trap dust balances in existing escrows.
+    fn check_min_amount(env: &Env, token: Address, amount: i128) -> Result<(), Error> {
         if amount <= 0 {
             return Err(Error::AmountBelowMinimum);
         }
@@ -866,12 +871,16 @@ impl EscrowContract {
     /// Set the configurable maximum release window (admin only).
     ///
     /// # Arguments
-    /// * `max_window` - Maximum allowed release window in seconds (must be > 0)
+    /// * `max_window` - Maximum allowed release window in seconds.
+    ///   Must be > 0 and <= ABSOLUTE_MAX_RELEASE_WINDOW.
     pub fn set_max_release_window(env: Env, max_window: u32) {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
         if max_window == 0 {
             env.panic_with_error(crate::Error::ReleaseWindowTooShort);
+        }
+        if max_window > ABSOLUTE_MAX_RELEASE_WINDOW {
+            env.panic_with_error(crate::Error::ReleaseWindowTooLong);
         }
         env.storage()
             .persistent()
@@ -1115,6 +1124,21 @@ impl EscrowContract {
 
         env.storage().persistent().set(&DataKey::PlatformConfig, &config);
         Self::extend_persistent(&env, &DataKey::PlatformConfig);
+    }
+
+    /// Cancel an in-progress two-step admin transfer (current admin only).
+    pub fn cancel_admin_transfer(env: Env) -> Result<(), Error> {
+        let mut config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if config.pending_admin.is_none() {
+            return Err(Error::NoPendingAdmin);
+        }
+
+        config.pending_admin = None;
+        env.storage().persistent().set(&DataKey::PlatformConfig, &config);
+        Self::extend_persistent(&env, &DataKey::PlatformConfig);
+        Ok(())
     }
 
     /// Migrate a user's escrow list from legacy vector storage to indexed storage.
@@ -3629,7 +3653,8 @@ impl EscrowContract {
     ///
     /// # Arguments
     /// * `order_id` - Order identifier
-    /// * `refund_amount` - Amount to refund to the buyer
+    /// * `refund_amount` - Gross amount to refund to the buyer before any
+    ///   potential refund-side platform fee is deducted.
     /// * `proposed_by` - Address of the party proposing the refund (must be buyer or seller)
     pub fn propose_partial_refund(
         env: Env,
@@ -3655,7 +3680,9 @@ impl EscrowContract {
         // Require auth from the proposing party
         caller.require_auth();
 
-        if refund_amount <= 0 || refund_amount > escrow.amount {
+        // `refund_amount` is interpreted as gross; validation includes any
+        // configured refund-side fee to ensure transfers remain solvent.
+        if !Self::is_valid_partial_refund_gross_amount(&env, &escrow, refund_amount) {
             return Err(Error::InvalidRefundAmount);
         }
 
@@ -3756,8 +3783,9 @@ impl EscrowContract {
     /// Accept the outstanding partial refund proposal for a disputed escrow.
     ///
     /// The counterparty (the party that did NOT submit the proposal) calls this function.
-    /// Funds are distributed: buyer receives `refund_amount`, seller receives the remainder
-    /// minus the platform fee. The escrow status is set to Resolved.
+    /// Funds are distributed from a gross refund model: buyer receives
+    /// `refund_amount - refund_fee`, seller receives the remainder minus seller-side
+    /// platform fee. The escrow status is set to Resolved.
     pub fn accept_partial_refund(env: Env, order_id: u32) -> Result<(), Error> {
         let escrow_opt: Option<Escrow> = env.storage().persistent().get(&(ESCROW, order_id));
         if escrow_opt.is_none() {
@@ -3784,14 +3812,17 @@ impl EscrowContract {
             escrow.buyer.require_auth();
         }
 
-        let refund_amount = proposal.refund_amount;
-        let seller_gross = escrow.amount - refund_amount;
+        let refund_amount_gross = proposal.refund_amount;
+        let refund_fee = Self::calculate_partial_refund_fee(&env, refund_amount_gross);
+        let refund_amount_net = refund_amount_gross - refund_fee;
+        let seller_gross = escrow.amount - refund_amount_gross;
 
         // Deduct platform fee from seller's portion using effective fee bps
         let config = Self::get_platform_config_internal(&env);
         let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
-        let fee_amount = Self::calculate_fee(seller_gross, fee_bps);
-        let seller_net = seller_gross - fee_amount;
+        let seller_fee = Self::calculate_fee(seller_gross, fee_bps);
+        let seller_net = seller_gross - seller_fee;
+        let total_platform_fee = refund_fee.saturating_add(seller_fee);
 
         // CEI Pattern: EFFECTS - Update state BEFORE external calls
         escrow.status = EscrowStatus::Resolved;
@@ -3808,17 +3839,22 @@ impl EscrowContract {
         let token_client = token::Client::new(&env, &escrow.token);
 
         // Refund buyer
-        if refund_amount > 0 {
+        if refund_amount_net > 0 {
             token_client.transfer(
                 &env.current_contract_address(),
                 &escrow.buyer,
-                &refund_amount,
+                &refund_amount_net,
             );
         }
 
         // Pay platform fee
-        if fee_amount > 0 {
-            Self::transfer_platform_fee(&env, &escrow.token, &config.platform_wallet, fee_amount);
+        if total_platform_fee > 0 {
+            Self::transfer_platform_fee(
+                &env,
+                &escrow.token,
+                &config.platform_wallet,
+                total_platform_fee,
+            );
         }
 
         // Pay seller
@@ -3843,6 +3879,31 @@ impl EscrowContract {
         );
 
         Ok(())
+    }
+
+    /// Returns the currently configured refund-side fee basis points.
+    ///
+    /// Today this is intentionally fixed at 0 bps. A future governance feature
+    /// can replace this implementation with configurable storage without changing
+    /// partial-refund validation semantics.
+    fn get_refund_fee_bps(_env: &Env) -> u32 {
+        0
+    }
+
+    /// Calculate refund-side fee charged against a proposed gross partial refund.
+    fn calculate_partial_refund_fee(env: &Env, gross_refund_amount: i128) -> i128 {
+        let refund_fee_bps = Self::get_refund_fee_bps(env);
+        Self::calculate_fee(gross_refund_amount, refund_fee_bps)
+    }
+
+    /// Validate gross partial refund amount against escrow solvency including any
+    /// potential refund-side fee that may apply.
+    fn is_valid_partial_refund_gross_amount(env: &Env, escrow: &Escrow, gross_refund: i128) -> bool {
+        if gross_refund <= 0 || gross_refund > escrow.amount {
+            return false;
+        }
+        let potential_refund_fee = Self::calculate_partial_refund_fee(env, gross_refund);
+        gross_refund.saturating_add(potential_refund_fee) <= escrow.amount
     }
 
     /// Check if a user has any active traditional or recurring escrows.
