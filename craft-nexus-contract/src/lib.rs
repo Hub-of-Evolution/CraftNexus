@@ -117,6 +117,10 @@ pub enum Error {
     UpgradeProposalExists = 44,
     /// Onboarding contract address is not configured
     OnboardingContractNotSet = 45,
+    /// Recurring escrow ID space exhausted; no further IDs can be allocated
+    RecurringEscrowIdExhausted = 46,
+    /// Function is deprecated and no longer accepts writes
+    DeprecatedFunction = 47,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -166,6 +170,15 @@ const CURRENT_ESCROW_VERSION: u32 = 3;
 const MAX_BATCH_SIZE: u32 = 20;
 /// Timeout for unfunded escrows before they can be cancelled (24 hours) (#213)
 const UNFUNDED_CANCEL_TIMEOUT: u64 = 24 * 60 * 60;
+/// Hard ceiling for `NextRecurringEscrowId` (Issue #233).
+///
+/// `u64::MAX` is reserved as a sentinel so the allocator can detect an
+/// exhausted ID space without wrapping. At the realistic peak rate of
+/// one new recurring escrow per ledger this cap is far beyond any
+/// practical deployment lifetime, but the explicit bound lets us fail
+/// fast with `Error::RecurringEscrowIdExhausted` instead of silently
+/// colliding with an existing entry.
+const MAX_RECURRING_ESCROW_ID: u64 = u64::MAX - 1;
 /// Maximum number of upgrade records retained in `UpgradeHistory`. Older
 /// records are dropped FIFO once the cap is reached. Sized so a contract
 /// upgraded twice a year for ~16 years still has full visibility.
@@ -196,13 +209,32 @@ pub enum DataKey {
     PlatformConfig,
     /// Custom fee tier for an artisan (basis points)
     ArtisanFeeTier(Address),
-    /// Deprecated referral reward percentage in basis points.
-    /// Retained only for storage compatibility; referral payout logic is not implemented.
+    /// DEPRECATED legacy referral reward percentage in basis points.
+    ///
+    /// Referral payout logic was never shipped, so this value does **not**
+    /// influence any fee, payout, or reward path in the active contract. It
+    /// is retained only as a read-only historical key so a future migration
+    /// can inspect what older deployments stored.
+    ///
+    /// New code MUST NOT read or write this key. The only public accessors
+    /// (`set_referral_reward_bps` / `get_referral_reward_bps`) are kept for
+    /// ABI compatibility and are documented as legacy. See
+    /// `docs/deprecated-storage.md`.
     ReferralRewardBps,
     /// Staked token amount and asset for an artisan
     ArtisanStake(Address),
-    /// Timestamp when the stake cooldown ends for an artisan (DEPRECATED)
-    /// Backwards-compatible single timestamp kept for older clients.
+    /// DEPRECATED single-cooldown timestamp for an artisan.
+    ///
+    /// Active stake/unstake logic uses [`DataKey::ArtisanStakeQueue`]; this
+    /// key is **never read** by any code path in the live contract and
+    /// cannot influence cooldown decisions. It is updated alongside the
+    /// queue (set to the latest `cooldown_end`) purely so older read-only
+    /// clients still see a meaningful value. Once a queue is fully
+    /// drained the key is removed in `unstake_tokens`.
+    ///
+    /// Admins may also call `purge_stake_cooldown_end` to remove a stale
+    /// entry without touching the queue. See Issue #235 and
+    /// `docs/deprecated-storage.md`.
     StakeCooldownEnd(Address),
     /// Per-deposit stake queue for an artisan. Each entry represents an
     /// individual deposit and its cooldown end timestamp. This allows
@@ -229,7 +261,13 @@ pub enum DataKey {
     EscrowCount,
     /// Key for a recurring escrow by its ID
     RecurringEscrow(u64),
-    /// ID counter for recurring escrows
+    /// Monotonically incrementing counter for recurring escrow IDs.
+    ///
+    /// IDs allocate from `1..=MAX_RECURRING_ESCROW_ID` (see the constant
+    /// of the same name). Allocation past the cap is rejected with
+    /// `Error::RecurringEscrowIdExhausted` rather than wrapping, so
+    /// recurring escrow creation fails loudly instead of silently
+    /// colliding with an existing entry. See Issue #233.
     NextRecurringEscrowId,
     /// Count of currently active (non-released, non-refunded) escrows or recurring escrows for a user address.
     /// Used as a barrier for profile deactivation.
@@ -237,12 +275,25 @@ pub enum DataKey {
     /// Indexed storage for buyer escrows: (Address, Index) -> EscrowId
     /// Supports unlimited history without 64KB vector limit
     BuyerEscrowIndexed(Address, u32),
-    /// Total count of escrows for a buyer
+    /// Per-buyer escrow count (u32). Scaling notes (Issue #244):
+    ///
+    /// * Storage cost is **O(1) per buyer**: a single `u32` value plus the
+    ///   key envelope. Total footprint scales with the number of distinct
+    ///   buyers, not with the number of escrows.
+    /// * Reads/writes touch a single ledger entry, so per-account count
+    ///   updates remain constant-time even at very high user growth.
+    /// * Inactive buyers' counts behave like any other persistent entry —
+    ///   they obey the standard TTL extension (`TTL_EXTENSION`) and can
+    ///   archive naturally if a buyer becomes dormant.
+    /// * Pagination over a buyer's escrows uses `BuyerEscrowIndexed`
+    ///   (sparse, one entry per escrow), not a single `Vec`, so the 64KB
+    ///   per-key limit never bottlenecks heavy users.
     BuyerEscrowCount(Address),
     /// Indexed storage for seller escrows: (Address, Index) -> EscrowId
     /// Supports unlimited history without 64KB vector limit
     SellerEscrowIndexed(Address, u32),
-    /// Total count of escrows for a seller
+    /// Per-seller escrow count (u32). Same scaling characteristics as
+    /// `BuyerEscrowCount` — see that variant for full notes (Issue #244).
     SellerEscrowCount(Address),
     /// Total amount of funds locked in active escrows or recurring escrows for a token address.
     /// Used for sweeping unallocated funds (#212).
@@ -1731,6 +1782,7 @@ impl EscrowContract {
         let escrow = Escrow {
             version: CURRENT_ESCROW_VERSION,
             id: order_id as u64,
+            batch_id: None,
             buyer: buyer.clone(),
             seller: seller.clone(),
             token: token.clone(),
@@ -2118,6 +2170,7 @@ impl EscrowContract {
             metadata_hash: escrow.metadata_hash,
             dispute_reason: escrow.dispute_reason,
             dispute_initiated_at: escrow.dispute_initiated_at,
+            funded: true,
         }
     }
 
@@ -3948,34 +4001,53 @@ impl EscrowContract {
         }
     }
 
-    // ── Referral Rewards (#105) ─────────────────────────────────────
+    // ── Referral Rewards (#105, DEPRECATED — see Issue #234) ────────
 
-    /// Admin sets the referral reward percentage (basis points of the platform fee).
-    pub fn set_referral_reward_bps(env: Env, bps: u32) {
+    /// DEPRECATED. Setting a referral reward has no effect on payouts.
+    ///
+    /// Referral logic was never implemented; this entry point is kept only
+    /// to preserve the published ABI. Calling it now panics with
+    /// `Error::DeprecatedFunction` so no new state is written to the
+    /// legacy `DataKey::ReferralRewardBps` slot. See
+    /// `docs/deprecated-storage.md` for the migration policy.
+    pub fn set_referral_reward_bps(env: Env, _bps: u32) {
         let admin = Self::get_admin(&env)
             .unwrap_or_else(|_| env.panic_with_error(crate::Error::Unauthorized));
         admin.require_auth();
-        if bps > 5000 {
-            env.panic_with_error(crate::Error::InvalidFee);
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::ReferralRewardBps, &bps);
-        Self::extend_persistent(&env, &DataKey::ReferralRewardBps);
+        env.panic_with_error(crate::Error::DeprecatedFunction);
     }
 
-    /// Get the referral reward basis points.
-    pub fn get_referral_reward_bps(env: Env) -> u32 {
-        let key = DataKey::ReferralRewardBps;
-        let bps = env
-            .storage()
-            .persistent()
-            .get::<DataKey, u32>(&key)
-            .unwrap_or(0);
+    /// DEPRECATED. Always returns `0`.
+    ///
+    /// Older deployments may still have a value at
+    /// `DataKey::ReferralRewardBps`, but the figure is unused by every
+    /// payout path in this contract. Returning a constant `0` removes any
+    /// ambiguity for clients that still call this and prevents accidental
+    /// reliance on stale data. See `docs/deprecated-storage.md`.
+    pub fn get_referral_reward_bps(_env: Env) -> u32 {
+        0
+    }
+
+    /// Admin-only cleanup for the deprecated `StakeCooldownEnd` slot.
+    ///
+    /// Removes a stale single-timestamp cooldown entry for `artisan`
+    /// without touching `ArtisanStakeQueue`. Active staking logic relies
+    /// solely on the queue, so this is purely a storage hygiene tool for
+    /// operators who want to clear unused legacy keys. Returns `true` if
+    /// an entry was removed, `false` if there was nothing to clean up.
+    /// See Issue #235.
+    pub fn purge_stake_cooldown_end(env: Env, artisan: Address) -> bool {
+        let admin = Self::get_admin(&env)
+            .unwrap_or_else(|_| env.panic_with_error(crate::Error::Unauthorized));
+        admin.require_auth();
+
+        let key = DataKey::StakeCooldownEnd(artisan);
         if env.storage().persistent().has(&key) {
-            Self::extend_persistent(&env, &key);
+            env.storage().persistent().remove(&key);
+            true
+        } else {
+            false
         }
-        bps
     }
 
     // ── Dispute Resolution Deadline (#93) ───────────────────────────
@@ -4147,10 +4219,11 @@ impl EscrowContract {
         env.storage().persistent().set(&queue_key, &queue);
         Self::extend_persistent(&env, &queue_key);
 
-        // Maintain deprecated single timestamp for backwards compatibility: set to
-        // the maximum cooldown_end across deposits (i.e., time when all current
-        // deposits will be matured). This ensures older clients still see a
-        // conservative cooldown value.
+        // DEPRECATED storage write — see Issue #235 and the docs on
+        // `DataKey::StakeCooldownEnd`. The active staking path keys off
+        // `ArtisanStakeQueue`; this single timestamp is mirrored only so
+        // legacy read-only clients keep seeing a conservative value (the
+        // latest cooldown_end across deposits).
         let mut max_end: u64 = 0;
         for i in 0..queue.len() {
             if let Some(d) = queue.get(i) {
@@ -4217,7 +4290,9 @@ impl EscrowContract {
             env.storage().persistent().set(&queue_key, &remaining);
             Self::extend_persistent(&env, &queue_key);
 
-            // Update deprecated single cooldown to max of remaining
+            // DEPRECATED storage write — see Issue #235. Mirrored only for
+            // legacy clients; active unstake logic above already uses the
+            // queue and never reads this key.
             let mut max_end: u64 = 0;
             for i in 0..remaining.len() {
                 if let Some(d) = remaining.get(i) {
@@ -4245,8 +4320,10 @@ impl EscrowContract {
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&env.current_contract_address(), &artisan, &matured_amount);
 
-        // Track staked funds (#212)
-        Self::update_total_staked(&env, &token, -stake_data.amount);
+        // Track staked funds (#212): the matured amount is the delta
+        // leaving the contract; the per-artisan stake record (if any) is
+        // already kept in sync above.
+        Self::update_total_staked(&env, &token, -matured_amount);
 
         env.events().publish(
             (Symbol::new(&env, "tokens_unstaked"), artisan.clone()),
@@ -4631,14 +4708,22 @@ impl EscrowContract {
         // Validate token whitelist
         Self::check_token_whitelisted(&env, &token);
 
+        // Issue #233: bounded, overflow-safe allocation. Reject once the
+        // counter reaches the cap instead of wrapping into an existing ID.
         let id: u64 = env
             .storage()
             .persistent()
             .get(&DataKey::NextRecurringEscrowId)
             .unwrap_or(1);
+        if id > MAX_RECURRING_ESCROW_ID {
+            env.panic_with_error(crate::Error::RecurringEscrowIdExhausted);
+        }
+        let next_id = id
+            .checked_add(1)
+            .unwrap_or_else(|| env.panic_with_error(crate::Error::RecurringEscrowIdExhausted));
         env.storage()
             .persistent()
-            .set(&DataKey::NextRecurringEscrowId, &(id + 1));
+            .set(&DataKey::NextRecurringEscrowId, &next_id);
         Self::extend_persistent(&env, &DataKey::NextRecurringEscrowId);
 
         let now = env.ledger().timestamp();
