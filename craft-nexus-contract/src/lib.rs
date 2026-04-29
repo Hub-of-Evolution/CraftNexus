@@ -3236,6 +3236,10 @@ impl EscrowContract {
                     escrow.status = EscrowStatus::Released;
                     env.storage().persistent().set(&(ESCROW, order_id), &escrow);
 
+                    // Decrement active counts
+                    Self::update_active_obligations(&env, &escrow.buyer, -1);
+                    Self::update_active_obligations(&env, &escrow.seller, -1);
+
                     // Transfer platform fee to platform wallet
                     if fee_amount > 0 {
                         Self::transfer_platform_fee(
@@ -3409,6 +3413,10 @@ impl EscrowContract {
         // CRITICAL: Update status BEFORE external calls (CEI pattern)
         escrow.status = EscrowStatus::Resolved;
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+
+        // Decrement active counts
+        Self::update_active_obligations(&env, &escrow.buyer, -1);
+        Self::update_active_obligations(&env, &escrow.seller, -1);
 
         // Now perform token transfers (external calls)
         let token_client = token::Client::new(&env, &escrow.token);

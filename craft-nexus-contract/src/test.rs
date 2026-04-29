@@ -1743,6 +1743,10 @@ fn test_release_batch_funds_success() {
     client.create_escrow(&buyer, &seller, &token_id, &200_000_000, &101, &None);
     client.create_escrow(&buyer, &seller, &token_id, &150_000_000, &102, &None);
 
+    // Verify active obligations are set
+    assert!(client.has_active_escrows(&buyer));
+    assert!(client.has_active_escrows(&seller));
+
     // Release batch
     let order_ids = vec![&env, 100u32, 101u32, 102u32];
     let batch_id = 1u64;
@@ -1752,6 +1756,10 @@ fn test_release_batch_funds_success() {
     assert_eq!(results.get(0).unwrap(), 100);
     assert_eq!(results.get(1).unwrap(), 101);
     assert_eq!(results.get(2).unwrap(), 102);
+
+    // Verify active obligations were decremented
+    assert!(!client.has_active_escrows(&buyer));
+    assert!(!client.has_active_escrows(&seller));
 
     // Verify statuses
     let escrow1 = client.get_escrow(&100);
