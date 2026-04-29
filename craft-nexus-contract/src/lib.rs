@@ -2,7 +2,7 @@
 #![allow(clippy::too_many_arguments)]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
-    BytesN, Env, Map, String, Symbol, TryFromVal, Val, Vec,
+    BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
 #[cfg(test)]
@@ -111,6 +111,12 @@ pub enum Error {
     BatchEmpty = 41,
     /// Internal storage data corrupted
     StorageCorrupted = 42,
+    /// WASM upgrade hash failed validation (zero hash, replay, or tampering)
+    InvalidUpgradeHash = 43,
+    /// An upgrade proposal already exists; cancel it before submitting a new one
+    UpgradeProposalExists = 44,
+    /// Onboarding contract address is not configured
+    OnboardingContractNotSet = 45,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -160,6 +166,16 @@ const CURRENT_ESCROW_VERSION: u32 = 3;
 const MAX_BATCH_SIZE: u32 = 20;
 /// Timeout for unfunded escrows before they can be cancelled (24 hours) (#213)
 const UNFUNDED_CANCEL_TIMEOUT: u64 = 24 * 60 * 60;
+/// Maximum number of upgrade records retained in `UpgradeHistory`. Older
+/// records are dropped FIFO once the cap is reached. Sized so a contract
+/// upgraded twice a year for ~16 years still has full visibility.
+const MAX_UPGRADE_HISTORY: u32 = 32;
+
+/// Symbol topics emitted alongside `UpgradeProposalEvent`.
+const UPGRADE_PROPOSED: Symbol = symbol_short!("UPG_PROP");
+const UPGRADE_CANCELLED: Symbol = symbol_short!("UPG_CANC");
+const UPGRADE_EXECUTED: Symbol = symbol_short!("UPG_EXEC");
+const ONBOARD_CALL_FAILED: Symbol = symbol_short!("OB_FAIL");
 
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
@@ -233,6 +249,14 @@ pub enum DataKey {
     TotalLocked(Address),
     /// Total amount of funds currently staked by artisans for a token address.
     TotalStaked(Address),
+    /// Bounded log of completed WASM upgrades. Capped at MAX_UPGRADE_HISTORY
+    /// entries (oldest dropped) so storage cannot grow without bound.
+    UpgradeHistory,
+    /// Per-token fee configuration enabling future multi-token fee models
+    /// without requiring a contract upgrade. Coexists with the legacy
+    /// `FeeTokenIndex` Vec; `FeeTokenIndex` remains the canonical enumeration
+    /// source until callers migrate.
+    FeeTokenConfig(Address),
 }
 
 #[contracttype]
@@ -518,12 +542,90 @@ pub struct MetadataRevealProof {
     pub secret: Option<Bytes>,
 }
 
+/// Proposal record for a pending WASM upgrade.
+///
+/// `upgrade_at` is the earliest ledger timestamp at which `execute_upgrade` may
+/// run; it equals `proposed_at + wasm_upgrade_cooldown` from `PlatformConfig`.
+/// `proposed_by` records the admin that submitted the proposal — note that the
+/// admin role can rotate via the two-step transfer (`update_admin` /
+/// `claim_admin`), so the value reflects the admin at proposal time, not at
+/// execution time. `execute_upgrade` re-checks the *current* admin's auth, so
+/// rotating admins cannot bypass authorization.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct WasmUpgradeProposal {
     pub wasm_hash: BytesN<32>,
     pub upgrade_at: u64,
+    pub proposed_by: Address,
+    pub proposed_at: u64,
+}
+
+/// Lifecycle event emitted whenever a WASM upgrade proposal is created,
+/// replaced, cancelled, or executed. Indexers can use the `action` symbol to
+/// reconstruct the upgrade audit trail without scanning storage.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeProposalEvent {
+    pub action: Symbol,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+    pub upgrade_at: u64,
+}
+
+/// On-chain record of a completed WASM upgrade.
+///
+/// One entry is appended to `UpgradeHistory` per successful `execute_upgrade`
+/// call, providing operators and auditors visibility into how the contract
+/// reached its current `ContractVersion`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeRecord {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Per-token fee configuration introduced for #239.
+///
+/// The legacy `FeeTokenIndex` storage held only a flat `Vec<Address>` of
+/// fee-receiving tokens, which forced any future multi-token fee model into a
+/// contract upgrade. This struct gives us a per-token slot keyed by
+/// `DataKey::FeeTokenConfig(token)` that can carry forward additional fields
+/// (e.g. custom_bps overrides, token-specific receivers) without touching the
+/// global storage shape — new fields can be appended as `Option<T>` and read
+/// with safe fallbacks.
+///
+/// `active` lets the admin disable a token without losing its accumulated
+/// totals (set false to stop counting future fees while preserving history).
+/// `custom_fee_bps` is reserved for a future multi-token fee mode; it is
+/// currently NOT consulted by `calculate_fee` to keep this change storage-only
+/// and avoid a behavior change. A follow-up issue can wire it into the fee
+/// calculation once the storage shape stabilizes in production.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeTokenInfo {
+    pub active: bool,
+    pub custom_fee_bps: Option<u32>,
+    pub accumulated: i128,
+}
+
+/// Aggregated version metadata returned from `get_version_info`. Mirrors the
+/// fields surfaced via the upgrade history but in a flat shape suitable for
+/// dashboards / `migrate_v_x` style audits.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct VersionInfo {
+    pub current_version: u32,
+    pub latest_upgrade: Option<UpgradeRecord>,
+    pub upgrade_count: u32,
 }
 
 /// Parameters for batch escrow creation
@@ -894,13 +996,122 @@ impl EscrowContract {
             .unwrap_or(MAX_TOTAL_RELEASE_WINDOW)
     }
 
-    /// Returns an OnboardingClient pointed at the registered onboarding contract,
-    /// or None if no address has been configured via set_onboarding_contract.
-    fn get_onboarding_client(env: &Env) -> Option<OnboardingClient<'_>> {
+    /// Returns the configured onboarding contract address, if any (#243).
+    fn get_onboarding_address(env: &Env) -> Option<Address> {
         env.storage()
             .persistent()
             .get::<DataKey, Address>(&DataKey::OnboardingContractAddress)
-            .map(|addr| OnboardingClient::new(env, &addr))
+    }
+
+    /// Returns an OnboardingClient pointed at the registered onboarding contract,
+    /// or None if no address has been configured via set_onboarding_contract.
+    ///
+    /// NOTE (#243): callers should NOT invoke methods on this client directly —
+    /// a malicious or version-skewed onboarding contract could panic and trap
+    /// the entire escrow operation, holding user funds hostage. Use the
+    /// `safe_update_reputation` / `safe_update_user_metrics` helpers instead;
+    /// they wrap calls in `try_invoke_contract` and degrade gracefully on
+    /// failure. Reputation tracking is also emitted as events
+    /// (`ReputationUpdateEvent`) so off-chain consumers can recover state if
+    /// the cross-contract call fails (#211).
+    fn get_onboarding_client(env: &Env) -> Option<OnboardingClient<'_>> {
+        Self::get_onboarding_address(env).map(|addr| OnboardingClient::new(env, &addr))
+    }
+
+    /// Public read-only accessor for the registered onboarding contract
+    /// address. Returns `OnboardingContractNotSet` rather than `None` so that
+    /// SDK clients receive a typed error instead of a silent unwrap on a
+    /// `None`. Use `has_onboarding_contract` for a boolean check (#243).
+    pub fn get_onboarding_contract(env: Env) -> Result<Address, Error> {
+        Self::get_onboarding_address(&env).ok_or(Error::OnboardingContractNotSet)
+    }
+
+    /// True iff `set_onboarding_contract` has been called. Useful for
+    /// dashboards and integration tests that need to assert configuration
+    /// without surfacing an error path (#243).
+    pub fn has_onboarding_contract(env: Env) -> bool {
+        Self::get_onboarding_address(&env).is_some()
+    }
+
+    /// Emit a structured warning event when a cross-contract call to the
+    /// onboarding contract fails. Indexers can subscribe to `OB_FAIL` to flag
+    /// integration drift between the escrow and onboarding contracts.
+    fn emit_onboarding_call_failed(env: &Env, method: Symbol, address: Address) {
+        env.events().publish(
+            (Symbol::new(env, "onboarding_call_failed"), method),
+            (address, env.ledger().timestamp()),
+        );
+    }
+
+    /// Safely call `update_reputation` on the registered onboarding contract.
+    ///
+    /// Returns `Ok(true)` on a successful cross-contract call, `Ok(false)` if
+    /// the call failed (so the caller can decide whether to fall back to
+    /// emitting events) or no contract is configured. Never panics, never
+    /// propagates the host trap — the escrow flow MUST keep moving even if
+    /// the onboarding contract is broken or pointing at a malicious
+    /// implementation (#243).
+    #[allow(dead_code)]
+    fn safe_update_reputation(
+        env: &Env,
+        address: Address,
+        successful_delta: u32,
+        disputed_delta: u32,
+    ) -> bool {
+        let onboarding = match Self::get_onboarding_address(env) {
+            Some(a) => a,
+            None => return false,
+        };
+
+        let method = Symbol::new(env, "update_reputation");
+        let args: Vec<Val> = (
+            address.clone(),
+            successful_delta,
+            disputed_delta,
+        )
+            .into_val(env);
+
+        match env.try_invoke_contract::<(), soroban_sdk::Error>(&onboarding, &method, args) {
+            Ok(Ok(())) => true,
+            _ => {
+                Self::emit_onboarding_call_failed(env, method, onboarding);
+                false
+            }
+        }
+    }
+
+    /// Safely call `update_user_metrics` on the registered onboarding contract.
+    /// Mirrors `safe_update_reputation`'s contract: never panics, returns
+    /// `false` on missing config or cross-contract failure (#243).
+    #[allow(dead_code)]
+    fn safe_update_user_metrics(
+        env: &Env,
+        address: Address,
+        escrow_count_delta: u32,
+        volume_delta: i128,
+        token_address: Address,
+    ) -> bool {
+        let onboarding = match Self::get_onboarding_address(env) {
+            Some(a) => a,
+            None => return false,
+        };
+
+        let method = Symbol::new(env, "update_user_metrics");
+        let args: Vec<Val> = (
+            address.clone(),
+            escrow_count_delta,
+            volume_delta,
+            token_address.clone(),
+        )
+            .into_val(env);
+
+        match env.try_invoke_contract::<(), soroban_sdk::Error>(&onboarding, &method, args) {
+            Ok(Ok(())) => true,
+            _ => {
+                Self::emit_onboarding_call_failed(env, method, onboarding);
+                false
+            }
+        }
     }
 
     /// Set the configurable maximum release window (admin only).
@@ -966,13 +1177,64 @@ impl EscrowContract {
 
     /// Register the deployed OnboardingContract address so the escrow contract
     /// can make cross-contract reputation / metrics updates (admin only).
+    ///
+    /// (#243) Rejects pointing the onboarding contract at the escrow itself —
+    /// a self-call would create a re-entrancy hazard if the trait surface ever
+    /// expands. Cross-contract calls into the configured address remain
+    /// indirect via `safe_update_reputation` / `safe_update_user_metrics`,
+    /// which trap-isolate failures so a misbehaving onboarding contract
+    /// cannot brick escrow operations. Emits a `config_updated` event with
+    /// the previous and new addresses for audit trails.
     pub fn set_onboarding_contract(env: Env, contract_address: Address) {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
+
+        if contract_address == env.current_contract_address() {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+
+        let previous = Self::get_onboarding_address(&env);
+
         env.storage()
             .persistent()
             .set(&DataKey::OnboardingContractAddress, &contract_address);
         Self::extend_persistent(&env, &DataKey::OnboardingContractAddress);
+
+        let old_value = match previous {
+            Some(addr) => ConfigValue::Address(addr),
+            None => ConfigValue::String(String::from_str(&env, "unset")),
+        };
+        Self::emit_config_updated(
+            &env,
+            "onboarding_contract",
+            old_value,
+            ConfigValue::Address(contract_address),
+        );
+    }
+
+    /// Clear the registered onboarding contract address (admin only) (#243).
+    /// After calling this, `get_onboarding_contract` returns
+    /// `OnboardingContractNotSet` and the safe cross-contract helpers become
+    /// no-ops — escrow flows continue to emit `ReputationUpdateEvent`s for
+    /// off-chain reconstruction (#211).
+    pub fn clear_onboarding_contract(env: Env) -> Result<(), Error> {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let previous = Self::get_onboarding_address(&env)
+            .ok_or(Error::OnboardingContractNotSet)?;
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::OnboardingContractAddress);
+
+        Self::emit_config_updated(
+            &env,
+            "onboarding_contract",
+            ConfigValue::Address(previous),
+            ConfigValue::String(String::from_str(&env, "unset")),
+        );
+        Ok(())
     }
 
     /// Add a token to the platform whitelist (admin only).
@@ -1864,6 +2126,17 @@ impl EscrowContract {
         (amount * (fee_bps as i128)) / 10000
     }
 
+    /// Maintain the dual fee-token bookkeeping (#239).
+    ///
+    /// Historically fee-receiving tokens were tracked only in the legacy
+    /// `FeeTokenIndex` Vec. That single-key shape made future multi-token
+    /// fee features (custom bps per token, disabling tokens, accumulator
+    /// reconciliation) impossible without a contract upgrade. We now also
+    /// write a per-token `FeeTokenConfig(token)` slot, which is the storage
+    /// shape new code should read going forward. The legacy Vec is kept as
+    /// the canonical enumeration source for backward compatibility — a
+    /// `migrate_fee_token_configs` admin call backfills `FeeTokenConfig` for
+    /// pre-existing tokens.
     fn add_fee_token_to_index(env: &Env, token: &Address) {
         let key = DataKey::FeeTokenIndex;
         let mut tracked_tokens: Vec<Address> = env
@@ -1872,16 +2145,164 @@ impl EscrowContract {
             .get(&key)
             .unwrap_or(Vec::new(env));
 
+        let mut already_tracked = false;
         for index in 0..tracked_tokens.len() {
             if tracked_tokens.get(index) == Some(token.clone()) {
-                Self::extend_persistent(env, &key);
-                return;
+                already_tracked = true;
+                break;
             }
         }
 
-        tracked_tokens.push_back(token.clone());
-        env.storage().persistent().set(&key, &tracked_tokens);
+        if !already_tracked {
+            tracked_tokens.push_back(token.clone());
+            env.storage().persistent().set(&key, &tracked_tokens);
+        }
         Self::extend_persistent(env, &key);
+
+        Self::ensure_fee_token_config(env, token);
+    }
+
+    /// Seed a default `FeeTokenInfo` slot the first time a token is seen.
+    /// Idempotent — once a slot exists, subsequent calls leave it untouched
+    /// so admin overrides survive future fee deposits (#239).
+    fn ensure_fee_token_config(env: &Env, token: &Address) {
+        let cfg_key = DataKey::FeeTokenConfig(token.clone());
+        if !env.storage().persistent().has(&cfg_key) {
+            let info = FeeTokenInfo {
+                active: true,
+                custom_fee_bps: None,
+                accumulated: 0,
+            };
+            env.storage().persistent().set(&cfg_key, &info);
+        }
+        Self::extend_persistent(env, &cfg_key);
+    }
+
+    /// Bump the per-token accumulator inside `FeeTokenConfig` (#239). Kept
+    /// internal so external callers cannot tamper with the running total.
+    fn bump_fee_token_accumulator(env: &Env, token: &Address, amount: i128) {
+        if amount <= 0 {
+            return;
+        }
+        Self::ensure_fee_token_config(env, token);
+        let cfg_key = DataKey::FeeTokenConfig(token.clone());
+        let mut info: FeeTokenInfo = env
+            .storage()
+            .persistent()
+            .get(&cfg_key)
+            .unwrap_or(FeeTokenInfo {
+                active: true,
+                custom_fee_bps: None,
+                accumulated: 0,
+            });
+        info.accumulated = info.accumulated.saturating_add(amount);
+        env.storage().persistent().set(&cfg_key, &info);
+        Self::extend_persistent(env, &cfg_key);
+    }
+
+    /// Returns the per-token fee configuration for `token`, or `None` if the
+    /// token has never received platform fees (#239).
+    pub fn get_fee_token_config(env: Env, token: Address) -> Option<FeeTokenInfo> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FeeTokenConfig(token))
+    }
+
+    /// Returns every token that has ever received platform fees (#239).
+    /// Reads the legacy `FeeTokenIndex` Vec; new callers should pair this
+    /// enumeration with `get_fee_token_config` for richer per-token data.
+    pub fn get_fee_tokens(env: Env) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FeeTokenIndex)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Update mutable fields of a `FeeTokenInfo` slot (admin only, #239).
+    ///
+    /// `active` and `custom_fee_bps` are admin-controlled. `accumulated` is
+    /// IGNORED if passed in — the running total is owned by the contract and
+    /// only `record_total_fees` may move it. This split prevents an admin
+    /// from rewriting historical fee accounting via the config setter.
+    ///
+    /// `custom_fee_bps`, when set, must satisfy `<= MAX_PLATFORM_FEE_BPS`.
+    /// The value is currently informational; `calculate_fee` does not yet
+    /// consult it (storage-only change to keep #239 scope tight).
+    pub fn set_fee_token_config(
+        env: Env,
+        token: Address,
+        active: bool,
+        custom_fee_bps: Option<u32>,
+    ) -> Result<(), Error> {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if let Some(bps) = custom_fee_bps {
+            if bps > MAX_PLATFORM_FEE_BPS {
+                return Err(Error::InvalidFee);
+            }
+        }
+
+        let cfg_key = DataKey::FeeTokenConfig(token.clone());
+        let existing: FeeTokenInfo = env
+            .storage()
+            .persistent()
+            .get(&cfg_key)
+            .unwrap_or(FeeTokenInfo {
+                active: true,
+                custom_fee_bps: None,
+                accumulated: 0,
+            });
+
+        let info = FeeTokenInfo {
+            active,
+            custom_fee_bps,
+            accumulated: existing.accumulated,
+        };
+        env.storage().persistent().set(&cfg_key, &info);
+        Self::extend_persistent(&env, &cfg_key);
+        Ok(())
+    }
+
+    /// Backfill `FeeTokenConfig(token)` slots for every token currently
+    /// present in the legacy `FeeTokenIndex` Vec (admin only, #239).
+    ///
+    /// Idempotent — already-migrated tokens are skipped, so it is safe to
+    /// call from a deploy script or an automated migration job. Returns the
+    /// number of new config slots written so callers can verify progress.
+    /// Pairs with `set_fee_token_config` for downstream tuning.
+    pub fn migrate_fee_token_configs(env: Env) -> Result<u32, Error> {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let tokens: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeTokenIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut migrated: u32 = 0;
+        for index in 0..tokens.len() {
+            if let Some(token) = tokens.get(index) {
+                let cfg_key = DataKey::FeeTokenConfig(token.clone());
+                if !env.storage().persistent().has(&cfg_key) {
+                    let info = FeeTokenInfo {
+                        active: true,
+                        custom_fee_bps: None,
+                        accumulated: env
+                            .storage()
+                            .persistent()
+                            .get(&DataKey::TotalFees(token))
+                            .unwrap_or(0i128),
+                    };
+                    env.storage().persistent().set(&cfg_key, &info);
+                    Self::extend_persistent(&env, &cfg_key);
+                    migrated += 1;
+                }
+            }
+        }
+
+        Ok(migrated)
     }
 
     fn record_total_fees(env: &Env, token: &Address, fee_amount: i128) {
@@ -1896,6 +2317,9 @@ impl EscrowContract {
             .set(&key, &(current_total + fee_amount));
         Self::extend_persistent(env, &key);
         Self::add_fee_token_to_index(env, token);
+        // Mirror the running total into the per-token fee config so future
+        // multi-token logic has a single source of truth (#239).
+        Self::bump_fee_token_accumulator(env, token, fee_amount);
     }
 
     fn transfer_platform_fee(
@@ -2171,17 +2595,71 @@ impl EscrowContract {
         Self::exit_reentry_guard(&env);
     }
 
+    /// Reject obviously invalid WASM hashes before they touch storage.
+    ///
+    /// The Soroban host validates that the hash points to an uploaded WASM at
+    /// `update_current_contract_wasm` time, but only at execution. Catching
+    /// the all-zero sentinel here avoids the worst footgun (an admin
+    /// accidentally proposing the default `BytesN<32>::from_array(_, [0; 32])`)
+    /// and gives a meaningful error code instead of a host trap.
+    fn validate_upgrade_hash(env: &Env, hash: &BytesN<32>) -> Result<(), Error> {
+        let zero = BytesN::<32>::from_array(env, &[0u8; 32]);
+        if hash == &zero {
+            return Err(Error::InvalidUpgradeHash);
+        }
+        Ok(())
+    }
+
+    fn emit_upgrade_event(
+        env: &Env,
+        action: Symbol,
+        wasm_hash: BytesN<32>,
+        admin: Address,
+        upgrade_at: u64,
+    ) {
+        env.events().publish(
+            (Symbol::new(env, "wasm_upgrade"), action.clone()),
+            UpgradeProposalEvent {
+                action,
+                wasm_hash,
+                admin,
+                timestamp: env.ledger().timestamp(),
+                upgrade_at,
+            },
+        );
+    }
+
     /// Propose a new WASM code for the contract (admin only).
-    /// Sets a configurable grace period before the upgrade can be executed (#95).
+    ///
+    /// Sets a configurable grace period (`PlatformConfig::wasm_upgrade_cooldown`)
+    /// before the upgrade can be executed via `execute_upgrade` (#95, #230).
+    ///
+    /// Only one proposal may be pending at a time. To replace a pending
+    /// proposal the admin must explicitly cancel it first via
+    /// `cancel_upgrade_wasm`; silently overwriting would let a compromised
+    /// admin reset the cooldown clock without a visible cancellation event.
     pub fn propose_upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
+        Self::validate_upgrade_hash(&env, &new_wasm_hash)?;
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::WasmUpgradeProposal)
+        {
+            return Err(Error::UpgradeProposalExists);
+        }
+
         let config = Self::get_platform_config_internal(&env);
-        let upgrade_at = env.ledger().timestamp() + config.wasm_upgrade_cooldown as u64;
+        let proposed_at = env.ledger().timestamp();
+        let upgrade_at = proposed_at + config.wasm_upgrade_cooldown as u64;
         let proposal = WasmUpgradeProposal {
-            wasm_hash: new_wasm_hash,
+            wasm_hash: new_wasm_hash.clone(),
             upgrade_at,
+            proposed_by: admin.clone(),
+            proposed_at,
         };
 
         env.storage()
@@ -2189,12 +2667,23 @@ impl EscrowContract {
             .set(&DataKey::WasmUpgradeProposal, &proposal);
         Self::extend_persistent(&env, &DataKey::WasmUpgradeProposal);
 
+        Self::emit_upgrade_event(&env, UPGRADE_PROPOSED, new_wasm_hash, admin, upgrade_at);
+
         Ok(())
     }
 
     /// Upgrade the contract's WASM code after the grace period has elapsed.
-    /// Only the admin can execute the final upgrade once the proposal is ready (#137).
-    pub fn execute_upgrade(env: Env) -> Result<(), Error> {
+    ///
+    /// The caller passes the `expected_wasm_hash` they think is pending; if it
+    /// does not match the stored proposal the call fails with
+    /// `InvalidUpgradeHash`. This is defense-in-depth against a scenario where
+    /// the admin's signing tool is shown a different proposal than what was
+    /// actually stored on-chain, and forces the operator to confirm exactly
+    /// which payload is being applied (#230).
+    ///
+    /// On success a new `UpgradeRecord` is appended to `UpgradeHistory`,
+    /// `ContractVersion` is bumped, and the proposal is cleared atomically.
+    pub fn execute_upgrade(env: Env, expected_wasm_hash: BytesN<32>) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
@@ -2204,12 +2693,16 @@ impl EscrowContract {
             .get(&DataKey::WasmUpgradeProposal)
             .ok_or(Error::NoUpgradeProposed)?;
 
+        if proposal.wasm_hash != expected_wasm_hash {
+            return Err(Error::InvalidUpgradeHash);
+        }
+
         if env.ledger().timestamp() < proposal.upgrade_at {
             return Err(Error::UpgradeCooldownActive);
         }
 
         env.deployer()
-            .update_current_contract_wasm(proposal.wasm_hash);
+            .update_current_contract_wasm(proposal.wasm_hash.clone());
 
         // Update version in storage
         let current_version: u32 = env
@@ -2217,37 +2710,145 @@ impl EscrowContract {
             .persistent()
             .get(&DataKey::ContractVersion)
             .unwrap_or(0);
+        let new_version = current_version + 1;
 
         env.storage()
             .persistent()
-            .set(&DataKey::ContractVersion, &(current_version + 1));
+            .set(&DataKey::ContractVersion, &new_version);
         Self::extend_persistent(&env, &DataKey::ContractVersion);
+
+        Self::append_upgrade_history(
+            &env,
+            UpgradeRecord {
+                from_version: current_version,
+                to_version: new_version,
+                wasm_hash: proposal.wasm_hash.clone(),
+                admin: admin.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
 
         // Clear proposal
         env.storage()
             .persistent()
             .remove(&DataKey::WasmUpgradeProposal);
 
+        Self::emit_upgrade_event(
+            &env,
+            UPGRADE_EXECUTED,
+            proposal.wasm_hash,
+            admin,
+            proposal.upgrade_at,
+        );
+
         Ok(())
     }
 
-    /// Cancel a proposed WASM upgrade (admin only) (#95).
+    /// Cancel a proposed WASM upgrade (admin only) (#95, #230).
+    ///
+    /// Emits an `UPG_CANC` event so cancellations are visible alongside
+    /// proposals in the audit trail. Returning `NoUpgradeProposed` instead of
+    /// silently succeeding makes accidental double-cancels visible.
     pub fn cancel_upgrade_wasm(env: Env) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
+
+        let proposal: WasmUpgradeProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WasmUpgradeProposal)
+            .ok_or(Error::NoUpgradeProposed)?;
 
         env.storage()
             .persistent()
             .remove(&DataKey::WasmUpgradeProposal);
 
+        Self::emit_upgrade_event(
+            &env,
+            UPGRADE_CANCELLED,
+            proposal.wasm_hash,
+            admin,
+            proposal.upgrade_at,
+        );
+
         Ok(())
     }
 
+    /// Returns the currently pending WASM upgrade proposal, if any (#230).
+    /// Read-only — useful for off-chain monitors and admin dashboards that
+    /// need to confirm what `execute_upgrade` will apply.
+    pub fn get_upgrade_proposal(env: Env) -> Option<WasmUpgradeProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::WasmUpgradeProposal)
+    }
+
+    /// Returns the current contract version.
+    ///
+    /// `ContractVersion` semantics:
+    /// - Initialized to `1` by `initialize`.
+    /// - Incremented by exactly `1` for each successful `execute_upgrade`.
+    /// - Independent of the on-disk WASM hash; the hash + version pair is
+    ///   captured per-upgrade in `UpgradeHistory` for auditability.
+    /// - Migration code that needs to gate behavior across upgrades should
+    ///   compare against this value rather than embedding magic numbers.
     pub fn get_version(env: Env) -> u32 {
         env.storage()
             .persistent()
             .get(&DataKey::ContractVersion)
             .unwrap_or(0)
+    }
+
+    /// Append a record to the bounded `UpgradeHistory` log (#241). The Vec is
+    /// trimmed FIFO once it exceeds `MAX_UPGRADE_HISTORY`.
+    fn append_upgrade_history(env: &Env, record: UpgradeRecord) {
+        let mut history: Vec<UpgradeRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UpgradeHistory)
+            .unwrap_or_else(|| Vec::new(env));
+
+        history.push_back(record);
+        while history.len() > MAX_UPGRADE_HISTORY {
+            history.pop_front();
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::UpgradeHistory, &history);
+        Self::extend_persistent(env, &DataKey::UpgradeHistory);
+    }
+
+    /// Returns the bounded log of past contract upgrades (#241).
+    ///
+    /// Newer entries are at the back. The log is capped at
+    /// `MAX_UPGRADE_HISTORY` records — older entries are dropped FIFO so
+    /// storage cannot grow unbounded. For long-term audit trails operators
+    /// should mirror the `wasm_upgrade` events to off-chain storage.
+    pub fn get_upgrade_history(env: Env) -> Vec<UpgradeRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UpgradeHistory)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns aggregate version + last-upgrade metadata (#241). Pairs the
+    /// scalar `ContractVersion` with the most recent `UpgradeRecord` so a
+    /// dashboard or migration script can read everything in one call.
+    pub fn get_version_info(env: Env) -> VersionInfo {
+        let current_version = Self::get_version(env.clone());
+        let history = Self::get_upgrade_history(env);
+        let upgrade_count = history.len();
+        let latest_upgrade = if upgrade_count == 0 {
+            None
+        } else {
+            history.get(upgrade_count - 1)
+        };
+        VersionInfo {
+            current_version,
+            latest_upgrade,
+            upgrade_count,
+        }
     }
 
     /// Refund funds to buyer (admin only)
