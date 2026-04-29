@@ -478,3 +478,34 @@ fn test_policy_persists_across_config_updates() {
     let policy = client.get_expired_dispute_policy();
     assert_eq!(policy, ExpiredDisputeFeePolicy::SplitFee);
 }
+
+#[test]
+fn test_resolve_expired_dispute_decrements_active_obligations() {
+    let (env, client, buyer, seller, token_addr, _, _, _, _) = setup_test();
+
+    let amount = 1_000_000i128;
+    let order_id = 1u32;
+
+    // Create and dispute escrow
+    create_and_dispute_escrow(&client, &buyer, &seller, &token_addr, amount, order_id);
+
+    // Verify active obligations are set
+    assert!(client.has_active_escrows(&buyer));
+    assert!(client.has_active_escrows(&seller));
+
+    // Fast forward past dispute duration
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_MAX_DISPUTE_DURATION as u64 + 1;
+    });
+
+    // Resolve expired dispute
+    client.resolve_expired_dispute(&order_id).unwrap();
+
+    // Verify active obligations were decremented
+    assert!(!client.has_active_escrows(&buyer));
+    assert!(!client.has_active_escrows(&seller));
+
+    // Escrow should be resolved
+    let escrow = client.get_escrow(&order_id).unwrap();
+    assert_eq!(escrow.status, EscrowStatus::Resolved);
+}
