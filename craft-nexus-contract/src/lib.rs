@@ -3214,6 +3214,10 @@ impl EscrowContract {
         Self::update_active_obligations(&env, &escrow.buyer, -1);
         Self::update_active_obligations(&env, &escrow.seller, -1);
 
+        // Clean up any orphaned partial refund proposal
+        let proposal_key = DataKey::PartialRefundProposal(order_id);
+        env.storage().persistent().remove(&proposal_key);
+
         // Now perform token transfers (external calls)
         match resolution {
             Resolution::ReleaseToSeller => {
@@ -4083,6 +4087,10 @@ impl EscrowContract {
         escrow.status = EscrowStatus::Resolved;
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
 
+        // Clean up any orphaned partial refund proposal
+        let proposal_key = DataKey::PartialRefundProposal(order_id);
+        env.storage().persistent().remove(&proposal_key);
+
         // Now perform token transfers (external calls)
         let token_client = token::Client::new(&env, &escrow.token);
         let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
@@ -4645,6 +4653,41 @@ impl EscrowContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
+
+        Ok(())
+    }
+
+    /// Cancel a partial refund proposal.
+    ///
+    /// Only the proposer can cancel their own proposal. This removes the proposal
+    /// from storage, allowing a new proposal to be submitted if needed.
+    ///
+    /// # Arguments
+    /// * `order_id` - Order identifier
+    pub fn cancel_partial_refund(env: Env, order_id: u32) -> Result<(), Error> {
+        let escrow_opt: Option<Escrow> = env.storage().persistent().get(&(ESCROW, order_id));
+        if escrow_opt.is_none() {
+            return Err(Error::EscrowNotFound);
+        }
+        let escrow: Escrow = escrow_opt.unwrap();
+
+        if escrow.status != EscrowStatus::Disputed {
+            return Err(Error::InvalidEscrowState);
+        }
+
+        let proposal_key = DataKey::PartialRefundProposal(order_id);
+        let proposal_opt: Option<PartialRefundProposal> =
+            env.storage().persistent().get(&proposal_key);
+        if proposal_opt.is_none() {
+            return Err(Error::ProposalNotFound);
+        }
+        let proposal: PartialRefundProposal = proposal_opt.unwrap();
+
+        // Only the proposer can cancel
+        proposal.proposed_by.require_auth();
+
+        // Remove the proposal from storage
+        env.storage().persistent().remove(&proposal_key);
 
         Ok(())
     }
