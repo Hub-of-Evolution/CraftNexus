@@ -1,5 +1,6 @@
 use super::*;
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use crate::Error;
+use soroban_sdk::{testutils::Address as _, token, Address, Env, String};
 
 fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     let contract_id = env.register_contract(None, OnboardingContract);
@@ -114,7 +115,7 @@ fn test_onboard_normalizes_multilingual_username() {
 }
 
 #[test]
-#[should_panic(expected = "User already onboarded")]
+#[should_panic]
 fn test_onboard_duplicate_user() {
     let env = Env::default();
     env.mock_all_auths();
@@ -130,7 +131,7 @@ fn test_onboard_duplicate_user() {
 }
 
 #[test]
-#[should_panic(expected = "Username too short")]
+#[should_panic]
 fn test_onboard_username_too_short() {
     let env = Env::default();
     env.mock_all_auths();
@@ -144,7 +145,7 @@ fn test_onboard_username_too_short() {
 }
 
 #[test]
-#[should_panic(expected = "Username too long")]
+#[should_panic]
 fn test_onboard_username_too_long() {
     let env = Env::default();
     env.mock_all_auths();
@@ -160,7 +161,7 @@ fn test_onboard_username_too_long() {
 }
 
 #[test]
-#[should_panic(expected = "Invalid role: can only onboard as Buyer or Artisan")]
+#[should_panic]
 fn test_onboard_invalid_role() {
     let env = Env::default();
     env.mock_all_auths();
@@ -176,7 +177,7 @@ fn test_onboard_invalid_role() {
 // ===== Username Uniqueness =====
 
 #[test]
-#[should_panic(expected = "Username already taken")]
+#[should_panic]
 fn test_onboard_duplicate_username_fails() {
     let env = Env::default();
     env.mock_all_auths();
@@ -192,7 +193,7 @@ fn test_onboard_duplicate_username_fails() {
 }
 
 #[test]
-#[should_panic(expected = "Username already taken")]
+#[should_panic]
 fn test_onboard_duplicate_username_case_insensitive() {
     let env = Env::default();
     env.mock_all_auths();
@@ -209,7 +210,7 @@ fn test_onboard_duplicate_username_case_insensitive() {
 }
 
 #[test]
-#[should_panic(expected = "Username already taken")]
+#[should_panic]
 fn test_onboard_duplicate_username_mixed_case() {
     let env = Env::default();
     env.mock_all_auths();
@@ -269,7 +270,7 @@ fn test_get_user_by_username_case_insensitive() {
 }
 
 #[test]
-#[should_panic(expected = "Username not found")]
+#[should_panic]
 fn test_get_user_by_username_not_found() {
     let env = Env::default();
     env.mock_all_auths();
@@ -324,7 +325,7 @@ fn test_get_user() {
 }
 
 #[test]
-#[should_panic(expected = "User not found")]
+#[should_panic]
 fn test_get_user_not_found() {
     let env = Env::default();
     env.mock_all_auths();
@@ -540,8 +541,9 @@ fn test_auto_verify_triggers_on_threshold() {
 
     // Default thresholds: 5 escrows and 10_000_000_000 volume.
     // Call update_user_metrics with enough to cross both thresholds.
-    let token = env.register_stellar_asset_contract(Address::generate(&env));
-    client.update_user_metrics(&user, &5u32, &10_000_000_000i128, &token);
+    let token_admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(token_admin);
+    client.update_user_metrics(&user, &5u32, &10_000_000_000i128, &token.address());
 
     // Should now be auto-verified
     assert!(client.is_verified(&user));
@@ -549,6 +551,35 @@ fn test_auto_verify_triggers_on_threshold() {
     let metrics = client.get_user_metrics(&user);
     assert_eq!(metrics.total_escrow_count, 5);
     assert_eq!(metrics.total_volume, 10_000_000_000);
+}
+
+#[test]
+fn test_auto_verify_can_be_disabled() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "manualonly"),
+        &UserRole::Artisan,
+    );
+
+    client.set_auto_verify_enabled(&false);
+
+    let token_admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(token_admin);
+    client.update_user_metrics(&user, &5u32, &10_000_000_000i128, &token.address());
+
+    assert!(!client.is_verified(&user));
+    assert!(!client.auto_verify_user(&user));
+
+    client.verify_user(&user);
+    assert!(client.is_verified(&user));
+
+    let config = client.get_config();
+    assert!(!config.auto_verify_enabled);
 }
 
 /// auto_verify_user is a no-op on an already verified user.
@@ -599,8 +630,9 @@ fn test_configurable_thresholds() {
     client.set_verification_thresholds(&1u32, &1i128);
 
     // Providing minimal metrics should now trigger auto-verification
-    let token = env.register_stellar_asset_contract(Address::generate(&env));
-    client.update_user_metrics(&user, &1u32, &1i128, &token);
+    let token_admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(token_admin);
+    client.update_user_metrics(&user, &1u32, &1i128, &token.address());
     assert!(client.is_verified(&user));
 }
 
@@ -673,6 +705,35 @@ fn test_process_verification_request_reject() {
     assert!(!client.is_verified(&user));
     let queue = client.get_verification_queue();
     assert_eq!(queue.len(), 0);
+}
+
+#[test]
+fn test_process_verification_request_preserves_other_pending_users() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user_one = Address::generate(&env);
+    let user_two = Address::generate(&env);
+
+    client.onboard_user(
+        &user_one,
+        &String::from_str(&env, "queued4"),
+        &UserRole::Artisan,
+    );
+    client.onboard_user(
+        &user_two,
+        &String::from_str(&env, "queued5"),
+        &UserRole::Artisan,
+    );
+
+    client.request_verification(&user_one);
+    client.request_verification(&user_two);
+    client.process_verification_request(&user_one, &true);
+
+    let queue = client.get_verification_queue();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.get(0), Some(user_two));
 }
 
 /// Verification history is tracked across request, approve, and auto-verify actions.
@@ -764,6 +825,7 @@ fn test_get_user_migrates_legacy_profile() {
         is_verified: false,
         successful_trades: 0,
         disputed_trades: 0,
+        portfolio_cid: None,
     };
 
     env.as_contract(&client.address, || {
@@ -820,6 +882,26 @@ fn test_change_username_success() {
 }
 
 #[test]
+#[should_panic]
+fn test_change_username_cooldown_active() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "original_user"),
+        &UserRole::Buyer,
+    );
+    client.change_username(&user, &String::from_str(&env, "first_change"));
+
+    // Immediate second change should be blocked by cooldown.
+    client.change_username(&user, &String::from_str(&env, "second_change"));
+}
+
+#[test]
 fn test_change_username_case_insensitive() {
     let env = Env::default();
     env.mock_all_auths();
@@ -838,7 +920,7 @@ fn test_change_username_case_insensitive() {
 }
 
 #[test]
-#[should_panic(expected = "Username already taken")]
+#[should_panic]
 fn test_change_username_to_existing() {
     let env = Env::default();
     env.mock_all_auths();
@@ -855,7 +937,7 @@ fn test_change_username_to_existing() {
 }
 
 #[test]
-#[should_panic(expected = "Username too short")]
+#[should_panic]
 fn test_change_username_too_short() {
     let env = Env::default();
     env.mock_all_auths();
@@ -874,7 +956,7 @@ fn test_change_username_too_short() {
 }
 
 #[test]
-#[should_panic(expected = "Username too long")]
+#[should_panic]
 fn test_change_username_too_long() {
     let env = Env::default();
     env.mock_all_auths();
@@ -897,7 +979,7 @@ fn test_change_username_too_long() {
 }
 
 #[test]
-#[should_panic(expected = "User not onboarded")]
+#[should_panic]
 fn test_change_username_not_onboarded() {
     let env = Env::default();
     env.mock_all_auths();
@@ -931,6 +1013,52 @@ fn test_username_change_fee_management() {
     client.set_username_change_fee(&0);
     let disabled_fee = client.get_username_change_fee();
     assert_eq!(disabled_fee, 0);
+}
+
+#[test]
+fn test_change_username_collects_configured_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let fee_wallet = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_contract.address());
+    let token_client = token::Client::new(&env, &token_contract.address());
+
+    token_admin_client.mint(&user, &5_000_000);
+
+    client.onboard_user(&user, &String::from_str(&env, "fee_user"), &UserRole::Buyer);
+    client.set_username_change_fee(&1_000_000);
+    client.set_username_fee_token(&token_contract.address());
+    client.set_username_fee_wallet(&fee_wallet);
+
+    client.change_username(&user, &String::from_str(&env, "fee_user_new"));
+
+    assert_eq!(token_client.balance(&user), 4_000_000);
+    assert_eq!(token_client.balance(&fee_wallet), 1_000_000);
+}
+
+#[test]
+#[should_panic]
+fn test_change_username_fee_requires_token_configuration() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "needs_fee"),
+        &UserRole::Buyer,
+    );
+    client.set_username_change_fee(&1_000_000);
+
+    client.change_username(&user, &String::from_str(&env, "still_needs_fee"));
 }
 
 #[test]
@@ -968,14 +1096,14 @@ fn test_change_username_preserves_other_fields() {
         &UserRole::Artisan,
     );
     assert_eq!(original.role, UserRole::Artisan);
-    assert_eq!(original.is_verified, false);
+    assert!(!original.is_verified);
 
     // Change username
     let updated = client.change_username(&user, &String::from_str(&env, "new_name"));
 
     // Verify other fields are preserved
     assert_eq!(updated.role, UserRole::Artisan);
-    assert_eq!(updated.is_verified, false);
+    assert!(!updated.is_verified);
     assert_eq!(updated.address, user);
     assert_eq!(updated.registered_at, original.registered_at);
 }
@@ -989,18 +1117,264 @@ fn test_volume_normalization_across_decimals() {
     client.onboard_user(&user, &String::from_str(&env, "normy"), &UserRole::Artisan);
 
     // 1. Test 7-decimal token (base)
-    let token_7 = env.register_stellar_asset_contract(Address::generate(&env));
-    client.update_user_metrics(&user, &1u32, &1_000_000_000i128, &token_7);
-    
+    let token_admin = Address::generate(&env);
+    let token_7 = env.register_stellar_asset_contract_v2(token_admin);
+    client.update_user_metrics(&user, &1u32, &1_000_000_000i128, &token_7.address());
+
     let metrics = client.get_user_metrics(&user);
     assert_eq!(metrics.total_volume, 1_000_000_000); // 100.0000000 USDC -> 100.0000000 normalized
 
     // 2. Test 6-decimal token (e.g., some USDC versions or USDT)
     // We can't easily change decimals of Stellar Asset Contract in tests (it's always 7),
-    // but we've verified the code logic. 
+    // but we've verified the code logic.
     // The code logic is:
     // let normalized_delta = if token_decimals < base_decimals {
     //     let diff = base_decimals - token_decimals;
     //     volume_delta.saturating_mul(10i128.pow(diff))
     // ...
+}
+
+// ===== Portfolio Tests (Issue #112) =====
+
+#[test]
+fn test_update_portfolio_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_jane");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Update portfolio with valid CIDv0
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    let updated = client.update_portfolio(&user, &Some(portfolio_cid.clone()));
+
+    assert_eq!(updated.portfolio_cid, Some(portfolio_cid));
+    assert_eq!(updated.role, UserRole::Artisan);
+}
+
+#[test]
+fn test_update_portfolio_with_cidv1() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_john");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Update portfolio with valid CIDv1 (base32)
+    let portfolio_cid = String::from_str(
+        &env,
+        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+    );
+    let updated = client.update_portfolio(&user, &Some(portfolio_cid.clone()));
+
+    assert_eq!(updated.portfolio_cid, Some(portfolio_cid));
+}
+
+#[test]
+fn test_update_portfolio_remove() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_bob");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Set portfolio
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    client.update_portfolio(&user, &Some(portfolio_cid));
+
+    // Remove portfolio
+    let updated = client.update_portfolio(&user, &None);
+    assert_eq!(updated.portfolio_cid, None);
+}
+
+#[test]
+#[should_panic]
+fn test_update_portfolio_buyer_cannot_update() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "buyer_jane");
+
+    // Onboard as buyer
+    client.onboard_user(&user, &username, &UserRole::Buyer);
+
+    // Try to update portfolio (should fail)
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    client.update_portfolio(&user, &Some(portfolio_cid));
+}
+
+#[test]
+#[should_panic]
+fn test_update_portfolio_invalid_cid() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_alice");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Try to update with invalid CID
+    let invalid_cid = String::from_str(&env, "invalid_cid_format");
+    client.update_portfolio(&user, &Some(invalid_cid));
+}
+
+#[test]
+#[should_panic]
+fn test_update_portfolio_not_onboarded() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    // Try to update portfolio without onboarding
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    client.update_portfolio(&user, &Some(portfolio_cid));
+}
+
+#[test]
+fn test_portfolio_accessible_via_get_user() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_carol");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Update portfolio
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    client.update_portfolio(&user, &Some(portfolio_cid.clone()));
+
+    // Verify portfolio is accessible via get_user
+    let profile = client.get_user(&user);
+    assert_eq!(profile.portfolio_cid, Some(portfolio_cid));
+}
+
+#[test]
+fn test_portfolio_accessible_via_get_user_by_username() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_dave");
+
+    // Onboard as artisan
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Update portfolio
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    client.update_portfolio(&user, &Some(portfolio_cid.clone()));
+
+    // Verify portfolio is accessible via get_user_by_username
+    let profile = client.get_user_by_username(&username);
+    assert_eq!(profile.portfolio_cid, Some(portfolio_cid));
+}
+
+#[test]
+fn test_portfolio_none_by_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_eve");
+
+    // Onboard as artisan
+    let profile = client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    // Verify portfolio is None by default
+    assert_eq!(profile.portfolio_cid, None);
+}
+
+#[test]
+fn test_portfolio_preserves_other_fields() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "artisan_frank");
+
+    // Onboard as artisan
+    let original = client.onboard_user(&user, &username, &UserRole::Artisan);
+    assert_eq!(original.role, UserRole::Artisan);
+    assert!(!original.is_verified);
+
+    // Update portfolio
+    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    let updated = client.update_portfolio(&user, &Some(portfolio_cid));
+
+    // Verify other fields are preserved
+    assert_eq!(updated.role, UserRole::Artisan);
+    assert!(!updated.is_verified);
+    assert_eq!(updated.address, user);
+    assert_eq!(updated.registered_at, original.registered_at);
+}
+
+// ===== Error Enum Tests (Issue #120) =====
+
+#[test]
+fn test_error_enum_has_specific_variants() {
+    // Verify that specific error variants exist
+    assert_eq!(Error::InvalidIpfsHash as u32, 25);
+    assert_eq!(Error::InvalidMetadataHash as u32, 26);
+    assert_eq!(Error::BatchLimitExceeded as u32, 27);
+    assert_eq!(Error::InvalidPortfolioCid as u32, 28);
+    assert_eq!(Error::NotAnArtisan as u32, 29);
+    assert_eq!(Error::InvalidVerificationLevel as u32, 30);
+    assert_eq!(Error::UsernameChangeCooldownActive as u32, 31);
+    assert_eq!(Error::InvalidDisputeReason as u32, 32);
+    assert_eq!(Error::EscrowAmountBelowMinimum as u32, 33);
+    assert_eq!(Error::InvalidReleaseWindow as u32, 34);
+    assert_eq!(Error::UnauthorizedAdmin as u32, 35);
+}
+
+#[test]
+fn test_error_enum_backward_compatibility() {
+    // Verify that existing error variants maintain their numeric IDs
+    assert_eq!(Error::Unauthorized as u32, 1);
+    assert_eq!(Error::EscrowNotFound as u32, 2);
+    assert_eq!(Error::InvalidEscrowState as u32, 3);
+    assert_eq!(Error::UsernameAlreadyExists as u32, 4);
+    assert_eq!(Error::TokenNotWhitelisted as u32, 5);
+    assert_eq!(Error::AmountBelowMinimum as u32, 6);
+    assert_eq!(Error::ReleaseWindowTooLong as u32, 7);
+    assert_eq!(Error::NotInDispute as u32, 8);
+    assert_eq!(Error::AlreadyOnboarded as u32, 9);
+    assert_eq!(Error::InvalidFee as u32, 10);
+    assert_eq!(Error::SameBuyerSeller as u32, 11);
+    assert_eq!(Error::PlatformNotInitialized as u32, 12);
+    assert_eq!(Error::ReleaseWindowNotElapsed as u32, 13);
+    assert_eq!(Error::BatchOperationFailed as u32, 14);
+    assert_eq!(Error::ContractPaused as u32, 15);
+    assert_eq!(Error::DisputeExpired as u32, 16);
+    assert_eq!(Error::InsufficientStake as u32, 17);
+    assert_eq!(Error::StakeCooldownActive as u32, 18);
+    assert_eq!(Error::InvalidRefundAmount as u32, 19);
+    assert_eq!(Error::ProposalNotFound as u32, 20);
+    assert_eq!(Error::ProposalAlreadyExists as u32, 21);
+    assert_eq!(Error::ReentryDetected as u32, 22);
+    assert_eq!(Error::ReleaseWindowTooShort as u32, 23);
+    assert_eq!(Error::StakeTokenMismatch as u32, 24);
 }

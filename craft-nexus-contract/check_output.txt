@@ -1,0 +1,305 @@
+    Checking craft-nexus-contract v0.1.0 (/home/jahrulez/Desktop/oss/testers/CraftNexus/craft-nexus-contract)
+error[E0425]: cannot find value `config` in this scope
+    --> src/lib.rs:1606:62
+     |
+1606 |             Self::transfer_platform_fee(env, &escrow.token, &config.platform_wallet, fee_amount);
+     |                                                              ^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `config` in this scope
+    --> src/lib.rs:2923:63
+     |
+2923 |             Self::transfer_platform_fee(&env, &escrow.token, &config.platform_wallet, fee_amount);
+     |                                                               ^^^^^^ not found in this scope
+
+warning: unexpected `cfg` condition value: `testutils`
+  --> src/onboarding.rs:55:22
+   |
+55 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+   |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+   |
+   = note: no expected values for `feature`
+   = help: consider adding `testutils` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `testutils`
+  --> src/onboarding.rs:67:22
+   |
+67 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+   |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+   |
+   = note: no expected values for `feature`
+   = help: consider adding `testutils` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+  --> src/onboarding.rs:76:22
+   |
+76 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+   |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+   |
+   = note: no expected values for `feature`
+   = help: consider adding `testutils` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+  --> src/onboarding.rs:96:22
+   |
+96 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+   |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+   |
+   = note: no expected values for `feature`
+   = help: consider adding `testutils` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/onboarding.rs:114:22
+    |
+114 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/onboarding.rs:125:22
+    |
+125 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/onboarding.rs:137:22
+    |
+137 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+  --> src/lib.rs:18:22
+   |
+18 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+   |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+   |
+   = note: no expected values for `feature`
+   = help: consider adding `testutils` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:148:22
+    |
+148 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:196:22
+    |
+196 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:204:22
+    |
+204 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:221:22
+    |
+221 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:231:22
+    |
+231 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:243:22
+    |
+243 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:255:22
+    |
+255 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:267:22
+    |
+267 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:286:22
+    |
+286 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:304:22
+    |
+304 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:319:22
+    |
+319 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:332:22
+    |
+332 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:342:22
+    |
+342 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:351:22
+    |
+351 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:359:22
+    |
+359 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:368:22
+    |
+368 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:378:22
+    |
+378 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:387:22
+    |
+387 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:402:22
+    |
+402 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `testutils`
+   --> src/lib.rs:423:22
+    |
+423 | #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+    |                      ^^^^^^^^^^^^^^^^^^^^^ help: remove the condition
+    |
+    = note: no expected values for `feature`
+    = help: consider adding `testutils` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused variable: `escrow`
+   --> src/enhanced_features_test.rs:138:10
+    |
+138 |     let (escrow, onboarding, buyer, _, _, _, _, _) = setup_enhanced_test(&env);
+    |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_escrow`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+For more information about this error, try `rustc --explain E0425`.
+warning: `craft-nexus-contract` (lib test) generated 29 warnings
+error: could not compile `craft-nexus-contract` (lib test) due to 2 previous errors; 29 warnings emitted
