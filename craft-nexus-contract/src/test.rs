@@ -47,7 +47,7 @@ fn setup_test(
         &admin,
         &arbitrator,
         &500,
-        &onboarding_contract,
+        &None::<Address>,
     );
 
     // Set min amount to 0 for tests to pass with small amounts
@@ -652,7 +652,7 @@ fn test_update_platform_fee() {
         &admin,
         &arbitrator,
         &500,
-        &onboarding_contract,
+        &None::<Address>,
     );
 
     // Get initial fee
@@ -714,7 +714,7 @@ fn test_update_platform_fee_too_high() {
         &admin,
         &arbitrator,
         &500,
-        &onboarding_contract,
+        &None::<Address>,
     );
 
     // Try to set fee above max (10%)
@@ -757,7 +757,7 @@ fn test_initialize_emits_config_events() {
         &admin,
         &arbitrator,
         &500,
-        &onboarding_contract,
+        &None::<Address>,
     );
 
     let events = env.events().all();
@@ -1559,9 +1559,9 @@ fn test_contract_upgrade_success() {
     // To test update_wasm, we need a WASM hash that "exists" in the test environment.
     // We can upload a tiny dummy WASM to get a valid hash.
     let dummy_wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
-    let _new_wasm_hash = env.deployer().upload_contract_wasm(dummy_wasm);
+    let new_wasm_hash = env.deployer().upload_contract_wasm(dummy_wasm);
 
-    client.execute_upgrade();
+    client.execute_upgrade(&new_wasm_hash);
 
     // Version should be 2
     assert_eq!(client.get_version(), 2);
@@ -1574,10 +1574,10 @@ fn test_contract_upgrade_unauthorized() {
     // Do NOT mock auth globally
     let (client, _, _, _, _, _, _) = setup_test(&env, false);
 
-    let _dummy_hash = BytesN::from_array(&env, &[1u8; 32]);
+    let dummy_hash = BytesN::from_array(&env, &[1u8; 32]);
 
     // Attempt upgrade without admin auth
-    client.execute_upgrade();
+    client.execute_upgrade(&dummy_hash);
 }
 
 #[test]
