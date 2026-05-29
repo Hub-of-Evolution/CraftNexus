@@ -581,6 +581,7 @@ impl OnboardingContract {
             if profile.version < CURRENT_USER_PROFILE_VERSION {
                 return Some(Self::upgrade_user_profile(env, user, profile));
             }
+            Self::extend_persistent(env, &key);
             return Some(profile);
         }
 
@@ -1096,13 +1097,19 @@ impl OnboardingContract {
     /// Get activity metrics for a user.
     /// Returns zeroed metrics if no escrow activity has been recorded yet.
     pub fn get_user_metrics(env: Env, address: Address) -> UserMetrics {
-        env.storage()
+        let key = DataKey::UserMetrics(address.clone());
+        let metrics = env
+            .storage()
             .persistent()
-            .get::<DataKey, UserMetrics>(&DataKey::UserMetrics(address.clone()))
+            .get::<DataKey, UserMetrics>(&key)
             .unwrap_or(UserMetrics {
                 total_escrow_count: 0,
                 total_volume: 0,
-            })
+            });
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(&env, &key);
+        }
+        metrics
     }
 
     /// Increment a user's activity metrics (called by the escrow contract).
