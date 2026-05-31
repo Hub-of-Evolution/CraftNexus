@@ -131,14 +131,20 @@ struct LegacyUserProfile {
     pub portfolio_cid: Option<String>,
 }
 
-/// Activity metrics used to determine eligibility for auto-verification (#63)
+/// Activity metrics used to determine eligibility for auto-verification (#63).
+///
+/// Written exclusively by the registered escrow contract via
+/// [`OnboardingContract::update_user_metrics`] and read by
+/// [`OnboardingContract::get_user_metrics`], [`OnboardingContract::auto_verify_user`],
+/// and the internal `try_auto_verify` helper. Volume is normalized to 7 decimal
+/// places before accumulation so threshold comparisons remain token-agnostic.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct UserMetrics {
-    /// Total number of escrows the user participated in as seller
+    /// Total number of completed seller-side escrows recorded by the escrow contract.
     pub total_escrow_count: u32,
-    /// Total USDC volume (in stroops) the user transacted as seller
+    /// Cumulative seller volume in stroops at 7-decimal precision (not raw token units).
     pub total_volume: i128,
 }
 
@@ -151,15 +157,21 @@ pub struct UserOnboardedEvent {
     pub role: UserRole,
 }
 
-/// A single entry in a user's verification history log (#63)
+/// A single entry in a user's verification history log (#63).
+///
+/// Returned by [`OnboardingContract::get_verification_history`]. On-chain storage
+/// uses compact [`VerificationActionCode`] values; this struct exposes human-readable
+/// `action` strings for off-chain indexers and client UIs.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct VerificationEntry {
+    /// Ledger timestamp (seconds) when the action was recorded.
     pub timestamp: u64,
-    /// `requested` | `approved` | `rejected` | `auto_verified` | `username_changed_revoked`
-    pub action: Symbol,
-    /// Address that performed the action (None for auto-verification)
+    /// One of: `"requested"`, `"approved"`, `"rejected"`, `"auto_verified"`,
+    /// `"username_changed_revoked"`. See issue #473 / component #72.
+    pub action: String,
+    /// Address that performed the action; `None` for auto-verification events.
     pub by: Option<Address>,
 }
 
@@ -590,6 +602,10 @@ impl OnboardingContract {
         token
     }
 
+    /// Resolve the wallet that receives username-change fees.
+    ///
+    /// Reads `DataKey::UsernameChangeFeeWallet`; when unset, falls back to
+    /// `config.platform_admin`. Extends TTL when the key exists.
     fn read_username_fee_wallet(env: &Env, config: &OnboardingConfig) -> Address {
         let key = DataKey::UsernameChangeFeeWallet;
         let wallet = env
@@ -603,6 +619,9 @@ impl OnboardingContract {
         wallet
     }
 
+    /// Load persisted activity metrics for `address`, or zeroed defaults.
+    ///
+    /// Extends TTL on `DataKey::UserMetrics(address)` when an entry exists.
     fn read_user_metrics(env: &Env, address: &Address) -> UserMetrics {
         let key = DataKey::UserMetrics(address.clone());
         let metrics = env.storage().persistent().get(&key).unwrap_or(UserMetrics {
@@ -615,6 +634,10 @@ impl OnboardingContract {
         metrics
     }
 
+    /// Map a compact verification action code to its canonical string label.
+    ///
+    /// Labels are stable API surface for indexers consuming
+    /// [`VerificationEntry::action`] via [`OnboardingContract::get_verification_history`].
     fn verification_action_to_string(env: &Env, action: VerificationActionCode) -> String {
         match action {
             VerificationActionCode::Requested => String::from_str(env, "requested"),
@@ -627,6 +650,11 @@ impl OnboardingContract {
         }
     }
 
+    /// Parse a legacy verification-history action string into a compact code.
+    ///
+    /// Used during lazy migration from `DataKey::VerificationHistory` (Vec) to
+    /// indexed compact entries (#519). Unknown strings map to
+    /// `UsernameChangedRevoked`.
     fn parse_verification_action(env: &Env, action: &String) -> VerificationActionCode {
         if action == &String::from_str(env, "requested") {
             VerificationActionCode::Requested
@@ -1549,21 +1577,40 @@ impl OnboardingContract {
 
     /// Get activity metrics for a user.
     ///
-    /// Returns the stored [`UserMetrics`] for `address`, or a zeroed default if no
-    /// escrow activity has been recorded yet.
+    /// # Integration notes — issue #469 / component #68
     ///
-    /// # Storage side-effects
-    /// When a `UserMetrics` entry already exists for `address`, its persistent TTL is
-    /// extended by `TTL_EXTENSION` ledgers as part of the read.  This prevents the
-    /// metrics key from expiring between the first escrow interaction and the next
-    /// write-back, which would otherwise silently reset accumulated counters.
+    /// ## Preconditions
+    /// - Contract must be initialized (`DataKey::Config` present).
+    /// - `address` may be any Stellar address; no auth is required for this
+    ///   read-only accessor.
+    ///
+    /// ## Storage side-effects
+    /// - Reads `DataKey::UserMetrics(address)` via the internal
+    ///   `read_user_metrics` helper.
+    /// - When a metrics entry already exists, its persistent TTL is extended
+    ///   by `TTL_EXTENSION` ledgers (~30 days). This prevents accumulated
+    ///   counters from silently resetting if the key expires between escrow
+    ///   settlements.
+    /// - When no entry exists, returns zeroed defaults without writing storage.
+    ///
+    /// ## Emitted events
+    /// - None. This is a gas-only read suitable for simulation and indexer
+    ///   backfills.
+    ///
+    /// ## Off-chain consumers
+    /// - Pair with `min_escrow_count_for_verify` and `min_volume_for_verify`
+    ///   from `get_config` to display auto-verification progress.
+    /// - `total_volume` is stored at 7-decimal precision after normalization
+    ///   in `update_user_metrics`; do not assume raw token stroops.
+    /// - Prefer subscribing to `UserVerified` over polling this function once
+    ///   thresholds are met.
     ///
     /// # Arguments
     /// * `address` - The user's Stellar wallet address
     ///
     /// # Returns
-    /// [`UserMetrics`] with `total_escrow_count` and `total_volume` fields populated,
-    /// or zeroed defaults when no record exists yet.
+    /// [`UserMetrics`] with `total_escrow_count` and `total_volume` populated,
+    /// or zeroed defaults when no escrow activity has been recorded.
     pub fn get_user_metrics(env: Env, address: Address) -> UserMetrics {
         let metrics_key = DataKey::UserMetrics(address.clone());
         let metrics = env
@@ -1582,7 +1629,49 @@ impl OnboardingContract {
 
     /// Increment a user's activity metrics (called by the escrow contract).
     ///
-    /// Auth: requires the registered escrow contract address, or admin if none is set.
+    /// # Integration notes — issue #469 / component #68
+    ///
+    /// ## Preconditions
+    /// - Contract must be initialized.
+    /// - Caller must be the registered `OnboardingConfig::escrow_contract`
+    ///   address (authenticated via `require_auth`), or `platform_admin` when
+    ///   no escrow contract is registered yet.
+    /// - `escrow_count_delta` and `volume_delta` are saturating increments;
+    ///   pass `0` for either field to skip that counter.
+    /// - `token_address` must be a valid Soroban token contract; its `decimals()`
+    ///   value drives volume normalization to 7-decimal stroops.
+    ///
+    /// ## Storage side-effects
+    /// - Reads and extends TTL on `DataKey::Config`.
+    /// - Reads, writes, and extends TTL on `DataKey::UserMetrics(address)`.
+    /// - When `auto_verify_enabled` is true and thresholds are met after the
+    ///   update, may also read/write `DataKey::UserProfile(address)`, append
+    ///   compact verification history entries, and emit `UserVerified` via the
+    ///   internal `try_auto_verify` path.
+    ///
+    /// ## Emitted event — `UserVerified` (conditional)
+    /// - **Topics:** `(Symbol::new("UserVerified"),)`
+    /// - **Data:** `Address` — the verified user
+    /// - Emitted only when auto-verification triggers inside `try_auto_verify`
+    ///   after this call. No event is emitted when thresholds are not met.
+    ///
+    /// ## Off-chain consumers
+    /// - Escrow contract should call this after each seller-side settlement
+    ///   with the gross token amount and seller address.
+    /// - This function performs no token transfers (check-effect-interactions
+    ///   safe: auth check, storage writes, optional profile update only).
+    /// - Indexers tracking verification progress should listen for
+    ///   `UserVerified` rather than diffing metrics on every escrow event.
+    ///
+    /// # Arguments
+    /// * `address` - Seller whose metrics to increment
+    /// * `escrow_count_delta` - Number of completed escrows to add (typically `1`)
+    /// * `volume_delta` - Gross token amount in the token's native stroops
+    /// * `token_address` - Token contract used for decimal normalization
+    ///
+    /// # Reverts if
+    /// - Contract not initialized
+    /// - Caller is not the registered escrow contract (or admin fallback)
     pub fn update_user_metrics(
         env: Env,
         address: Address,
@@ -1761,7 +1850,8 @@ impl OnboardingContract {
     }
 
     /// Submit a manual verification request.
-    /// The user's address is added to the verification queue for admin review.
+    ///
+    /// Adds the user's address to the FIFO verification queue for admin review.
     /// Calling this a second time before the request is processed is a no-op.
     ///
     /// Only Buyers and Artisans may invoke this endpoint. Admins and Moderators
@@ -1810,11 +1900,47 @@ impl OnboardingContract {
         Self::extend_persistent(&env, &hist_key);
     }
 
-    /// Approve or reject a pending verification request (admin only).
+    /// Approve or reject a pending manual verification request (admin only).
+    ///
+    /// # Integration notes — issue #477 / component #76
+    ///
+    /// ## Preconditions
+    /// - Contract must be initialized.
+    /// - Caller must be `OnboardingConfig::platform_admin`
+    ///   (`require_auth`).
+    /// - `user` must be onboarded (`DataKey::UserProfile(user)`).
+    /// - A pending verification request for `user` is cleared as part of
+    ///   processing (queue head advanced via `clear_verification_request`).
+    ///
+    /// ## Storage side-effects
+    /// - Reads and extends TTL on `DataKey::Config`.
+    /// - Reads, writes, and extends TTL on `DataKey::UserProfile(user)`,
+    ///   updating only `is_verified` to match `approve`. Profile version
+    ///   (`CURRENT_USER_PROFILE_VERSION`) and all other fields are preserved.
+    /// - Removes `DataKey::VerificationRequest(user)` and compacts the queue.
+    /// - Appends a compact history entry with action `"approved"` or
+    ///   `"rejected"` and `by = Some(platform_admin)`.
+    ///
+    /// ## Emitted event — `UserVerified` (on approval only)
+    /// - **Topics:** `(Symbol::new("UserVerified"),)`
+    /// - **Data:** `Address` — the newly verified `user`
+    /// - Not emitted when `approve == false`.
+    ///
+    /// ## Off-chain consumers
+    /// - Indexers should treat `UserVerified` as the canonical signal that
+    ///   `is_verified` flipped to `true`; pair with `get_verification_history`
+    ///   for a full audit trail including rejections.
+    /// - This function performs no token transfers (check-effect-interactions
+    ///   safe: auth check and storage writes only).
     ///
     /// # Arguments
     /// * `user` - Address of the user whose request is being processed
     /// * `approve` - `true` to verify the user, `false` to reject
+    ///
+    /// # Reverts if
+    /// - Contract not initialized
+    /// - Caller is not platform admin
+    /// - User not found
     pub fn process_verification_request(env: Env, user: Address, approve: bool) {
         let config: OnboardingConfig = env
             .storage()
@@ -2187,6 +2313,37 @@ impl OnboardingContract {
     }
 
     /// Set the wallet that receives username change fees (admin only).
+    ///
+    /// # Integration notes — issue #465 / component #64
+    ///
+    /// ## Preconditions
+    /// - Contract must be initialized.
+    /// - Caller must be `OnboardingConfig::platform_admin`
+    ///   (`require_auth` runs before any storage write or TTL extension).
+    ///
+    /// ## Storage side-effects
+    /// - Reads and extends TTL on `DataKey::Config`.
+    /// - Writes and extends TTL on `DataKey::UsernameChangeFeeWallet`.
+    /// - Does not modify profile shapes or `CURRENT_USER_PROFILE_VERSION`.
+    ///
+    /// ## Emitted events
+    /// - None.
+    ///
+    /// ## Off-chain consumers
+    /// - Pair with `get_username_fee_wallet`, `get_username_change_fee`, and
+    ///   `get_username_fee_token` to display the full fee configuration before
+    ///   a user invokes `change_username`.
+    /// - When no wallet is configured, `get_username_fee_wallet` falls back
+    ///   to `platform_admin` via the internal `read_username_fee_wallet` helper.
+    /// - This function performs no token transfers (check-effect-interactions
+    ///   safe: auth check and storage write only).
+    ///
+    /// # Arguments
+    /// * `wallet` - Stellar address that receives username-change fee transfers
+    ///
+    /// # Reverts if
+    /// - Contract not initialized
+    /// - Caller is not platform admin
     pub fn set_username_fee_wallet(env: Env, wallet: Address) {
         // Issue #526 — same ordering as `set_username_fee_token`
         // above: require_auth runs before any TTL extension or write.
@@ -2224,6 +2381,36 @@ impl OnboardingContract {
     }
 
     /// Get the configured wallet used for username change fees.
+    ///
+    /// # Integration notes — issue #465 / component #64
+    ///
+    /// ## Preconditions
+    /// - Contract must be initialized.
+    /// - No auth required; safe for simulation and read-only client previews.
+    ///
+    /// ## Storage side-effects
+    /// - Reads `DataKey::UsernameChangeFeeWallet` via `read_username_fee_wallet`.
+    /// - When the key exists, extends its persistent TTL by `TTL_EXTENSION`
+    ///   ledgers (~30 days).
+    /// - When unset, returns `OnboardingConfig::platform_admin` without writing
+    ///   storage.
+    ///
+    /// ## Emitted events
+    /// - None.
+    ///
+    /// ## Off-chain consumers
+    /// - Clients preparing a `change_username` transaction should display this
+    ///   address as the fee recipient alongside `get_username_change_fee` and
+    ///   `get_username_fee_token`.
+    /// - The actual fee transfer in `change_username` uses this resolved wallet
+    ///   as the token transfer destination (external call is the final action
+    ///   in that execution path per check-effect-interactions).
+    ///
+    /// # Returns
+    /// Configured fee wallet, or `platform_admin` when no override is set.
+    ///
+    /// # Reverts if
+    /// - Contract not initialized
     pub fn get_username_fee_wallet(env: Env) -> Address {
         let config: OnboardingConfig = env
             .storage()
