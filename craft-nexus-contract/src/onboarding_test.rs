@@ -1525,3 +1525,112 @@ fn test_get_verification_queue_authorized() {
     assert_eq!(auths.len(), 1);
     assert_eq!(auths.get(0).unwrap().0, admin);
 }
+
+// ── Issue #470: [SECURITY] Endpoint #69 – set_moderator ─────────────────────
+
+/// Issue #470 — set_moderator must record the admin auth signal on success.
+#[test]
+fn test_set_moderator_records_admin_auth() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &soroban_sdk::String::from_str(&env, "promotee"), &UserRole::Artisan);
+
+    client.set_moderator(&user);
+
+    let auths = env.auths();
+    let admin_auth = auths.iter().find(|(addr, _)| addr == &admin);
+    assert!(admin_auth.is_some(), "admin auth must be recorded for set_moderator");
+
+    let profile = client.get_user(&user);
+    assert_eq!(profile.role, UserRole::Moderator);
+}
+
+/// Issue #470 — a non-admin address must not be able to invoke set_moderator.
+#[test]
+#[should_panic]
+fn test_set_moderator_non_admin_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let attacker = Address::generate(&env);
+    let target = Address::generate(&env);
+    client.onboard_user(&target, &soroban_sdk::String::from_str(&env, "victim"), &UserRole::Buyer);
+
+    // Strip all mocked auths so only a non-admin caller could sign.
+    env.set_auths(&[]);
+
+    // Attempting promotion without admin auth must panic.
+    client.set_moderator(&target);
+    let _ = attacker;
+}
+
+/// Issue #470 — promoting a non-onboarded address via set_moderator must panic.
+#[test]
+#[should_panic]
+fn test_set_moderator_unknown_user_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let ghost = Address::generate(&env);
+
+    // Ghost was never onboarded — role update must fail.
+    client.set_moderator(&ghost);
+}
+
+// ── Issue #474: [SECURITY] Endpoint #73 – get_verification_queue ─────────────
+
+/// Issue #474 — non-admin caller must not read the verification queue.
+#[test]
+#[should_panic]
+fn test_get_verification_queue_non_admin_rejected() {
+    let env = Env::default();
+    // Do NOT call mock_all_auths — no auth provided.
+
+    let contract_id = env.register_contract(None, OnboardingContract);
+    let client = OnboardingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    let config = OnboardingConfig {
+        require_username: true,
+        min_username_length: 3,
+        max_username_length: 50,
+        platform_admin: admin.clone(),
+        auto_verify_enabled: true,
+        min_escrow_count_for_verify: 5,
+        min_volume_for_verify: 10_000_000_000,
+        escrow_contract: None,
+    };
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(&DataKey::Config, &config);
+    });
+
+    // No auth signal — must panic immediately.
+    client.get_verification_queue();
+    let _ = admin;
+}
+
+/// Issue #474 — admin receives the queue and the auth signal is recorded.
+#[test]
+fn test_get_verification_queue_returns_pending_users() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &soroban_sdk::String::from_str(&env, "queueuser"), &UserRole::Artisan);
+    client.request_verification(&user);
+
+    let queue = client.get_verification_queue();
+
+    assert!(queue.contains(&user), "requesting user must appear in the verification queue");
+
+    let auths = env.auths();
+    let admin_auth = auths.iter().find(|(addr, _)| addr == &admin);
+    assert!(admin_auth.is_some(), "admin auth must be recorded for get_verification_queue");
+}

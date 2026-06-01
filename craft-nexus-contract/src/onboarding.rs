@@ -1512,6 +1512,8 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        // [SECURITY] Endpoint #69: Only the platform admin may promote users to Moderator.
+        // Any caller without a valid admin signature is rejected before state mutation.
         config.platform_admin.require_auth();
         Self::update_user_role(env, user, UserRole::Moderator)
     }
@@ -2387,6 +2389,8 @@ impl OnboardingContract {
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
         Self::extend_persistent(&env, &DataKey::Config);
+        // [SECURITY] Endpoint #73: Verification queue is sensitive data; only the
+        // platform admin may read it. Unauthorized access results in immediate rollback.
         config.platform_admin.require_auth();
 
         Self::advance_verification_head(&env);
