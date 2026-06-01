@@ -169,6 +169,10 @@ const UPGRADE_EXECUTED: Symbol = symbol_short!("UPG_EXEC");
 const MAX_STAKE_HISTORY_SIZE: u32 = 100;
 /// Threshold at which to trigger automatic pruning of old stake history entries (#237)
 const STAKE_HISTORY_PRUNE_THRESHOLD: u32 = 80;
+/// Maximum number of stake deposits per artisan queue (bounded to prevent storage bloat)
+const MAX_STAKE_QUEUE_SIZE: u32 = 50;
+/// Threshold at which to trigger automatic pruning of matured stake deposits
+const STAKE_QUEUE_PRUNE_THRESHOLD: u32 = 40;
 /// Time lock period before admin recovery is allowed (7 days) (#240)
 const ADMIN_RECOVERY_DELAY: u64 = 7 * 24 * 60 * 60;
 
@@ -224,6 +228,10 @@ pub enum DataKey {
     /// accurate tracking of staking timeframes when multiple deposits
     /// are made at different times.
     ArtisanStakeQueue(Address),
+    /// Count of entries in the artisan stake queue (for bounds checking)
+    ArtisanStakeQueueCount(Address),
+    /// Indexed storage of stake deposits (Address, index) -> StakeDeposit
+    ArtisanStakeQueueIndexed(Address, u32),
     /// Partial refund proposal for a disputed order
     PartialRefundProposal(u32),
     /// Re-entrancy guard key
@@ -236,8 +244,13 @@ pub enum DataKey {
     MaxReleaseWindow,
     /// Address of the deployed onboarding contract for cross-contract reputation calls
     OnboardingContractAddress,
-    /// Map of whitelisted token addresses (Address -> bool); enforcement active when non-empty
+    /// DEPRECATED: Legacy monolithic Map of whitelisted token addresses.
+    /// New implementations should use WhitelistedTokenIndexed instead.
     WhitelistedTokens,
+    /// Individual whitelisted token entry (Address -> bool)
+    WhitelistedTokenIndexed(Address),
+    /// Count of whitelisted tokens for efficient enumeration
+    WhitelistedTokenCount,
     /// DEPRECATED: Legacy monolithic Vec of all escrow order IDs.
     /// New writes use [`DataKey::GlobalEscrowIdIndexed`] (#515). Kept for
     /// lazy migration on the next index update or paginated read.
@@ -1681,6 +1694,8 @@ impl CraftNexusContract {
 
     /// Add a token to the platform whitelist (admin only).
     ///
+    /// Uses individual key-value pairs for scalability instead of a single Map.
+    /// Each token is stored as DataKey::WhitelistedTokenIndexed(token) -> true.
     /// Once at least one token is whitelisted, only whitelisted tokens may be
     /// used in escrow creation. The check is skipped when the whitelist is empty,
     /// preserving backward compatibility.
@@ -1688,50 +1703,66 @@ impl CraftNexusContract {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
-        let mut whitelist: Map<Address, bool> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::WhitelistedTokens)
-            .unwrap_or(Map::new(&env));
-        whitelist.set(token, true);
-        env.storage()
-            .persistent()
-            .set(&DataKey::WhitelistedTokens, &whitelist);
+        // Check if token is already whitelisted to avoid duplicate counting
+        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+        let already_whitelisted = env.storage().persistent().has(&token_key);
+        
+        // Add token to whitelist
+        env.storage().persistent().set(&token_key, &true);
+        Self::extend_persistent(&env, &token_key);
+        
+        // Update count only if this is a new token
+        if !already_whitelisted {
+            let count_key = DataKey::WhitelistedTokenCount;
+            let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+            env.storage().persistent().set(&count_key, &(current_count + 1));
+            Self::extend_persistent(&env, &count_key);
+        }
     }
 
     /// Remove a token from the platform whitelist (admin only).
     ///
-    /// If the resulting whitelist is empty, whitelist enforcement is automatically
-    /// disabled (all tokens permitted again).
+    /// Uses individual key-value pairs for scalability. Removes the specific
+    /// token entry and updates the count. If the resulting whitelist is empty,
+    /// whitelist enforcement is automatically disabled (all tokens permitted again).
     pub fn remove_token_from_whitelist(env: Env, token: Address) {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
-        let mut whitelist: Map<Address, bool> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::WhitelistedTokens)
-            .unwrap_or(Map::new(&env));
-        whitelist.remove(token);
-        env.storage()
-            .persistent()
-            .set(&DataKey::WhitelistedTokens, &whitelist);
+        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+        let was_whitelisted = env.storage().persistent().has(&token_key);
+        
+        if was_whitelisted {
+            // Remove token from whitelist
+            env.storage().persistent().remove(&token_key);
+            
+            // Update count
+            let count_key = DataKey::WhitelistedTokenCount;
+            let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+            if current_count > 0 {
+                env.storage().persistent().set(&count_key, &(current_count - 1));
+                Self::extend_persistent(&env, &count_key);
+            }
+        }
     }
 
     /// Check whether a specific token is on the whitelist.
     ///
     /// Returns `true` if the token is explicitly whitelisted, OR if the whitelist
-    /// is empty (enforcement not yet active).
+    /// is empty (enforcement not yet active). Uses individual key lookups for
+    /// scalability instead of loading the entire whitelist Map.
     pub fn is_token_whitelisted(env: Env, token: Address) -> bool {
-        let whitelist: Map<Address, bool> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::WhitelistedTokens)
-            .unwrap_or(Map::new(&env));
-        if whitelist.is_empty() {
+        let count_key = DataKey::WhitelistedTokenCount;
+        let whitelist_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        
+        // If whitelist is empty, all tokens are allowed (backward compatibility)
+        if whitelist_count == 0 {
             return true;
         }
-        whitelist.get(token).unwrap_or(false)
+        
+        // Check if specific token is whitelisted
+        let token_key = DataKey::WhitelistedTokenIndexed(token);
+        env.storage().persistent().has(&token_key)
     }
 
     /// Internal helper: panics with TokenNotWhitelisted when enforcement is active
@@ -1743,17 +1774,164 @@ impl CraftNexusContract {
     /// before whitelist changes. Keep this helper private and call it only
     /// in creation-time validation paths.
     fn check_token_whitelisted(env: &Env, token: &Address) {
-        let whitelist: Map<Address, bool> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::WhitelistedTokens)
-            .unwrap_or(Map::new(env));
-        if whitelist.is_empty() {
+        let count_key = DataKey::WhitelistedTokenCount;
+        let whitelist_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        
+        // If whitelist is empty, all tokens are allowed
+        if whitelist_count == 0 {
             return;
         }
-        if !whitelist.get(token.clone()).unwrap_or(false) {
+        
+        // Check if specific token is whitelisted
+        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+        if !env.storage().persistent().has(&token_key) {
             env.panic_with_error(crate::Error::TokenNotWhitelisted);
         }
+    }
+
+    /// Get the count of whitelisted tokens.
+    ///
+    /// Returns 0 if no tokens are whitelisted (enforcement disabled).
+    /// This is more efficient than loading all tokens when only the count is needed.
+    pub fn get_whitelisted_token_count(env: Env) -> u32 {
+        let count_key = DataKey::WhitelistedTokenCount;
+        env.storage().persistent().get(&count_key).unwrap_or(0)
+    }
+
+    /// Migrate legacy whitelist storage to individual key-value pairs.
+    ///
+    /// This function reads the old WhitelistedTokens Map and converts each entry
+    /// to individual WhitelistedTokenIndexed keys. Should be called once during
+    /// contract upgrade to migrate existing data.
+    pub fn migrate_whitelist_storage(env: Env) -> u32 {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let legacy_key = DataKey::WhitelistedTokens;
+        
+        // Check if legacy storage exists
+        if !env.storage().persistent().has(&legacy_key) {
+            return 0; // Nothing to migrate
+        }
+
+        let legacy_whitelist: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&legacy_key)
+            .unwrap_or(Map::new(&env));
+
+        let mut migrated_count = 0u32;
+        
+        // Migrate each token to individual storage
+        let keys = legacy_whitelist.keys();
+        for i in 0..keys.len() {
+            if let Some(token) = keys.get(i) {
+                if let Some(is_whitelisted) = legacy_whitelist.get(token.clone()) {
+                    if is_whitelisted {
+                        let token_key = DataKey::WhitelistedTokenIndexed(token);
+                        env.storage().persistent().set(&token_key, &true);
+                        Self::extend_persistent(&env, &token_key);
+                        migrated_count += 1;
+                    }
+                }
+            }
+        }
+
+        // Update count
+        if migrated_count > 0 {
+            let count_key = DataKey::WhitelistedTokenCount;
+            env.storage().persistent().set(&count_key, &migrated_count);
+            Self::extend_persistent(&env, &count_key);
+        }
+
+        // Remove legacy storage
+        env.storage().persistent().remove(&legacy_key);
+
+        migrated_count
+    }
+
+    /// Migrate legacy ArtisanStakeQueue Vec storage to individual indexed entries.
+    ///
+    /// This function reads the old ArtisanStakeQueue Vec and converts each entry
+    /// to individual ArtisanStakeQueueIndexed keys. Should be called once during
+    /// contract upgrade to migrate existing data.
+    pub fn migrate_artisan_stake_queue(env: Env, artisan: Address) -> u32 {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let legacy_key = DataKey::ArtisanStakeQueue(artisan.clone());
+        
+        // Check if legacy storage exists
+        if !env.storage().persistent().has(&legacy_key) {
+            return 0; // Nothing to migrate
+        }
+
+        let legacy_queue: soroban_sdk::Vec<StakeDeposit> = env
+            .storage()
+            .persistent()
+            .get(&legacy_key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+
+        let queue_len = legacy_queue.len();
+        if queue_len == 0 {
+            // Remove empty legacy queue
+            env.storage().persistent().remove(&legacy_key);
+            return 0;
+        }
+
+        // Migrate each deposit to individual indexed storage
+        for i in 0..queue_len {
+            if let Some(deposit) = legacy_queue.get(i) {
+                let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
+                env.storage().persistent().set(&deposit_key, &deposit);
+                Self::extend_persistent(&env, &deposit_key);
+            }
+        }
+
+        // Set count
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        env.storage().persistent().set(&count_key, &queue_len);
+        Self::extend_persistent(&env, &count_key);
+
+        // Remove legacy storage
+        env.storage().persistent().remove(&legacy_key);
+
+        queue_len
+    }
+
+    /// Get the count of stake deposits in an artisan's queue.
+    ///
+    /// Returns 0 if no deposits exist. This is more efficient than loading
+    /// all deposits when only the count is needed.
+    pub fn get_artisan_stake_queue_count(env: Env, artisan: Address) -> u32 {
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        env.storage().persistent().get(&count_key).unwrap_or(0)
+    }
+
+    /// Get paginated stake deposits for an artisan (admin/debug helper).
+    ///
+    /// Returns up to `limit` deposits starting from `offset`. Useful for
+    /// inspecting queue state without loading the entire queue.
+    pub fn get_artisan_stake_deposits(
+        env: Env, 
+        artisan: Address, 
+        offset: u32, 
+        limit: u32
+    ) -> soroban_sdk::Vec<StakeDeposit> {
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        
+        let mut deposits = soroban_sdk::Vec::new(&env);
+        let end = core::cmp::min(offset + limit, total_count);
+        
+        for i in offset..end {
+            let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
+            if let Some(deposit) = env.storage().persistent().get::<DataKey, StakeDeposit>(&deposit_key) {
+                deposits.push_back(deposit);
+            }
+        }
+        
+        deposits
     }
 
     pub fn initialize(
@@ -4639,6 +4817,9 @@ impl CraftNexusContract {
     /// The artisan transfers `amount` of `token` to the contract. The stake is stored
     /// and a cooldown timer is set so the tokens cannot be unstaked immediately.
     ///
+    /// Enhanced with bounded queue management to prevent storage bloat. Automatically
+    /// prunes matured deposits when queue approaches capacity limits.
+    ///
     /// Staked balances remain owned by the artisan. The contract does not accrue,
     /// distribute, or sweep interest/yield from these reserved funds into platform fees.
     pub fn stake_tokens(env: Env, artisan: Address, token: Address, amount: i128) {
@@ -4696,51 +4877,156 @@ impl CraftNexusContract {
             existing_cooldown
         };
 
-        // Push deposit entry to queue
-        let queue_key = DataKey::ArtisanStakeQueue(artisan.clone());
-        let mut queue: soroban_sdk::Vec<StakeDeposit> = env
-            .storage()
-            .persistent()
-            .get(&queue_key)
-            .unwrap_or(soroban_sdk::Vec::new(&env));
-        queue.push_back(StakeDeposit { amount, cooldown_end });
-        env.storage().persistent().set(&queue_key, &queue);
-        Self::extend_persistent(&env, &queue_key);
+        // Check queue capacity and prune if necessary
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        
+        if current_count >= STAKE_QUEUE_PRUNE_THRESHOLD {
+            Self::prune_matured_stake_deposits(&env, &artisan);
+        }
+
+        // Add new deposit to bounded indexed queue
+        Self::add_stake_deposit(&env, &artisan, amount, cooldown_end);
+    }
+
+    /// Add a stake deposit to the bounded indexed queue.
+    ///
+    /// Implements individual key-value storage for scalability. Each deposit is stored
+    /// as DataKey::ArtisanStakeQueueIndexed(artisan, index) -> StakeDeposit.
+    fn add_stake_deposit(env: &Env, artisan: &Address, amount: i128, cooldown_end: u64) {
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        
+        if current_count >= MAX_STAKE_QUEUE_SIZE {
+            env.panic_with_error(Error::StakeQueueFull);
+        }
+
+        // Add new deposit at the end of the queue
+        let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), current_count);
+        let deposit = StakeDeposit { amount, cooldown_end };
+        env.storage().persistent().set(&deposit_key, &deposit);
+        Self::extend_persistent(env, &deposit_key);
+
+        // Update count
+        env.storage().persistent().set(&count_key, &(current_count + 1));
+        Self::extend_persistent(env, &count_key);
+    }
+
+    /// Prune matured stake deposits from the queue to prevent storage bloat.
+    ///
+    /// Removes deposits where cooldown_end <= current_time and compacts the queue
+    /// by shifting remaining deposits to fill gaps. This maintains queue ordering
+    /// while keeping storage bounded.
+    fn prune_matured_stake_deposits(env: &Env, artisan: &Address) {
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        
+        if current_count == 0 {
+            return;
+        }
+
+        let now = env.ledger().timestamp();
+        let mut write_index = 0u32;
+
+        // Compact queue by moving non-matured deposits to fill gaps
+        for read_index in 0..current_count {
+            let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), read_index);
+            
+            if let Some(deposit) = env.storage().persistent().get::<DataKey, StakeDeposit>(&deposit_key) {
+                if deposit.cooldown_end > now {
+                    // Deposit is not matured, keep it
+                    if write_index != read_index {
+                        // Move deposit to new position
+                        let new_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
+                        env.storage().persistent().set(&new_key, &deposit);
+                        Self::extend_persistent(env, &new_key);
+                    }
+                    write_index += 1;
+                }
+                
+                // Remove old entry if we moved it or if it was matured
+                if write_index != read_index + 1 {
+                    env.storage().persistent().remove(&deposit_key);
+                }
+            }
+        }
+
+        // Update count to reflect pruned queue
+        env.storage().persistent().set(&count_key, &write_index);
+        Self::extend_persistent(env, &count_key);
     }
 
     /// Unstake previously staked tokens after the cooldown period has elapsed.
     ///
     /// Stakes can only be returned in the exact token originally deposited, which
     /// prevents reserved artisan collateral from being treated as platform-managed fees.
-    /// Enhanced with stake history recording and maintenance enforcement (#237, #240)
+    /// Enhanced with bounded indexed queue and automatic pruning for scalability.
     pub fn unstake_tokens(env: Env, artisan: Address, token: Address) {
         artisan.require_auth();
 
-        // Use per-deposit queue: only matured deposits can be unstaked.
-        let queue_key = DataKey::ArtisanStakeQueue(artisan.clone());
-        let queue: soroban_sdk::Vec<StakeDeposit> = env
-            .storage()
-            .persistent()
-            .get(&queue_key)
-            .unwrap_or(soroban_sdk::Vec::new(&env));
+        // Use bounded indexed queue: only matured deposits can be unstaked.
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
 
         let now = env.ledger().timestamp();
         let mut matured_amount: i128 = 0;
+        let mut write_index = 0u32;
 
-        // Build a new queue with only non-matured deposits preserved.
-        let mut remaining: soroban_sdk::Vec<StakeDeposit> = soroban_sdk::Vec::new(&env);
-        for i in 0..queue.len() {
-            if let Some(d) = queue.get(i) {
-                if now >= d.cooldown_end {
-                    matured_amount += d.amount;
+        // Process all deposits, collecting matured amounts and compacting the queue
+        for read_index in 0..current_count {
+            let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), read_index);
+            
+            if let Some(deposit) = env.storage().persistent().get::<DataKey, StakeDeposit>(&deposit_key) {
+                if now >= deposit.cooldown_end {
+                    // Deposit is matured, add to unstake amount
+                    matured_amount += deposit.amount;
+                    // Remove the matured deposit
+                    env.storage().persistent().remove(&deposit_key);
                 } else {
-                    remaining.push_back(d);
+                    // Deposit is not matured, keep it in the queue
+                    if write_index != read_index {
+                        // Move deposit to new position to compact the queue
+                        let new_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
+                        env.storage().persistent().set(&new_key, &deposit);
+                        Self::extend_persistent(&env, &new_key);
+                        // Remove old position
+                        env.storage().persistent().remove(&deposit_key);
+                    }
+                    write_index += 1;
                 }
             }
         }
 
         if matured_amount <= 0 {
             env.panic_with_error(crate::Error::StakeCooldownActive);
+        }
+
+        // Update queue count after processing
+        if write_index > 0 {
+            env.storage().persistent().set(&count_key, &write_index);
+            Self::extend_persistent(&env, &count_key);
+        } else {
+            // Queue is empty, remove count key
+            env.storage().persistent().remove(&count_key);
+        }
+
+        // Update stake metadata
+        let stake_key = DataKey::ArtisanStake(artisan.clone());
+        if let Some(current_stake) = env.storage().persistent().get::<DataKey, ArtisanStakeData>(&stake_key) {
+            let remaining_amount = current_stake.amount - matured_amount;
+            if remaining_amount > 0 {
+                let updated_stake = ArtisanStakeData {
+                    amount: remaining_amount,
+                    token: current_stake.token,
+                };
+                env.storage().persistent().set(&stake_key, &updated_stake);
+                Self::extend_persistent(&env, &stake_key);
+            } else {
+                // No remaining stake, remove all stake-related keys
+                env.storage().persistent().remove(&stake_key);
+                let cooldown_key = DataKey::StakeCooldownEnd(artisan.clone());
+                env.storage().persistent().remove(&cooldown_key);
+            }
         }
 
         // Record unstake operation in history for audit trail (#237)
@@ -4751,13 +5037,6 @@ impl CraftNexusContract {
                 String::from_str(&env, "Could not record stake removal in history"),
             );
         }
-
-        // Clear stake metadata before returning the reserved artisan funds.
-        let stake_key = DataKey::ArtisanStake(artisan.clone());
-        let cooldown_key = DataKey::StakeCooldownEnd(artisan.clone());
-        env.storage().persistent().remove(&stake_key);
-        env.storage().persistent().remove(&DataKey::ArtisanStakeQueue(artisan.clone()));
-        env.storage().persistent().remove(&cooldown_key);
 
         // Return matured tokens to artisan
         let token_client = token::Client::new(&env, &token);

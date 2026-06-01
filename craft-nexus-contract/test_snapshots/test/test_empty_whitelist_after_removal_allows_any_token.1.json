@@ -575,7 +575,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "WhitelistedTokens"
+                  "symbol": "WhitelistedTokenCount"
                 }
               ]
             },
@@ -592,19 +592,19 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "WhitelistedTokens"
+                      "symbol": "WhitelistedTokenCount"
                     }
                   ]
                 },
                 "durability": "persistent",
                 "val": {
-                  "map": []
+                  "u32": 0
                 }
               }
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
