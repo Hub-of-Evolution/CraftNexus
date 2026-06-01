@@ -162,7 +162,6 @@ fn test_release_funds_success() {
     // Event verified by balance/status assertions above.
 }
 
-
 #[test]
 #[should_panic]
 fn test_release_funds_already_processed() {
@@ -206,7 +205,6 @@ fn test_auto_release_success_after_window() {
     // Event verified by balance/status assertions above.
 }
 
-
 #[test]
 #[should_panic]
 fn test_auto_release_failure_before_window() {
@@ -244,7 +242,6 @@ fn test_refund_success_by_admin() {
 
     // Event verified by balance/status assertions above.
 }
-
 
 #[test]
 fn test_dispute_escrow_success() {
@@ -369,7 +366,6 @@ fn test_resolve_dispute_release_to_seller() {
     // Status and balances verified above.
 }
 
-
 #[test]
 fn test_resolve_dispute_refund_to_buyer() {
     let env = Env::default();
@@ -390,7 +386,6 @@ fn test_resolve_dispute_refund_to_buyer() {
 
     // Status and balances verified above.
 }
-
 
 #[test]
 fn test_resolve_dispute_by_moderator() {
@@ -520,13 +515,7 @@ fn test_platform_fee_deduction_10_percent() {
     let arbitrator = Address::generate(&env);
 
     // Initialize with 10% fee
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &1000,
-        &None,
-    );
+    client.initialize(&platform_wallet, &admin, &arbitrator, &1000, &None);
 
     token_admin_client.mint(&buyer, &10_000_000);
     client.create_escrow(
@@ -984,13 +973,7 @@ fn test_fee_rounding_custom_bps_025_percent() {
     let arbitrator = Address::generate(&env);
 
     // 25 bps = 0.25%
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &25,
-        &None,
-    );
+    client.initialize(&platform_wallet, &admin, &arbitrator, &25, &None);
     assert_eq!(client.calculate_fee_for_amount(&1000), 2); // floor(2.5) => 2
     assert_eq!(client.calculate_fee_for_amount(&399), 0); // floor(0.9975) => 0
     assert_eq!(client.calculate_fee_for_amount(&400), 1); // floor(1.0) => 1
@@ -1009,13 +992,7 @@ fn test_integration_multiple_tokens_and_escrows() {
     let admin = Address::generate(&env);
     let arbitrator = Address::generate(&env);
 
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &500,
-        &None,
-    );
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None);
 
     // Token A
     let token_a_admin = Address::generate(&env);
@@ -1441,13 +1418,7 @@ fn test_contract_address_admin_is_authorized() {
         li.timestamp = 1711368000;
     });
 
-    client.initialize(
-        &platform_wallet,
-        &admin_contract,
-        &arbitrator,
-        &500,
-        &None,
-    );
+    client.initialize(&platform_wallet, &admin_contract, &arbitrator, &500, &None);
     client.set_min_escrow_amount(&token_contract.address(), &0);
 
     let config = client.get_platform_config();
@@ -2291,6 +2262,31 @@ fn test_multiple_tokens_on_whitelist() {
     assert_eq!(client.get_escrow(&2).status, EscrowStatus::Active);
 }
 
+#[test]
+fn test_whitelist_stores_tokens_as_individual_keys() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
+
+    client.whitelist_token(&token_id);
+
+    assert!(env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .has(&DataKey::WhitelistedToken(token_id.clone()))
+    }));
+    assert!(env.as_contract(&client.address, || {
+        !env.storage().persistent().has(&DataKey::WhitelistedTokens)
+    }));
+    let count: u32 = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::WhitelistedTokenCount)
+            .unwrap_or(0u32)
+    });
+    assert_eq!(count, 1);
+}
+
 // ============================================================
 // Issue #111 – Batch Optimization Tests (Additional)
 // ============================================================
@@ -2998,7 +2994,10 @@ fn test_validate_ipfs_cid_v1_stricter() {
         &1000,
         &1,
         &Some(3600),
-        &Some(String::from_str(&env, "QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco")),
+        &Some(String::from_str(
+            &env,
+            "QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco",
+        )),
         &None,
     );
 
@@ -3010,7 +3009,10 @@ fn test_validate_ipfs_cid_v1_stricter() {
         &1000,
         &2,
         &Some(3600),
-        &Some(String::from_str(&env, "bafybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4")),
+        &Some(String::from_str(
+            &env,
+            "bafybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4",
+        )),
         &None,
     );
 }
@@ -3052,7 +3054,10 @@ fn test_validate_ipfs_cid_v1_wrong_version() {
         &1000,
         &1,
         &Some(3600),
-        &Some(String::from_str(&env, "bbfybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4")),
+        &Some(String::from_str(
+            &env,
+            "bbfybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4",
+        )),
         &None,
     );
 }
