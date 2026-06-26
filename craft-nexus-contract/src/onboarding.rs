@@ -6,8 +6,8 @@
 #![allow(unexpected_cfgs)]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Env, Map, String, Symbol,
-    TryFromVal, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
+    Symbol, TryFromVal, Val, Vec,
 };
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
@@ -1011,33 +1011,28 @@ impl OnboardingContract {
 
         let legacy =
             LegacyUserProfile::try_from_val(env, &stored).expect("User profile storage corrupted");
-        
-        let username_str = legacy.username;
-        let username_len = core::cmp::min(username_str.len(), 32) as usize;
-        let mut user_buf = [0u8; 32];
-        username_str.copy_into_slice(&mut user_buf[..username_len]);
-        let optimized_username = Symbol::from_bytes(env, &user_buf[..username_len]);
-        
-        // Migrate Option<String> to Option<Bytes>
+
+        // Migrate the heavyweight `Option<String>` portfolio CID to the compact
+        // `Option<Bytes>` representation used by the current profile shape (#50).
+        // `Bytes` avoids the UTF-8 validation metadata `String` carries while
+        // keeping the same on-chain footprint bounded to the 128-byte CID limit.
         let optimized_cid = legacy.portfolio_cid.map(|cid_str| {
-            let mut cid_bytes = Bytes::new(env);
             let len = cid_str.len() as usize;
             let mut buf = [0u8; 128]; // Max CID length
             cid_str.copy_into_slice(&mut buf[..len]);
-            cid_bytes.extend_from_slice(&buf[..len]);
-            cid_bytes
+            Bytes::from_slice(env, &buf[..len])
         });
 
-            let upgraded = UserProfile {
+        let upgraded = UserProfile {
             version: CURRENT_USER_PROFILE_VERSION,
-            address: legacy.address.clone(),
+            address: legacy.address,
             role: legacy.role,
-            username: legacy.username.clone(),
+            username: legacy.username,
             registered_at: legacy.registered_at,
             is_verified: legacy.is_verified,
             successful_trades: legacy.successful_trades,
             disputed_trades: legacy.disputed_trades,
-            portfolio_cid: legacy.portfolio_cid,
+            portfolio_cid: optimized_cid,
             status: ProfileStatus::Active,
         };
         env.storage().persistent().set(&key, &upgraded);

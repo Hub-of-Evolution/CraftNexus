@@ -1,6 +1,16 @@
 use super::*;
 use crate::Error;
-use soroban_sdk::{testutils::Address as _, token, Address, Env, String};
+use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, String};
+
+/// Mirror the contract's `String` -> `Bytes` portfolio CID conversion (#50) so
+/// tests can assert against the compact on-chain representation now stored in
+/// `UserProfile::portfolio_cid`.
+fn expected_cid_bytes(env: &Env, cid: &String) -> Bytes {
+    let len = cid.len() as usize;
+    let mut buf = [0u8; 128];
+    cid.copy_into_slice(&mut buf[..len]);
+    Bytes::from_slice(env, &buf[..len])
+}
 
 fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     let contract_id = env.register_contract(None, OnboardingContract);
@@ -1233,7 +1243,7 @@ fn test_update_portfolio_success() {
     let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
     let updated = client.update_portfolio(&user, &Some(portfolio_cid.clone()));
 
-    assert_eq!(updated.portfolio_cid, Some(portfolio_cid));
+    assert_eq!(updated.portfolio_cid, Some(expected_cid_bytes(&env, &portfolio_cid)));
     assert_eq!(updated.role, UserRole::Artisan);
 }
 
@@ -1256,7 +1266,7 @@ fn test_update_portfolio_with_cidv1() {
     );
     let updated = client.update_portfolio(&user, &Some(portfolio_cid.clone()));
 
-    assert_eq!(updated.portfolio_cid, Some(portfolio_cid));
+    assert_eq!(updated.portfolio_cid, Some(expected_cid_bytes(&env, &portfolio_cid)));
 }
 
 #[test]
@@ -1348,7 +1358,7 @@ fn test_portfolio_accessible_via_get_user() {
 
     // Verify portfolio is accessible via get_user
     let profile = client.get_user(&user);
-    assert_eq!(profile.portfolio_cid, Some(portfolio_cid));
+    assert_eq!(profile.portfolio_cid, Some(expected_cid_bytes(&env, &portfolio_cid)));
 }
 
 #[test]
@@ -1369,7 +1379,7 @@ fn test_portfolio_accessible_via_get_user_by_username() {
 
     // Verify portfolio is accessible via get_user_by_username
     let profile = client.get_user_by_username(&username);
-    assert_eq!(profile.portfolio_cid, Some(portfolio_cid));
+    assert_eq!(profile.portfolio_cid, Some(expected_cid_bytes(&env, &portfolio_cid)));
 }
 
 #[test]
