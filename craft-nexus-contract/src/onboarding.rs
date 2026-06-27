@@ -1760,7 +1760,13 @@ impl OnboardingContract {
     /// None — always returns a `bool`.
     pub fn is_onboarded(env: Env, user: Address) -> bool {
         let key = DataKey::UserProfile(user.clone());
-        env.storage().persistent().has(&key)
+        // Issue #423/#435: extend TTL on read to prevent storage expiry
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(&env, &key);
+            true
+        } else {
+            false
+        }
     }
 
     /// Get a user's role.
@@ -2344,6 +2350,8 @@ impl OnboardingContract {
     /// [`UserMetrics`] with `total_escrow_count` and `total_volume` populated,
     /// or zeroed defaults when no escrow activity has been recorded.
     pub fn get_user_metrics(env: Env, address: Address) -> UserMetrics {
+        // Issue #426/#434: require auth to prevent unauthorized access to user activity data
+        address.require_auth();
         let metrics_key = DataKey::UserMetrics(address.clone());
         let metrics = env
             .storage()
@@ -3014,12 +3022,19 @@ impl OnboardingContract {
     /// # Returns
     /// Tuple `(successful_trades, disputed_trades)`.
     pub fn get_user_reputation(env: Env, address: Address) -> (u32, u32) {
+        // Issue #426/#434: require auth to prevent unauthorized access to sensitive trade data
+        address.require_auth();
+        let key = DataKey::UserProfile(address.clone());
         match env
             .storage()
             .persistent()
-            .get::<DataKey, UserProfile>(&DataKey::UserProfile(address.clone()))
+            .get::<DataKey, UserProfile>(&key)
         {
-            Some(profile) => (profile.successful_trades, profile.disputed_trades),
+            Some(profile) => {
+                // Issue #423/#435: extend TTL on read to prevent storage expiry
+                Self::extend_persistent(&env, &key);
+                (profile.successful_trades, profile.disputed_trades)
+            }
             None => (0, 0),
         }
     }

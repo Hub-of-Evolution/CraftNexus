@@ -1690,10 +1690,17 @@ impl CraftNexusContract {
     /// Returns the configured maximum release window (in seconds).
     /// Falls back to MAX_TOTAL_RELEASE_WINDOW (30 days) if not set by admin.
     fn get_max_release_window(env: &Env) -> u32 {
-        env.storage()
+        let key = DataKey::MaxReleaseWindow;
+        let value = env
+            .storage()
             .persistent()
-            .get(&DataKey::MaxReleaseWindow)
-            .unwrap_or(MAX_TOTAL_RELEASE_WINDOW)
+            .get(&key)
+            .unwrap_or(MAX_TOTAL_RELEASE_WINDOW);
+        // Issue #423: extend TTL on read to prevent storage expiry
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(env, &key);
+        }
+        value
     }
 
     /// Returns the configured onboarding contract address, if any (#243).
