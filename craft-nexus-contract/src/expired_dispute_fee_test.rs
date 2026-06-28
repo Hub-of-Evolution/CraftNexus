@@ -81,7 +81,7 @@ fn create_and_dispute_escrow(
     client.create_escrow(buyer, seller, token, &amount, &order_id, &Some(604800));
     client.dispute_escrow(
         &order_id,
-        &soroban_sdk::String::from_str(&client.env, "Test dispute"),
+        &soroban_sdk::Symbol::new(&client.env, "Test_dispute"),
         buyer,
     );
 }

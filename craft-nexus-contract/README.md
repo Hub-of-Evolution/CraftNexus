@@ -380,6 +380,53 @@ stellar contract invoke \
   --role 2
 ```
 
+#### `get_active_contract_count`
+
+Return the precise number of active escrow contracts tracked for a user (Feature #47).
+
+**Description:** Complements `has_active_contracts` (which only returns a boolean) by exposing the exact concurrency level maintained in `DataKey::ActiveContractCount(user)`. Off-chain indexers and reputation/risk dashboards use this to weight users by concurrent workload without replaying every escrow event or making a cross-contract call. Returns `0` when no active contracts are tracked.
+
+**Parameters:**
+- `user (address)` – User's wallet address
+
+**Returns:**
+- `u32` - number of currently-active contracts (`0` when none)
+
+**Example CLI interaction:**
+```bash
+stellar contract invoke \
+  --id <ONBOARDING_CONTRACT_ID> \
+  --network testnet \
+  -- \
+  get_active_contract_count \
+  --user GXXXX...XXXX
+```
+
+---
+
+#### `admin_clear_verification_request`
+
+Force-clear a stale or abandoned manual verification request (admin only, Issue #41).
+
+**Description:** Privileged queue-maintenance endpoint that removes a user's pending verification request and advances the verification queue head, without approving or rejecting it. Gated behind `platform_admin.require_auth()` so unauthorized callers cannot evict legitimate users from the queue. For an audited approve/reject decision, use `process_verification_request` instead.
+
+**Parameters:**
+- `user (address)` – Address whose pending verification request should be cleared
+
+**Returns:**
+- `bool` - `true` if a pending request existed and was cleared; `false` if there was nothing to clear (idempotent no-op)
+
+**Example CLI interaction:**
+```bash
+stellar contract invoke \
+  --id <ONBOARDING_CONTRACT_ID> \
+  --network testnet \
+  --source ADMIN \
+  -- \
+  admin_clear_verification_request \
+  --user GXXXX...XXXX
+```
+
 ---
 
 ### Onboarding Contract Events
@@ -404,8 +451,10 @@ The contract emits the following events for tracking:
 | `get_user_role` | Public |
 | `is_onboarded` | Public |
 | `has_role` | Public |
+| `get_active_contract_count` | Public |
 | `update_user_role` | Platform admin only |
 | `verify_user` | Platform admin only |
+| `admin_clear_verification_request` | Platform admin only |
 | `get_config` | Public |
 
 ---

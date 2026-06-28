@@ -252,13 +252,13 @@ fn test_dispute_escrow_success() {
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
 
-    client.dispute_escrow(&1, &String::from_str(&env, "Item damaged"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Item_damaged"), &buyer);
 
     let escrow = client.get_escrow(&1);
     assert_eq!(escrow.status, EscrowStatus::Disputed);
     assert_eq!(
         escrow.dispute_reason,
-        Some(String::from_str(&env, "Item damaged"))
+        Some(Symbol::new(&env, "Item_damaged"))
     );
 
     // Verify event
@@ -292,13 +292,13 @@ fn test_dispute_escrow_by_seller() {
     token_admin.mint(&buyer, &1000);
     client.create_escrow(&buyer, &seller, &token_id, &500, &1, &None);
 
-    client.dispute_escrow(&1, &String::from_str(&env, "Payment not received"), &seller);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Payment_not_received"), &seller);
 
     let escrow = client.get_escrow(&1);
     assert_eq!(escrow.status, EscrowStatus::Disputed);
     assert_eq!(
         escrow.dispute_reason,
-        Some(String::from_str(&env, "Payment not received"))
+        Some(Symbol::new(&env, "Payment_not_received"))
     );
 }
 
@@ -313,7 +313,7 @@ fn test_dispute_escrow_unauthorized() {
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
 
     let unauthorized = Address::generate(&env);
-    client.dispute_escrow(&1, &String::from_str(&env, "Invalid reason"), &unauthorized);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Invalid_reason"), &unauthorized);
 }
 
 #[test]
@@ -325,7 +325,7 @@ fn test_disputed_prevents_release() {
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &String::from_str(&env, "Damaged item"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Damaged_item"), &buyer);
 
     client.release_funds(&1);
 }
@@ -339,7 +339,7 @@ fn test_disputed_prevents_refund() {
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &String::from_str(&env, "Damaged item"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Damaged_item"), &buyer);
 
     client.refund(&1);
 }
@@ -352,7 +352,7 @@ fn test_resolve_dispute_release_to_seller() {
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &String::from_str(&env, "Non-delivery"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Non_delivery"), &buyer);
 
     // Arbitrator is setup in setup_test as a random Address and mock_all_auths bypasses auth
     client.resolve_dispute(&1, &Resolution::ReleaseToSeller, &admin);
@@ -374,7 +374,7 @@ fn test_resolve_dispute_refund_to_buyer() {
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &String::from_str(&env, "Late shipping"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Late_shipping"), &buyer);
 
     client.resolve_dispute(&1, &Resolution::RefundToBuyer, &admin);
 
@@ -397,7 +397,7 @@ fn test_resolve_dispute_by_moderator() {
     client.set_moderator(&moderator);
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &String::from_str(&env, "Moderator review"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Moderator_review"), &buyer);
 
     client.resolve_dispute(&1, &Resolution::RefundToBuyer, &moderator);
 
@@ -755,7 +755,7 @@ fn test_dispute_escrow_failure_unauthorized() {
 
     let _unauthorized = Address::generate(&env);
     let unauthorized = Address::generate(&env);
-    client.dispute_escrow(&1, &String::from_str(&env, "Unauthorized"), &unauthorized);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Unauthorized"), &unauthorized);
 }
 
 #[test]
@@ -781,7 +781,7 @@ fn test_dispute_after_release_fails() {
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &1, &None);
     client.release_funds(&1);
-    client.dispute_escrow(&1, &String::from_str(&env, "buyer dispute"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "buyer_dispute"), &buyer);
 }
 
 #[test]
@@ -810,7 +810,7 @@ fn test_dispute_escrow_not_found() {
     env.mock_all_auths();
     let (client, _, _, _, _, _, _) = setup_test(&env, true);
     let caller = Address::generate(&env);
-    client.dispute_escrow(&999, &String::from_str(&env, "reason"), &caller);
+    client.dispute_escrow(&999, &Symbol::new(&env, "reason"), &caller);
 }
 
 #[test]
@@ -1376,7 +1376,7 @@ fn test_partial_refund_allows_dust_after_minimum_increase() {
     client.set_min_escrow_amount(&token_id, &100_000);
 
     // Dispute + partial refund leaves only a dust remainder for seller.
-    client.dispute_escrow(&1, &String::from_str(&env, "Dust split"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Dust_split"), &buyer);
     client.propose_partial_refund(&1, &49_990, &buyer);
     client.accept_partial_refund(&1);
 
@@ -2899,7 +2899,7 @@ fn test_partial_refund_negotiation_flow() {
     // 1. Dispute the escrow
     client.dispute_escrow(
         &1,
-        &String::from_str(&env, "Partial refund requested"),
+        &Symbol::new(&env, "Partial_refund_requested"),
         &buyer,
     );
 
@@ -2930,7 +2930,7 @@ fn test_propose_partial_refund_by_seller() {
 
     client.dispute_escrow(
         &1,
-        &String::from_str(&env, "Partial refund offered"),
+        &Symbol::new(&env, "Partial_refund_offered"),
         &seller,
     );
 
@@ -2959,7 +2959,7 @@ fn test_propose_partial_refund_unauthorized() {
     token_admin.mint(&buyer, &1000);
     client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
 
-    client.dispute_escrow(&1, &String::from_str(&env, "Dispute"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Dispute"), &buyer);
 
     let unauthorized = Address::generate(&env);
     client.propose_partial_refund(&1, &500, &unauthorized);
@@ -2975,7 +2975,7 @@ fn test_propose_partial_refund_already_exists() {
     token_admin.mint(&buyer, &1000);
     client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
 
-    client.dispute_escrow(&1, &String::from_str(&env, "Dispute"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Dispute"), &buyer);
 
     client.propose_partial_refund(&1, &300, &buyer);
     client.propose_partial_refund(&1, &400, &seller); // Fails
@@ -3074,7 +3074,7 @@ fn test_accept_partial_refund_with_custom_fee_tier() {
     token_admin.mint(&buyer, &1000);
     client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
 
-    client.dispute_escrow(&1, &String::from_str(&env, "Dispute"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Dispute"), &buyer);
     client.propose_partial_refund(&1, &500, &buyer);
 
     // Seller accepts. Gross for seller is 500.
@@ -3094,7 +3094,7 @@ fn test_partial_refund_full_gross_amount_is_valid() {
 
     token_admin.mint(&buyer, &1000);
     client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-    client.dispute_escrow(&1, &String::from_str(&env, "Full gross refund"), &buyer);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Full_gross_refund"), &buyer);
 
     // refund_amount is interpreted as gross and is valid when it equals escrow.amount.
     client.propose_partial_refund(&1, &1000, &buyer);

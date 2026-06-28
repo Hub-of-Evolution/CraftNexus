@@ -1373,7 +1373,7 @@
                   "u32": 999
                 },
                 {
-                  "string": "reason"
+                  "symbol": "reason"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVAX5"
@@ -1498,7 +1498,7 @@
                       "u32": 999
                     },
                     {
-                      "string": "reason"
+                      "symbol": "reason"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVAX5"

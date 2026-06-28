@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 name = "craft_nexus_contract"
 
 [features]
-testutils = []
+testutils = ["soroban-sdk/testutils"]
 
 [dependencies]
 soroban-sdk = { version = "21.0.0" }
@@ -27,8 +27,6 @@ debug-assertions = false
 panic = "abort"
 codegen-units = 1
 lto = true
-
-
 
 [profile.release-with-logs]
 inherits = "release"
