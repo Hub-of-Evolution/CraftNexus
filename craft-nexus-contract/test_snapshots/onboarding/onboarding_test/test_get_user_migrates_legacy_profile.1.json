@@ -246,7 +246,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -370,7 +370,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "legacy_user"
+                        "symbol": "legacy_user"
                       }
                     },
                     {
@@ -749,7 +749,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "legacy_user"
+                    "symbol": "legacy_user"
                   }
                 },
                 {

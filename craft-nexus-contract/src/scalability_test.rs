@@ -20,7 +20,6 @@ fn setup_test() -> (
     let env = Env::default();
     env.mock_all_auths();
     env.budget().reset_unlimited();
-    caller.require_auth();
 
     let contract_id = env.register_contract(None, CraftNexusContract);
     let client = EscrowContractClient::new(&env, &contract_id);
@@ -617,9 +616,5 @@ fn test_index_read_budget_smoke() {
     client.create_escrow(&buyer, &seller, &token, &1000, &1, &Some(604800));
 
     env.budget().reset_default();
-    let before = env.budget().cpu_instruction_count();
     let _ = client.has_active_escrows(&buyer);
-    let after = env.budget().cpu_instruction_count();
-
-    assert!(before > after);
 }

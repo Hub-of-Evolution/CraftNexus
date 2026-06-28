@@ -1,13 +1,10 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
-#![allow(unexpected_cfgs)]
-// use soroban_sdk::{
-//     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
-//     BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
-// };
+
+extern crate alloc;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String, Symbol,
-    TryFromVal, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
+    BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
 #[cfg(test)]
@@ -270,7 +267,8 @@ pub enum DataKey {
     GlobalEscrowIdIndexed(u32),
     /// Fallback admin address for recovery if primary admin storage is corrupted (#240)
     FallbackAdmin,
-    /// Timestamp when admin recovery mechanism becomes available (time-lock safety)
+    /// Timestamp when admin recovery mechanism becomes available (time-lock safety).
+    /// Stored as a compact `u64` ledger timestamp (#431 / key index #30).
     AdminRecoveryTime,
     /// Historical record of stake changes per artisan (bounded queue for audit trail) (#237)
     StakeHistory(Address),
@@ -494,6 +492,24 @@ pub struct ReputationUpdateEvent {
     pub timestamp: u64,
 }
 
+/// Tagged union used to carry a single configuration value inside
+/// [`ConfigUpdatedEvent`].
+///
+/// Soroban events must be self-describing for off-chain indexers, but
+/// `PlatformConfig` fields are heterogeneous (counts, monetary amounts,
+/// addresses, and free-form strings). Rather than emit a separate event type
+/// per field — which would bloat the contract's event ABI — every admin
+/// configuration change is normalized into one of these four variants. Indexers
+/// match on the variant tag to recover the underlying Rust type without any
+/// loss of precision (in particular, `I128` monetary values are never
+/// stringified on-chain; see the note on [`EscrowEvent::amount`]).
+///
+/// # Variant mapping
+///
+/// * `U32`     — bounded counters and basis-point fees (e.g. `platform_fee_bps`).
+/// * `I128`    — monetary thresholds such as `min_escrow_amount`.
+/// * `Address` — role and token addresses (e.g. `fee_collector`).
+/// * `String`  — human-readable identifiers that have no compact encoding.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -504,6 +520,33 @@ pub enum ConfigValue {
     String(String),
 }
 
+/// Emitted whenever an admin mutates a single field of the on-chain
+/// `PlatformConfig`.
+///
+/// # Topics
+///
+/// Published under `(symbol "config_updated", symbol field_name)` so indexers
+/// can subscribe to changes of a specific field cheaply. The `field_name` topic
+/// mirrors the `field_name` payload member.
+///
+/// # Preconditions
+///
+/// * The caller must be the current platform admin; the emitting function
+///   asserts `admin.require_auth()` before the storage write, so this event is
+///   only ever observed for an authorized change.
+///
+/// # Storage side-effects
+///
+/// * The corresponding `PlatformConfig` field has already been persisted by the
+///   time this event fires. The event is emitted *after* the storage write,
+///   in keeping with the check-effects-interactions ordering used throughout
+///   the contract.
+///
+/// # Payload
+///
+/// * `field_name` — symbolic name of the mutated field.
+/// * `old_value`  — value held immediately before the write.
+/// * `new_value`  — value persisted by this update.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -513,6 +556,32 @@ pub struct ConfigUpdatedEvent {
     pub new_value: ConfigValue,
 }
 
+/// Emitted when an artisan's negotiated platform-fee tier is set or changed.
+///
+/// Per-artisan fee tiers let the platform reward high-reputation sellers with a
+/// reduced `fee_bps` (basis points, where `10_000` == 100%). The persisted tier
+/// overrides the global `platform_fee_bps` for that artisan's future escrows.
+///
+/// # Topics
+///
+/// Published under `(symbol "artisan_fee_tier_updated", address artisan)` so a
+/// client can stream the fee history of a single artisan.
+///
+/// # Preconditions
+///
+/// * The caller must be the platform admin (`require_auth`).
+/// * `fee_bps` is validated against `MAX_PLATFORM_FEE_BPS`; an out-of-range
+///   value aborts with [`Error::InvalidFee`] and no event is emitted.
+///
+/// # Storage side-effects
+///
+/// * The artisan's fee-tier ledger entry is written (and its TTL extended)
+///   before this event fires.
+///
+/// # Payload
+///
+/// * `artisan` — address whose fee tier was updated.
+/// * `fee_bps` — the new fee in basis points applied to future escrows.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -521,6 +590,32 @@ pub struct ArtisanFeeTierUpdatedEvent {
     pub fee_bps: u32,
 }
 
+/// Emitted when an artisan stakes collateral tokens into the platform.
+///
+/// Staking is a precondition for accepting high-value escrows; the staked
+/// balance backs the artisan's dispute exposure. Token movement obeys the
+/// check-effects-interactions pattern: the artisan's persistent stake balance
+/// is increased and committed *before* the external `token.transfer` callback,
+/// so a malicious token contract cannot re-enter and observe a stale balance.
+///
+/// # Topics
+///
+/// Published under `(symbol "tokens_staked", address artisan)`.
+///
+/// # Preconditions
+///
+/// * `artisan.require_auth()` — only the staker may stake on their own behalf.
+/// * `amount` must be positive and `token` whitelisted.
+///
+/// # Storage side-effects
+///
+/// * The artisan's staked-balance entry is incremented and its TTL extended.
+///
+/// # Payload
+///
+/// * `artisan` — the staking address.
+/// * `token`   — the staked token's contract address.
+/// * `amount`  — raw token amount staked (never stringified on-chain).
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -530,6 +625,31 @@ pub struct TokensStakedEvent {
     pub amount: i128,
 }
 
+/// Emitted when an artisan withdraws previously staked collateral.
+///
+/// # Topics
+///
+/// Published under `(symbol "tokens_unstaked", address artisan)`.
+///
+/// # Preconditions
+///
+/// * `artisan.require_auth()`.
+/// * The stake cooldown must have elapsed, otherwise the call aborts with
+///   [`Error::StakeCooldownActive`] and no event is emitted.
+/// * The withdrawal token must match the original staking token
+///   ([`Error::StakeTokenMismatch`]).
+///
+/// # Storage side-effects
+///
+/// * The artisan's staked-balance entry is decremented *before* the outbound
+///   `token.transfer`, preserving reentrancy safety (the transfer is the final
+///   interaction in the call path).
+///
+/// # Payload
+///
+/// * `artisan` — the withdrawing address.
+/// * `token`   — the unstaked token's contract address.
+/// * `amount`  — raw token amount returned to the artisan.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -539,6 +659,34 @@ pub struct TokensUnstakedEvent {
     pub amount: i128,
 }
 
+/// Emitted when an order's off-chain metadata is verified against its on-chain
+/// commitment.
+///
+/// The contract stores only a compact hash of an order's metadata (see
+/// [`EscrowMetadata`]); the full document lives off-chain (e.g. IPFS). When a
+/// verifier reveals the document and the contract confirms its hash matches the
+/// stored commitment, this event records the successful verification so
+/// indexers can mark the order's metadata as trusted.
+///
+/// # Topics
+///
+/// Published under `(symbol "metadata_verified", u64 order_id)`.
+///
+/// # Preconditions
+///
+/// * The stored commitment must exist and the revealed content must hash to it,
+///   otherwise the call aborts with [`Error::InvalidMetadataHash`].
+///
+/// # Storage side-effects
+///
+/// * None beyond TTL refresh of the order entry; verification is a read-and-
+///   compare operation that emits this audit event.
+///
+/// # Payload
+///
+/// * `order_id`  — the escrow/order whose metadata was verified.
+/// * `verifier`  — address that submitted the reveal proof.
+/// * `timestamp` — ledger timestamp at verification time.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -889,6 +1037,10 @@ pub trait OnboardingInterface {
     /// `delta` should be `+1` when an escrow becomes active and `-1` when the
     /// escrow closes. The onboarding contract rejects underflows.
     fn update_active_contracts(env: Env, user: Address, delta: i32);
+    /// Refresh the persistent TTL for a user's profile entry.
+    fn bump_user_profile_ttl(env: Env, user: Address) -> bool;
+    /// Refresh the persistent TTL for a user's activity metrics entry.
+    fn bump_user_metrics_ttl(env: Env, user: Address) -> bool;
 }
 
 #[contract]
@@ -1443,6 +1595,17 @@ impl CraftNexusContract {
                 value
             }
             None => 0u32,
+        }
+    }
+
+    /// Read a persistent `u64` and extend its TTL when the key exists (#431 / key index #30).
+    fn get_persistent_u64(env: &Env, key: &DataKey) -> u64 {
+        match env.storage().persistent().get(key) {
+            Some(value) => {
+                Self::extend_persistent(env, key);
+                value
+            }
+            None => 0u64,
         }
     }
 
@@ -2270,19 +2433,16 @@ impl CraftNexusContract {
         // Validate the recovery address
         Self::validate_admin_address(&env, &recovered_admin)?;
 
-        // Check if recovery time lock has passed
-        let recovery_time_key = DataKey::AdminRecoveryTime;
-        let recovery_time: u64 = env
-            .storage()
-            .persistent()
-            .get(&recovery_time_key)
-            .unwrap_or(0);
+        // Check if recovery time lock has passed (#431 — TTL-friendly read)
+        let recovery_time =
+            Self::get_persistent_u64(&env, &DataKey::AdminRecoveryTime);
 
         let current_time = env.ledger().timestamp();
 
         // If this is the first recovery request, initiate time lock
         if recovery_time == 0 {
             let new_recovery_time = current_time + ADMIN_RECOVERY_DELAY;
+            let recovery_time_key = DataKey::AdminRecoveryTime;
             env.storage()
                 .persistent()
                 .set(&recovery_time_key, &new_recovery_time);
@@ -2306,15 +2466,18 @@ impl CraftNexusContract {
 
         config.admin = recovered_admin.clone();
         config.pending_admin = None;
+        // Write config to instance storage (primary location) — TTL already extended
+        // by get_platform_config_internal. No redundant extend_persistent needed.
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
 
+        // Sync to persistent backup key for recovery consistency (no TTL extension needed
+        // since this is a one-time sync, not a read-heavy path).
         env.storage().persistent().set(&PLATFORM_FEE, &config);
-        Self::extend_persistent(&env, &PLATFORM_FEE);
-
-        env.storage().persistent().set(&ADMIN, &config.admin);
-        Self::extend_persistent(&env, &ADMIN);
 
         // Clear the recovery time lock for next cycle
-        env.storage().persistent().remove(&recovery_time_key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AdminRecoveryTime);
 
         // Emit audit event
         Self::emit_admin_changed(&env, previous_admin, recovered_admin, "admin_recovered");
@@ -2890,7 +3053,8 @@ impl CraftNexusContract {
             let slice_len = core::cmp::min(len, 32);
             let mut buf = [0u8; 32];
             r.copy_into_slice(&mut buf[..slice_len]);
-            Symbol::from_bytes(env, &buf[..slice_len])
+            let s = core::str::from_utf8(&buf[..slice_len]).unwrap();
+            Symbol::new(env, s)
         });
 
         let upgraded = Escrow {
@@ -2906,7 +3070,7 @@ impl CraftNexusContract {
             created_at: legacy.created_at,
             ipfs_hash: legacy.ipfs_hash,
             metadata_hash: legacy.metadata_hash,
-            dispute_reason: dispute_symbol, // Map to lightweight Symbol
+            dispute_reason: dispute_symbol,
             dispute_initiated_at: legacy.dispute_initiated_at,
             funded: true,
         };
@@ -2931,7 +3095,7 @@ impl CraftNexusContract {
                 Escrow::try_from_val(env, &stored).expect("")
             } else {
                 let previous = EscrowWithoutBatch::try_from_val(env, &stored).expect("");
-                Self::escrow_from_without_batch(previous)
+                Self::escrow_from_without_batch(env, previous)
             };
             if escrow.version < CURRENT_ESCROW_VERSION {
                 return Self::upgrade_escrow(env, order_id, escrow);
@@ -2941,6 +3105,14 @@ impl CraftNexusContract {
         }
 
         let legacy = LegacyEscrow::try_from_val(env, &stored).expect("");
+        let dispute_symbol = legacy.dispute_reason.map(|r| {
+            let len = r.len() as usize;
+            let slice_len = core::cmp::min(len, 32);
+            let mut buf = [0u8; 32];
+            r.copy_into_slice(&mut buf[..slice_len]);
+            let s = core::str::from_utf8(&buf[..slice_len]).unwrap();
+            Symbol::new(env, s)
+        });
         let upgraded = Escrow {
             version: CURRENT_ESCROW_VERSION,
             id: legacy.id,
@@ -2954,7 +3126,7 @@ impl CraftNexusContract {
             created_at: legacy.created_at,
             ipfs_hash: legacy.ipfs_hash,
             metadata_hash: legacy.metadata_hash,
-            dispute_reason: legacy.dispute_reason,
+            dispute_reason: dispute_symbol,
             dispute_initiated_at: legacy.dispute_initiated_at,
             funded: true,
         };
@@ -2980,7 +3152,8 @@ impl CraftNexusContract {
             let slice_len = core::cmp::min(len, 32);
             let mut buf = [0u8; 32];
             r.copy_into_slice(&mut buf[..slice_len]);
-            Symbol::from_bytes(env, &buf[..slice_len])
+            let s = core::str::from_utf8(&buf[..slice_len]).unwrap();
+            Symbol::new(env, s)
         });
 
         Escrow {

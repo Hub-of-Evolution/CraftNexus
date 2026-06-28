@@ -46,6 +46,29 @@
           },
           "sub_invocations": []
         }
+      ],
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "function_name": "onboard_user",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "string": "artisan_carol"
+                },
+                {
+                  "u32": 2
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
       ]
     ],
     [
@@ -291,7 +314,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -377,7 +400,7 @@
                         "symbol": "portfolio_cid"
                       },
                       "val": {
-                        "string": "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+                        "bytes": "516d597741504a7a7635435a736e4136323573335866326e656d7459675070486457457a37396f6a576e50626447"
                       }
                     },
                     {
@@ -417,7 +440,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "artisan_carol"
+                        "symbol": "artisan_carol"
                       }
                     },
                     {
@@ -595,7 +618,7 @@
       [
         {
           "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
             "key": {
               "ledger_key_nonce": {
                 "nonce": 1033654523790656264
@@ -610,10 +633,43 @@
             "data": {
               "contract_data": {
                 "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
                 "key": {
                   "ledger_key_nonce": {
                     "nonce": 1033654523790656264
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": 4837995959683129791
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": 4837995959683129791
                   }
                 },
                 "durability": "temporary",
@@ -962,7 +1018,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "artisan_carol"
+                    "symbol": "artisan_carol"
                   }
                 },
                 {
@@ -1079,7 +1135,7 @@
                     "symbol": "portfolio_cid"
                   },
                   "val": {
-                    "string": "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+                    "bytes": "516d597741504a7a7635435a736e4136323573335866326e656d7459675070486457457a37396f6a576e50626447"
                   }
                 },
                 {
@@ -1119,7 +1175,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "artisan_carol"
+                    "symbol": "artisan_carol"
                   }
                 },
                 {
@@ -1209,7 +1265,7 @@
                     "symbol": "portfolio_cid"
                   },
                   "val": {
-                    "string": "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG"
+                    "bytes": "516d597741504a7a7635435a736e4136323573335866326e656d7459675070486457457a37396f6a576e50626447"
                   }
                 },
                 {
@@ -1249,7 +1305,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "artisan_carol"
+                    "symbol": "artisan_carol"
                   }
                 },
                 {

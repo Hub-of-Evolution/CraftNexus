@@ -3,7 +3,7 @@
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, Address, Env, String, Symbol,
+    token, Address, Env, Symbol,
 };
 
 #[test]
@@ -163,7 +163,7 @@ fn test_resolve_dispute_cei_pattern() {
     );
 
     // Raise dispute
-    client.dispute_escrow(&order_id, &String::from_str(&env, "Issue"), &buyer);
+    client.dispute_escrow(&order_id, &Symbol::new(&env, "Issue"), &buyer);
 
     // Resolve dispute - 50/50 split
     client.resolve_dispute(&order_id, &Resolution::ReleaseToSeller, &arbitrator);
@@ -218,7 +218,7 @@ fn test_resolve_expired_dispute_cei_pattern() {
     );
 
     // Raise dispute
-    client.dispute_escrow(&order_id, &String::from_str(&env, "Issue"), &buyer);
+    client.dispute_escrow(&order_id, &Symbol::new(&env, "Issue"), &buyer);
 
     // Fast forward past dispute expiration (7 days)
     env.ledger().with_mut(|li| {
@@ -278,7 +278,7 @@ fn test_accept_partial_refund_cei_pattern() {
     );
 
     // Raise dispute
-    client.dispute_escrow(&order_id, &String::from_str(&env, "Issue"), &buyer);
+    client.dispute_escrow(&order_id, &Symbol::new(&env, "Issue"), &buyer);
 
     // Buyer proposes partial refund
     client.propose_partial_refund(&order_id, &3000, &buyer);

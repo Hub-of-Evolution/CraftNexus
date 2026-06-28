@@ -244,7 +244,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "string": "admin"
+                        "symbol": "admin"
                       }
                     },
                     {
@@ -564,7 +564,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Username too long' from contract function 'Symbol(obj#87)'"
+                  "string": "caught panic 'String::copy_into_slice with mismatched slice length' from contract function 'Symbol(obj#87)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"

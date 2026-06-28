@@ -3,7 +3,7 @@
 use crate::{CraftNexusContract, CraftNexusContractClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, Address, Env, Vec,
+    token, Address, Env,
 };
 
 const DEFAULT_MIN_RELEASE_WINDOW: u32 = 24 * 60 * 60; // 1 day
