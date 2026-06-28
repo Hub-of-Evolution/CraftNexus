@@ -1765,11 +1765,20 @@ impl OnboardingContract {
     /// Returns `true` if a [`DataKey::UserProfile`] entry exists for `user`,
     /// regardless of profile status or version. Does NOT extend TTL.
     ///
+    /// # Security — issue #438
+    /// This endpoint is now protected with `require_auth()` to prevent unauthorized
+    /// callers from querying onboarding status. Only the user themselves may invoke
+    /// this check - it is a privileged query.
+    ///
+    /// # Storage Optimization — issue #443
+    /// TTL extension is now applied on read to prevent premature archival of
+    /// user profiles during extended escrow lifecycles.
+    ///
     /// # Parameters
     /// - `user`: `Address` — The wallet address to check.
     ///
     /// # Storage Side-Effects
-    /// - **Read** [`DataKey::UserProfile(user)`] — existence check only, no TTL extension.
+    /// - **Read** [`DataKey::UserProfile(user)`] — existence check only, TTL extended.
     ///
     /// # Emitted Events
     /// None.
@@ -1777,8 +1786,16 @@ impl OnboardingContract {
     /// # Errors
     /// None — always returns a `bool`.
     pub fn is_onboarded(env: Env, user: Address) -> bool {
+        // [SECURITY] Endpoint #37: Only the user themselves may check onboarding status.
+        // This prevents unauthorized enumeration of onboarded accounts.
+        user.require_auth();
         let key = DataKey::UserProfile(user.clone());
-        env.storage().persistent().has(&key)
+        if env.storage().persistent().has(&key) {
+            Self::extend_persistent(&env, &key);
+            true
+        } else {
+            false
+        }
     }
 
     /// Get a user's role.
@@ -2191,6 +2208,15 @@ impl OnboardingContract {
     ///
     /// Returns `false` for unknown addresses (no panic).
     ///
+    /// # Security — issue #450
+    /// This endpoint is now protected with `require_auth()` to prevent unauthorized
+    /// callers from querying verification status. Only the authenticated user may
+    /// invoke this check.
+    ///
+    /// # Storage Optimization — issue #443
+    /// TTL extension is applied on read to prevent premature archival during
+    /// extended escrow lifecycles.
+    ///
     /// # Parameters
     /// - `user`: `Address` — The address to check.
     ///
@@ -2203,7 +2229,16 @@ impl OnboardingContract {
     /// # Errors
     /// None.
     pub fn is_verified(env: Env, user: Address) -> bool {
-        if let Some(profile) = Self::try_get_user_profile(&env, user) {
+        // [SECURITY] Endpoint #49: Only authorized users may check verification status.
+        // This prevents unauthorized actors from enumerating verified accounts.
+        user.require_auth();
+        let profile_key = DataKey::UserProfile(user.clone());
+        if let Some(mut profile) = env
+            .storage()
+            .persistent()
+            .get::<_, UserProfile>(&profile_key)
+        {
+            Self::extend_persistent(&env, &profile_key);
             profile.is_verified
         } else {
             false
