@@ -111,6 +111,8 @@ pub enum Error {
     InvalidMetadataHash = 40,
     /// Provided IPFS hash is invalid
     InvalidIpfsHash = 41,
+    /// Caller is not an authorized upgrade signer
+    NotAnUpgradeSigner = 42,
 }
 
 const ESCROW: Symbol = symbol_short!("ESCROW");
@@ -296,6 +298,12 @@ pub enum DataKey {
     NextRecurringEscrowId,
     /// Count of currently active (non-released, non-refunded) escrows or recurring escrows for a user address.
     ActiveObligations(Address),
+    /// Required number of distinct signer approvals before a WASM upgrade proposal is committed.
+    UpgradeThreshold,
+    /// Per-hash list of addresses that have approved a pending WASM upgrade hash.
+    UpgradeApprovals(BytesN<32>),
+    /// Ordered list of addresses authorized to co-sign WASM upgrade proposals.
+    UpgradeSigners,
 }
 
 #[contracttype]
@@ -3701,18 +3709,19 @@ impl CraftNexusContract {
         );
     }
 
-    /// Propose a new WASM code for the contract (admin only).
+    /// Propose a new WASM code for the contract (multi-sig).
     ///
-    /// Sets a configurable grace period (`PlatformConfig::wasm_upgrade_cooldown`)
-    /// before the upgrade can be executed via `execute_upgrade` (#95, #230).
+    /// Each authorized upgrade signer calls this function with the same
+    /// `new_wasm_hash`. Approvals are accumulated until the configured
+    /// `UpgradeThreshold` is reached, at which point the proposal is committed
+    /// and the cooldown clock starts. A signer cannot approve the same hash
+    /// twice. When no explicit signers list is configured the admin acts as the
+    /// sole signer (backward-compatible default, threshold=1).
     ///
-    /// Only one proposal may be pending at a time. To replace a pending
-    /// proposal the admin must explicitly cancel it first via
-    /// `cancel_upgrade_wasm`; silently overwriting would let a compromised
-    /// admin reset the cooldown clock without a visible cancellation event.
-    pub fn propose_upgrade_wasm(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
-        let admin = Self::get_admin(&env)?;
-        admin.require_auth();
+    /// Only one proposal may be pending at a time. Cancel with
+    /// `cancel_upgrade_wasm` before starting a new one.
+    pub fn propose_upgrade_wasm(env: Env, signer: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        signer.require_auth();
 
         Self::validate_upgrade_hash(&env, &new_wasm_hash)?;
 
@@ -3724,13 +3733,61 @@ impl CraftNexusContract {
             return Err(Error::UpgradeProposalExists);
         }
 
+        // Authorised signers: explicit list or fallback to the admin address.
+        let signers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UpgradeSigners)
+            .unwrap_or_else(|| {
+                let mut v = Vec::new(&env);
+                if let Ok(admin) = Self::get_admin(&env) {
+                    v.push_back(admin);
+                }
+                v
+            });
+
+        if !signers.iter().any(|s| s == signer) {
+            return Err(Error::NotAnUpgradeSigner);
+        }
+
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeThreshold)
+            .unwrap_or(1u32);
+
+        let approvals_key = DataKey::UpgradeApprovals(new_wasm_hash.clone());
+        let mut approvals: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&approvals_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Idempotent: ignore duplicate approvals from the same signer.
+        if approvals.iter().any(|a| a == signer) {
+            return Ok(());
+        }
+        approvals.push_back(signer.clone());
+
+        if (approvals.len() as u32) < threshold {
+            // Threshold not yet met — persist partial approvals and return.
+            env.storage()
+                .persistent()
+                .set(&approvals_key, &approvals);
+            Self::extend_persistent(&env, &approvals_key);
+            return Ok(());
+        }
+
+        // Threshold reached — commit the proposal and clean up approvals.
+        env.storage().persistent().remove(&approvals_key);
+
         let config = Self::get_platform_config_internal(&env);
         let proposed_at = env.ledger().timestamp();
         let upgrade_at = proposed_at + config.wasm_upgrade_cooldown as u64;
         let proposal = WasmUpgradeProposal {
             wasm_hash: new_wasm_hash.clone(),
             upgrade_at,
-            proposed_by: admin.clone(),
+            proposed_by: signer.clone(),
             proposed_at,
         };
 
@@ -3739,9 +3796,57 @@ impl CraftNexusContract {
             .set(&DataKey::WasmUpgradeProposal, &proposal);
         Self::extend_persistent(&env, &DataKey::WasmUpgradeProposal);
 
-        Self::emit_upgrade_event(&env, UPGRADE_PROPOSED, new_wasm_hash, admin, upgrade_at);
+        Self::emit_upgrade_event(&env, UPGRADE_PROPOSED, new_wasm_hash, signer, upgrade_at);
 
         Ok(())
+    }
+
+    /// Set the number of distinct signer approvals required to commit a WASM
+    /// upgrade proposal. Must be >= 1. Admin only.
+    pub fn set_upgrade_threshold(env: Env, threshold: u32) -> Result<(), Error> {
+        if threshold == 0 {
+            return Err(Error::InvalidFee);
+        }
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeThreshold, &threshold);
+        Ok(())
+    }
+
+    /// Replace the list of addresses authorized to co-sign WASM upgrade
+    /// proposals. An empty list resets to the admin-only default. Admin only.
+    pub fn set_upgrade_signers(env: Env, signers: Vec<Address>) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        if signers.is_empty() {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::UpgradeSigners);
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::UpgradeSigners, &signers);
+            Self::extend_persistent(&env, &DataKey::UpgradeSigners);
+        }
+        Ok(())
+    }
+
+    /// Returns the configured upgrade threshold (defaults to 1).
+    pub fn get_upgrade_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::UpgradeThreshold)
+            .unwrap_or(1u32)
+    }
+
+    /// Returns the list of pending approvals for the given WASM hash.
+    pub fn get_upgrade_approvals(env: Env, wasm_hash: BytesN<32>) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UpgradeApprovals(wasm_hash))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Upgrade the contract's WASM code after the grace period has elapsed.

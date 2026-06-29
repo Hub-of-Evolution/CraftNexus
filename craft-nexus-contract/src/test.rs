@@ -100,7 +100,7 @@ fn test_create_escrow_success() {
     // Verify event
     let events = env.events().all();
     assert!(!events.is_empty(), "No events emitted");
-    let last_event = events.last().unwrap();
+    let last_event = events.last();
     assert_eq!(last_event.0, client.address);
     // Topics: ["escrow_created", escrow_id]
     assert_eq!(
@@ -263,7 +263,7 @@ fn test_dispute_escrow_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = events.last();
     assert_eq!(
         last_event.1,
         vec![
@@ -597,7 +597,7 @@ fn test_update_platform_fee() {
     assert_eq!(client.get_platform_fee(), 800);
 
     let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = events.last();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
     assert_eq!(
         config_event.field_name,
@@ -726,7 +726,7 @@ fn test_set_artisan_fee_tier_emits_dedicated_event() {
     assert_eq!(client.get_effective_fee_bps(&seller), 750);
 
     let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = events.last();
     assert_eq!(
         last_event.1,
         vec![
@@ -919,12 +919,12 @@ fn test_claim_admin_no_pending_fails() {
 fn test_wasm_upgrade_grace_period() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
 
     let new_wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
 
     // Propose upgrade
-    client.propose_upgrade_wasm(&new_wasm_hash);
+    client.propose_upgrade_wasm(&admin, &new_wasm_hash);
 
     // Try to upgrade immediately - should fail
     // We can't easily catch a panic in a test without should_panic,
@@ -936,10 +936,10 @@ fn test_wasm_upgrade_grace_period() {
 fn test_cancel_upgrade_wasm() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
 
     let new_wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
-    client.propose_upgrade_wasm(&new_wasm_hash);
+    client.propose_upgrade_wasm(&admin, &new_wasm_hash);
 
     // Admin cancels
     client.cancel_upgrade_wasm();
@@ -1336,7 +1336,7 @@ fn test_set_min_escrow_amount_emits_config_event() {
     client.set_min_escrow_amount(&token_id, &1_00000);
 
     let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = events.last();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
 
     assert_eq!(
@@ -1502,6 +1502,136 @@ fn test_get_version_initially() {
     env.mock_all_auths();
     let (client, _, _, _, _, _, _) = setup_test(&env, true);
     assert_eq!(client.get_version(), 1);
+}
+
+// ===== Multi-sig upgrade tests =====
+
+#[test]
+fn test_upgrade_default_threshold_is_one() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+    assert_eq!(client.get_upgrade_threshold(), 1);
+}
+
+#[test]
+fn test_propose_upgrade_single_admin_succeeds() {
+    // With threshold=1 and no explicit signers, the admin alone can propose.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let hash = BytesN::from_array(&env, &[2u8; 32]);
+    client.propose_upgrade_wasm(&admin, &hash);
+
+    // Proposal should now be committed.
+    let proposal = client.get_upgrade_proposal().expect("proposal missing");
+    assert_eq!(proposal.wasm_hash, hash);
+    assert_eq!(proposal.proposed_by, admin);
+}
+
+#[test]
+#[should_panic]
+fn test_propose_upgrade_non_signer_rejected() {
+    // A random address that is not in the signers list must be rejected.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let stranger = Address::generate(&env);
+    let hash = BytesN::from_array(&env, &[3u8; 32]);
+    // This should panic because stranger is not an authorized signer.
+    client.propose_upgrade_wasm(&stranger, &hash);
+}
+
+#[test]
+fn test_multisig_threshold_two_of_two() {
+    // Set threshold=2 and two explicit signers. Verify the proposal is only
+    // committed after both have approved.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let signer2 = Address::generate(&env);
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer2.clone());
+
+    client.set_upgrade_signers(&signers);
+    client.set_upgrade_threshold(&2);
+
+    let hash = BytesN::from_array(&env, &[4u8; 32]);
+
+    // First approval — proposal must NOT be committed yet.
+    client.propose_upgrade_wasm(&admin, &hash);
+    assert!(
+        client.get_upgrade_proposal().is_none(),
+        "proposal committed too early"
+    );
+    assert_eq!(client.get_upgrade_approvals(&hash).len(), 1);
+
+    // Second approval — threshold reached, proposal committed.
+    client.propose_upgrade_wasm(&signer2, &hash);
+    let proposal = client.get_upgrade_proposal().expect("proposal missing");
+    assert_eq!(proposal.wasm_hash, hash);
+}
+
+#[test]
+fn test_duplicate_approval_ignored() {
+    // The same signer approving twice must not count as two approvals.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let signer2 = Address::generate(&env);
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer2.clone());
+
+    client.set_upgrade_signers(&signers);
+    client.set_upgrade_threshold(&2);
+
+    let hash = BytesN::from_array(&env, &[5u8; 32]);
+
+    client.propose_upgrade_wasm(&admin, &hash);
+    // Duplicate call from the same signer — idempotent, no panic.
+    client.propose_upgrade_wasm(&admin, &hash);
+
+    // Still only 1 unique approval.
+    assert_eq!(client.get_upgrade_approvals(&hash).len(), 1);
+    assert!(client.get_upgrade_proposal().is_none());
+}
+
+#[test]
+fn test_set_upgrade_threshold_zero_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+    // threshold=0 must be rejected.
+    let result = client.try_set_upgrade_threshold(&0);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_set_upgrade_signers_empty_resets_to_admin() {
+    // Clearing the signers list makes the admin the sole default signer.
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let signer2 = Address::generate(&env);
+    let mut signers = Vec::new(&env);
+    signers.push_back(signer2.clone());
+    client.set_upgrade_signers(&signers);
+
+    // Reset back to empty (admin-default).
+    let empty: Vec<Address> = Vec::new(&env);
+    client.set_upgrade_signers(&empty);
+
+    // Admin can now propose directly.
+    let hash = BytesN::from_array(&env, &[6u8; 32]);
+    client.propose_upgrade_wasm(&admin, &hash);
+    assert!(client.get_upgrade_proposal().is_some());
 }
 
 // ============== Batch Operations Tests ==============
@@ -1814,7 +1944,7 @@ fn test_extend_release_window_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = events.last();
     assert_eq!(
         last_event.1,
         vec![
@@ -2399,7 +2529,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
     assert!(is_valid);
 
     let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = events.last();
     assert_eq!(
         last_event.1,
         vec![
@@ -2424,7 +2554,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&true);
 
     let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = events.last();
     assert_eq!(
         last_event.1,
         vec![
@@ -2441,7 +2571,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&false);
 
     let events = env.events().all();
-    let last_event = events.last().unwrap();
+    let last_event = events.last();
     assert_eq!(
         last_event.1,
         vec![
