@@ -976,6 +976,50 @@ fn test_update_reputation_unknown_address_is_no_op() {
     assert_eq!(disputed, 0);
 }
 
+/// [PERFORMANCE #46] `get_user_reputation` must refresh the profile entry's
+/// persistent TTL on read, mirroring `get_user_metrics` / `get_user`. Without
+/// the refresh an actively-polled profile drifts toward archival between
+/// reputation writes. This test ages the entry below the refresh threshold and
+/// asserts the read bumps its TTL back up to the full extension window.
+#[test]
+fn test_get_user_reputation_extends_ttl_on_read() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "rep_ttl_user"),
+        &UserRole::Artisan,
+    );
+    client.update_reputation(&user, &3u32, &1u32);
+
+    let profile_key = DataKey::UserProfile(user.clone());
+
+    // Advance the ledger so the profile's remaining TTL falls below the refresh
+    // threshold, making the extension observable on the next read.
+    env.ledger().with_mut(|li| li.sequence_number += 510_000);
+
+    let aged_ttl = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&profile_key)
+    });
+
+    // Reading reputation must extend the profile TTL back to the full window.
+    let (successful, disputed) = client.get_user_reputation(&user);
+    assert_eq!(successful, 3);
+    assert_eq!(disputed, 1);
+
+    let refreshed_ttl = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&profile_key)
+    });
+
+    assert!(
+        refreshed_ttl > aged_ttl,
+        "get_user_reputation must refresh the profile TTL on read"
+    );
+}
+
 #[test]
 fn test_get_user_migrates_legacy_profile() {
     let env = Env::default();

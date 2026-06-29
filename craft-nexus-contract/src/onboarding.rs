@@ -3064,7 +3064,8 @@ impl OnboardingContract {
     /// - `address`: `Address` — The user to query.
     ///
     /// # Storage Side-Effects
-    /// - **Read** [`DataKey::UserProfile(address)`] — no TTL extension.
+    /// - **Read** [`DataKey::UserProfile(address)`] — TTL extended when the
+    ///   profile exists, so an actively-queried entry is never archived.
     ///
     /// # Emitted Events
     /// None.
@@ -3086,6 +3087,11 @@ impl OnboardingContract {
             .get::<DataKey, UserProfile>(&profile_key)
         {
             Some(profile) => {
+                // [PERFORMANCE #46] Refresh TTL on this read so an actively
+                // queried profile entry stays live, matching the read-path TTL
+                // policy already used by `get_user_metrics` and `get_user`.
+                // A read that never bumps rent lets hot entries drift toward
+                // archival even while clients are polling reputation.
                 Self::extend_persistent(&env, &profile_key);
                 (profile.successful_trades, profile.disputed_trades)
             }
