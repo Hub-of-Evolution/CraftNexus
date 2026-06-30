@@ -111,7 +111,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
-                  "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                  "bytes": "0202020202020202020202020202020202020202020202020202020202020202"
                 }
               ]
             }
@@ -119,7 +119,8 @@
           "sub_invocations": []
         }
       ]
-    ]
+    ],
+    []
   ],
   "ledger": {
     "protocol_version": 21,
@@ -443,7 +444,7 @@
                         "symbol": "wasm_hash"
                       },
                       "val": {
-                        "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                        "bytes": "0202020202020202020202020202020202020202020202020202020202020202"
                       }
                     }
                   ]
@@ -1499,7 +1500,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
-                  "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                  "bytes": "0202020202020202020202020202020202020202020202020202020202020202"
                 }
               ]
             }
@@ -1562,7 +1563,7 @@
                     "symbol": "wasm_hash"
                   },
                   "val": {
-                    "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                    "bytes": "0202020202020202020202020202020202020202020202020202020202020202"
                   }
                 }
               ]
@@ -1588,6 +1589,86 @@
               }
             ],
             "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_call"
+              },
+              {
+                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
+              },
+              {
+                "symbol": "get_upgrade_proposal"
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "get_upgrade_proposal"
+              }
+            ],
+            "data": {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "proposed_at"
+                  },
+                  "val": {
+                    "u64": 1711368000
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "proposed_by"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "upgrade_at"
+                  },
+                  "val": {
+                    "u64": 1711972800
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "wasm_hash"
+                  },
+                  "val": {
+                    "bytes": "0202020202020202020202020202020202020202020202020202020202020202"
+                  }
+                }
+              ]
+            }
           }
         }
       },
