@@ -808,6 +808,7 @@ fn test_process_verification_request_unauthorized() {
     // No platform-admin signature is present, so require_auth() must panic and
     // the verification state transition must never execute.
     client.process_verification_request(&user, &true);
+}
 // ============================================================
 // Issue #41 – admin_clear_verification_request authorization
 // ============================================================
