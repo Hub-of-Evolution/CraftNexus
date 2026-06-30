@@ -34,33 +34,9 @@ cannot distinguish "value left over from a 2024 deployment" from
 
 ## `DataKey::StakeCooldownEnd(Address)` — Issue #235
 
-* Status: **deprecated, written for legacy clients but never read by
-  active logic**.
+* Status: **completed and removed**.
 * What it stored: a single `u64` cooldown timestamp per artisan.
-* Why it was kept: older off-chain readers polled this key directly to
-  show "stake unlocks at …" without understanding the queue layout.
-
-### Active behaviour
-
-* Active staking uses [`DataKey::ArtisanStakeQueue`]. `unstake_tokens`
-  never reads the single timestamp; matured deposits are decided per
-  queue entry.
-* `stake_tokens` and `unstake_tokens` continue to mirror the maximum
-  `cooldown_end` from the queue into this key so legacy readers still
-  see a conservative value. Both call sites are now annotated with
-  "DEPRECATED storage write" comments referencing this issue.
-* When a queue empties, `unstake_tokens` removes the deprecated key
-  alongside the queue and the stake record.
-* Operators can call `purge_stake_cooldown_end(artisan)` (admin-only)
-  to clear a stale entry without disturbing the queue. The function
-  returns `true` when an entry was removed and `false` otherwise.
-
-### Migration path
-
-When the off-chain readers that depend on this single timestamp are
-retired, drop both the mirror writes in `stake_tokens`/`unstake_tokens`
-and the `DataKey::StakeCooldownEnd` variant in the same release. Until
-then, the key must remain a *write-only* mirror.
+* Why it was removed: older off-chain readers were updated to read `DataKey::ArtisanStakeQueue` instead. The legacy mirror writes in `stake_tokens` and `unstake_tokens` have been eliminated to save storage costs.
 
 ## `DataKey::NextRecurringEscrowId` — Issue #233
 
