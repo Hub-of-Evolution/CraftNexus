@@ -17,6 +17,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-workspaces: '["craft-nexus-contract"]'
 
       - name: cargo check
         run: cargo check --tests
