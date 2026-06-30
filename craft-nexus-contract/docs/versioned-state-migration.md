@@ -1,49 +1,67 @@
-# Versioned State Migration
+# Versioned State Migration Runbook
 
-## Scope
+This document details the step-by-step procedure required to safely execute state migrations for the smart contract across different schema versions.
 
-This contract now stores explicit schema versions on:
+---
 
-- `Escrow`
-- `UserProfile`
+## General Migration Lifecycle Workflow
 
-The current schema version is `2`.
+For every migration version, operators must strictly adhere to the following sequence:
 
-## Migration Strategy
+1. **Pre-Migration Checks:** Verify the current version in contract storage.
+2. **Migration Invocation:** Execute the targeted Soroban contract command.
+3. **Post-Migration Verification:** Ensure the state matches the structural rules of the new schema version.
 
-Existing on-chain records created before this change do not contain a `version` field. To preserve compatibility:
+---
 
-1. read the raw persistent value
-2. inspect the underlying map for the `version` key
-3. decode as the current struct when `version` exists
-4. decode as the legacy struct when `version` is missing
-5. rewrite the entry immediately in the current schema
+## Migration 1: UserProfile (v1 -&gt; v2)
 
-This upgrade happens lazily on read through:
+### 1. Pre-Migration Checks
 
-- `EscrowContract::get_escrow`
-- `OnboardingContract::get_user`
-- any internal helpers that load those records
+Verify that the `UserProfile` entries are on `v1` structure before applying the layout change. Ensure contract balance constraints are satisfied.
 
-## Why Lazy Upgrade
+### 2. Migration Invocation Command
 
-- avoids a one-shot migration transaction
-- keeps old state readable without downtime
-- amortizes migration cost across normal usage
-- ensures newly touched records are normalized automatically
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ADMIN_KEY> \
+  --network <NETWORK> \
+  -- \
+  migrate_user_profile
+```
 
-## Backward Compatibility Notes
+### 3. Post-Migration Verification
+Query individual user state fields using a read-only instance to verify the presence of the updated fields introduced in v2.
 
-- v1 `Escrow` data is upgraded with `version = 2`
-- v1 `UserProfile` data is upgraded with `version = 2`
-- business fields are preserved during upgrade
-- migrated entries are written back to persistent storage immediately
+## Migration 2: WhitelistedTokens (Map -> Individual Keys)
+### 1. Pre-Migration Checks
+Read the legacy configuration Map to ensure total token allocations match current baseline expectations.
 
-## Test Coverage
+### 2. Migration Invocation Command
 
-Migration behavior is covered by host tests that:
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ADMIN_KEY> \
+  --network <NETWORK> \
+  -- \
+  migrate_token_whitelist
 
-- inject legacy `UserProfile` storage directly
-- inject legacy `Escrow` storage directly
-- read the records through public contract methods
-- assert the returned and persisted values are upgraded to version `2`
+### 3. Post-Migration Verification
+Confirm that separate storage slot configurations can be fetched individually per token address instead of a singular monolith Map structure.
+
+## Migration 3: ArtisanStakeQueue (Vec -> Indexed Queue)
+### 1. Pre-Migration Checks
+Assert that the legacy sequential Vec structure does not exceed maximum heap layout sizes, checking data continuity flags.
+
+### 2. Migration Invocation Command
+
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ADMIN_KEY> \
+  --network <NETWORK> \
+  -- \
+  migrate_stake_queue
+
+### 3. Post-Migration Verification
+Run an index query range verification step to ensure elements read correctly from their respective indexed queue positions without errors.

@@ -80,12 +80,12 @@
 //! on first read (internal `try_get_user_profile`); integrators never observe an
 //! out-of-date shape through the read API.
 
-
-
+use crate::alloc::string::ToString;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
     Symbol, TryFromVal, Val, Vec,
 };
+
 extern crate alloc;
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
@@ -1333,10 +1333,7 @@ impl OnboardingContract {
             if profile.version < CURRENT_USER_PROFILE_VERSION {
                 return Some(Self::upgrade_user_profile(env, user, profile));
             }
-            
-            // ---> ADD THIS LINE TO FIX THE TTL BUG <---
-            Self::extend_persistent(env, &key); 
-            
+            Self::extend_persistent(env, &key);
             return Some(profile);
         }
 

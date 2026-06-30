@@ -1,11 +1,14 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
-extern crate alloc;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
     BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
 };
+extern crate alloc;
 
 #[cfg(test)]
 mod enhanced_features_test;
