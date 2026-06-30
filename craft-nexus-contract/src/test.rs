@@ -723,9 +723,6 @@ fn test_update_platform_fee() {
 
     let events = env.events().all();
     let last_event = events.last().unwrap();
-    let _config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
-    let last_event = events.last();
-    let config_event: ConfigUpdatedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
     assert_eq!(
         config_event.field_name,
@@ -1596,9 +1593,6 @@ fn test_set_min_escrow_amount_emits_config_event() {
 
     let events = env.events().all();
     let last_event = events.last().unwrap();
-    let _config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
-    let last_event = events.last();
-    let config_event: ConfigUpdatedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
 
     assert_eq!(
