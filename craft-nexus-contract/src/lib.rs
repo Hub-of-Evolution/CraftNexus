@@ -370,6 +370,9 @@ pub enum EscrowStatus {
     Refunded = 2,
     Disputed = 3,
     Resolved = 4,
+    ReleasePending = 5,
+    RefundPending = 6,
+    DisputePending = 7,
 }
 
 /// Choice of resolution for a disputed escrow.
@@ -1428,8 +1431,6 @@ impl CraftNexusContract {
         );
     }
 
-   
-
     /// Atomically appends one escrow ID to the indexed global registry and
     /// increments `EscrowCount` (#515 / Issue #226).
     fn update_escrow_indices_atomic(env: &Env, order_id: u32) {
@@ -2096,7 +2097,7 @@ impl CraftNexusContract {
         config.admin.require_auth();
 
         let legacy_key = DataKey::WhitelistedTokens;
-        
+
         // Check if legacy storage exists
         if !env.storage().persistent().has(&legacy_key) {
             return 0; // Nothing to migrate
@@ -2109,7 +2110,7 @@ impl CraftNexusContract {
             .unwrap_or(Map::new(&env));
 
         let mut migrated_count = 0u32;
-        
+
         // Migrate each token to individual storage
         let keys = legacy_whitelist.keys();
         for i in 0..keys.len() {
@@ -2148,7 +2149,7 @@ impl CraftNexusContract {
         config.admin.require_auth();
 
         let legacy_key = DataKey::ArtisanStakeQueue(artisan.clone());
-        
+
         // Check if legacy storage exists
         if !env.storage().persistent().has(&legacy_key) {
             return 0; // Nothing to migrate
@@ -2201,24 +2202,28 @@ impl CraftNexusContract {
     /// Returns up to `limit` deposits starting from `offset`. Useful for
     /// inspecting queue state without loading the entire queue.
     pub fn get_artisan_stake_deposits(
-        env: Env, 
-        artisan: Address, 
-        offset: u32, 
-        limit: u32
+        env: Env,
+        artisan: Address,
+        offset: u32,
+        limit: u32,
     ) -> soroban_sdk::Vec<StakeDeposit> {
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        
+
         let mut deposits = soroban_sdk::Vec::new(&env);
         let end = core::cmp::min(offset + limit, total_count);
-        
+
         for i in offset..end {
             let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
-            if let Some(deposit) = env.storage().persistent().get::<DataKey, StakeDeposit>(&deposit_key) {
+            if let Some(deposit) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, StakeDeposit>(&deposit_key)
+            {
                 deposits.push_back(deposit);
             }
         }
-        
+
         deposits
     }
 
@@ -2455,8 +2460,7 @@ impl CraftNexusContract {
         Self::validate_admin_address(&env, &recovered_admin)?;
 
         // Check if recovery time lock has passed (#431 — TTL-friendly read)
-        let recovery_time =
-            Self::get_persistent_u64(&env, &DataKey::AdminRecoveryTime);
+        let recovery_time = Self::get_persistent_u64(&env, &DataKey::AdminRecoveryTime);
 
         let current_time = env.ledger().timestamp();
 
@@ -2489,7 +2493,9 @@ impl CraftNexusContract {
         config.pending_admin = None;
         // Write config to instance storage (primary location) — TTL already extended
         // by get_platform_config_internal. No redundant extend_persistent needed.
-        env.storage().instance().set(&DataKey::PlatformConfig, &config);
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &config);
 
         // Sync to persistent backup key for recovery consistency (no TTL extension needed
         // since this is a one-time sync, not a read-heavy path).
@@ -3037,7 +3043,7 @@ impl CraftNexusContract {
     }
 
     fn try_get_escrow_readonly(env: &Env, order_id: u32) -> Escrow {
-            let key = (ESCROW, order_id);
+        let key = (ESCROW, order_id);
         let stored: Val = env
             .storage()
             .persistent()
@@ -3067,7 +3073,7 @@ impl CraftNexusContract {
         }
 
         let legacy = LegacyEscrow::try_from_val(env, &stored).expect("");
-        
+
         let dispute_symbol = legacy.dispute_reason.map(|r| {
             // Safety bound: Symbols max at 32 chars. Truncate if legacy reason is too long.
             let len = r.len() as usize;
@@ -3098,7 +3104,6 @@ impl CraftNexusContract {
         Self::extend_persistent(env, &key); // OPTIMIZED: Ensure TTL extension on read
         upgraded
     }
-
 
     fn get_stored_escrow(env: &Env, order_id: u32) -> Escrow {
         let key = (ESCROW, order_id);
@@ -3154,6 +3159,23 @@ impl CraftNexusContract {
         env.storage().persistent().set(&key, &upgraded);
         Self::extend_persistent(env, &key);
         upgraded
+    }
+
+    fn claim_active_escrow_transition(
+        env: &Env,
+        order_id: u32,
+        pending_status: EscrowStatus,
+    ) -> Result<Escrow, Error> {
+        let mut escrow = Self::get_stored_escrow(env, order_id);
+        if escrow.status != EscrowStatus::Active {
+            return Err(Error::InvalidEscrowState);
+        }
+
+        escrow.status = pending_status;
+        let key = (ESCROW, order_id);
+        env.storage().persistent().set(&key, &escrow);
+        Self::extend_persistent(env, &key);
+        Ok(escrow)
     }
 
     fn upgrade_escrow(env: &Env, order_id: u32, mut escrow: Escrow) -> Escrow {
@@ -3450,19 +3472,14 @@ impl CraftNexusContract {
     /// * `order_id` - Order identifier
     pub fn release_funds(env: Env, order_id: u32) {
         Self::enter_reentry_guard(&env);
-        let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
-        if escrow_opt.is_none() {
-            env.panic_with_error(crate::Error::EscrowNotFound);
-        }
-        Self::extend_persistent(&env, &(ESCROW, order_id));
-        let mut escrow: Escrow = escrow_opt.unwrap();
+        let escrow_for_auth = Self::get_stored_escrow(&env, order_id);
 
         // Only buyer can release funds
-        escrow.buyer.require_auth();
+        escrow_for_auth.buyer.require_auth();
 
-        if !(escrow.status == EscrowStatus::Active) {
-            env.panic_with_error(crate::Error::InvalidEscrowState);
-        }
+        let mut escrow =
+            Self::claim_active_escrow_transition(&env, order_id, EscrowStatus::ReleasePending)
+                .unwrap_or_else(|e| env.panic_with_error(e));
 
         // Get platform config
         let config = Self::get_platform_config_internal(&env);
@@ -3547,23 +3564,22 @@ impl CraftNexusContract {
     /// * `order_id` - Order identifier
     pub fn auto_release(env: Env, order_id: u32) {
         Self::enter_reentry_guard(&env);
-        let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
-        if escrow_opt.is_none() {
-            env.panic_with_error(crate::Error::EscrowNotFound);
-        }
-        Self::extend_persistent(&env, &(ESCROW, order_id));
-        let mut escrow: Escrow = escrow_opt.unwrap();
+        let escrow_for_window = Self::get_stored_escrow(&env, order_id);
 
-        if !(escrow.status == EscrowStatus::Active) {
+        if !(escrow_for_window.status == EscrowStatus::Active) {
             env.panic_with_error(crate::Error::InvalidEscrowState);
         }
 
         let current_time = env.ledger().timestamp();
-        let elapsed = current_time - (escrow.created_at as u64);
+        let elapsed = current_time - (escrow_for_window.created_at as u64);
 
-        if elapsed < escrow.release_window as u64 {
+        if elapsed < escrow_for_window.release_window as u64 {
             env.panic_with_error(crate::Error::ReleaseWindowNotElapsed);
         }
+
+        let mut escrow =
+            Self::claim_active_escrow_transition(&env, order_id, EscrowStatus::ReleasePending)
+                .unwrap_or_else(|e| env.panic_with_error(e));
 
         // Get platform config
         let config = Self::get_platform_config_internal(&env);
@@ -3733,7 +3749,11 @@ impl CraftNexusContract {
     ///
     /// Only one proposal may be pending at a time. Cancel with
     /// `cancel_upgrade_wasm` before starting a new one.
-    pub fn propose_upgrade_wasm(env: Env, signer: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+    pub fn propose_upgrade_wasm(
+        env: Env,
+        signer: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), Error> {
         signer.require_auth();
 
         Self::validate_upgrade_hash(&env, &new_wasm_hash)?;
@@ -3784,9 +3804,7 @@ impl CraftNexusContract {
 
         if (approvals.len() as u32) < threshold {
             // Threshold not yet met — persist partial approvals and return.
-            env.storage()
-                .persistent()
-                .set(&approvals_key, &approvals);
+            env.storage().persistent().set(&approvals_key, &approvals);
             Self::extend_persistent(&env, &approvals_key);
             return Ok(());
         }
@@ -3834,9 +3852,7 @@ impl CraftNexusContract {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
         if signers.is_empty() {
-            env.storage()
-                .persistent()
-                .remove(&DataKey::UpgradeSigners);
+            env.storage().persistent().remove(&DataKey::UpgradeSigners);
         } else {
             env.storage()
                 .persistent()
@@ -4045,15 +4061,8 @@ impl CraftNexusContract {
         admin.require_auth();
 
         let order_id = escrow_id as u32;
-        let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
-        if escrow_opt.is_none() {
-            return Err(Error::EscrowNotFound);
-        }
-        let mut escrow: Escrow = escrow_opt.unwrap();
-
-        if escrow.status != EscrowStatus::Active {
-            return Err(Error::InvalidEscrowState);
-        }
+        let mut escrow =
+            Self::claim_active_escrow_transition(&env, order_id, EscrowStatus::RefundPending)?;
 
         // Update status
         escrow.status = EscrowStatus::Refunded;
@@ -4273,7 +4282,7 @@ impl CraftNexusContract {
     /// * `order_id` - Order identifier
     /// * `dispute_reason` - Reason for dispute
     /// * `authorized_address` - Address authorized to dispute (buyer or seller)
-   pub fn dispute_escrow(
+    pub fn dispute_escrow(
         env: Env,
         order_id: u32,
         dispute_reason: Symbol, // UPDATE ARGUMENT TYPE
@@ -4281,16 +4290,18 @@ impl CraftNexusContract {
     ) {
         authorized_address.require_auth();
 
-        let mut escrow = Self::get_stored_escrow(&env, order_id);
+        let escrow_for_auth = Self::get_stored_escrow(&env, order_id);
 
         // Allow buyer or seller to dispute
-        if !(escrow.buyer == authorized_address || escrow.seller == authorized_address) {
+        if !(escrow_for_auth.buyer == authorized_address
+            || escrow_for_auth.seller == authorized_address)
+        {
             env.panic_with_error(crate::Error::Unauthorized);
         }
 
-        if !(escrow.status == EscrowStatus::Active) {
-            env.panic_with_error(crate::Error::InvalidEscrowState);
-        }
+        let mut escrow =
+            Self::claim_active_escrow_transition(&env, order_id, EscrowStatus::DisputePending)
+                .unwrap_or_else(|e| env.panic_with_error(e));
 
         escrow.status = EscrowStatus::Disputed;
         escrow.dispute_reason = Some(dispute_reason); // Assign Symbol
@@ -4310,7 +4321,7 @@ impl CraftNexusContract {
             },
         );
     }
-    
+
     /// Resolve disputed escrow (arbitrator only).
     ///
     /// This function transitions the escrow from `Disputed` to `Resolved`.
@@ -5409,7 +5420,7 @@ impl CraftNexusContract {
         // Check queue capacity and prune if necessary
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        
+
         if current_count >= STAKE_QUEUE_PRUNE_THRESHOLD {
             Self::prune_matured_stake_deposits(&env, &artisan);
         }
@@ -5425,19 +5436,24 @@ impl CraftNexusContract {
     fn add_stake_deposit(env: &Env, artisan: &Address, amount: i128, cooldown_end: u64) {
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        
+
         if current_count >= MAX_STAKE_QUEUE_SIZE {
             env.panic_with_error(Error::StakeQueueFull);
         }
 
         // Add new deposit at the end of the queue
         let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), current_count);
-        let deposit = StakeDeposit { amount, cooldown_end };
+        let deposit = StakeDeposit {
+            amount,
+            cooldown_end,
+        };
         env.storage().persistent().set(&deposit_key, &deposit);
         Self::extend_persistent(env, &deposit_key);
 
         // Update count
-        env.storage().persistent().set(&count_key, &(current_count + 1));
+        env.storage()
+            .persistent()
+            .set(&count_key, &(current_count + 1));
         Self::extend_persistent(env, &count_key);
     }
 
@@ -5449,7 +5465,7 @@ impl CraftNexusContract {
     fn prune_matured_stake_deposits(env: &Env, artisan: &Address) {
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        
+
         if current_count == 0 {
             return;
         }
@@ -5460,19 +5476,24 @@ impl CraftNexusContract {
         // Compact queue by moving non-matured deposits to fill gaps
         for read_index in 0..current_count {
             let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), read_index);
-            
-            if let Some(deposit) = env.storage().persistent().get::<DataKey, StakeDeposit>(&deposit_key) {
+
+            if let Some(deposit) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, StakeDeposit>(&deposit_key)
+            {
                 if deposit.cooldown_end > now {
                     // Deposit is not matured, keep it
                     if write_index != read_index {
                         // Move deposit to new position
-                        let new_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
+                        let new_key =
+                            DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
                         env.storage().persistent().set(&new_key, &deposit);
                         Self::extend_persistent(env, &new_key);
                     }
                     write_index += 1;
                 }
-                
+
                 // Remove old entry if we moved it or if it was matured
                 if write_index != read_index + 1 {
                     env.storage().persistent().remove(&deposit_key);
@@ -5516,8 +5537,12 @@ impl CraftNexusContract {
         // Process all deposits, collecting matured amounts and compacting the queue
         for read_index in 0..current_count {
             let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), read_index);
-            
-            if let Some(deposit) = env.storage().persistent().get::<DataKey, StakeDeposit>(&deposit_key) {
+
+            if let Some(deposit) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, StakeDeposit>(&deposit_key)
+            {
                 if now >= deposit.cooldown_end {
                     // Deposit is matured, add to unstake amount
                     matured_amount += deposit.amount;
@@ -5527,7 +5552,8 @@ impl CraftNexusContract {
                     // Deposit is not matured, keep it in the queue
                     if write_index != read_index {
                         // Move deposit to new position to compact the queue
-                        let new_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
+                        let new_key =
+                            DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
                         env.storage().persistent().set(&new_key, &deposit);
                         Self::extend_persistent(&env, &new_key);
                         // Remove old position
@@ -6297,5 +6323,4 @@ impl CraftNexusContract {
     fn exit_reentry_guard(env: &Env) {
         env.storage().temporary().remove(&DataKey::ReentryGuard);
     }
-
 }

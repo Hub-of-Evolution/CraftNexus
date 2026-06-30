@@ -1,9 +1,6 @@
 #![cfg(test)]
 
-use crate::{
-    CraftNexusContract, CraftNexusContractClient, EscrowStatus,
-    ExpiredDisputeFeePolicy,
-};
+use crate::{CraftNexusContract, CraftNexusContractClient, EscrowStatus, ExpiredDisputeFeePolicy};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     token, Address, Env,
