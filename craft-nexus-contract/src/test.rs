@@ -100,11 +100,11 @@ fn test_create_escrow_success() {
     // Verify event
     let events = env.events().all();
     assert!(!events.is_empty(), "No events emitted");
-    let last_event = events.last();
-    assert_eq!(last_event.0, client.address);
+    let (contract_address, topics, payload) = events.last().unwrap();
+    assert_eq!(contract_address, client.address);
     // Topics: ["escrow_created", escrow_id]
     assert_eq!(
-        last_event.1,
+        topics,
         vec![
             &env,
             Symbol::new(&env, "escrow").into_val(&env),
@@ -113,7 +113,7 @@ fn test_create_escrow_success() {
     );
 
     // Verify payload
-    let event: EscrowEvent = last_event.2.try_into_val(&env).unwrap();
+    let event: EscrowEvent = payload.try_into_val(&env).unwrap();
     assert_eq!(event.escrow_id, order_id as u64);
     assert_eq!(event.action, EscrowAction::Created);
     assert_eq!(event.buyer, buyer);
@@ -263,9 +263,9 @@ fn test_dispute_escrow_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let (_, topics, payload) = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        topics,
         vec![
             &env,
             Symbol::new(&env, "escrow").into_val(&env),
@@ -274,7 +274,7 @@ fn test_dispute_escrow_success() {
     );
 
     // Verify payload
-    let event: EscrowEvent = last_event.2.try_into_val(&env).unwrap();
+    let event: EscrowEvent = payload.try_into_val(&env).unwrap();
     assert_eq!(event.escrow_id, 1);
     assert_eq!(event.action, EscrowAction::Disputed);
     assert_eq!(event.buyer, buyer);
@@ -598,7 +598,8 @@ fn test_update_platform_fee() {
 
     let events = env.events().all();
     let last_event = events.last();
-    let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
+    let (_, _, payload) = last_event.unwrap();
+    let config_event: ConfigUpdatedEvent = payload.try_into_val(&env).unwrap();
     assert_eq!(
         config_event.field_name,
         Symbol::new(&env, "platform_fee_bps")
@@ -726,9 +727,9 @@ fn test_set_artisan_fee_tier_emits_dedicated_event() {
     assert_eq!(client.get_effective_fee_bps(&seller), 750);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let (_, topics, payload) = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        topics,
         vec![
             &env,
             Symbol::new(&env, "artisan_fee_tier_updated").into_val(&env),
@@ -736,7 +737,7 @@ fn test_set_artisan_fee_tier_emits_dedicated_event() {
         ]
     );
 
-    let fee_event: ArtisanFeeTierUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
+    let fee_event: ArtisanFeeTierUpdatedEvent = payload.try_into_val(&env).unwrap();
     assert_eq!(fee_event.artisan, seller);
     assert_eq!(fee_event.fee_bps, 750);
 }
@@ -1362,7 +1363,8 @@ fn test_set_min_escrow_amount_emits_config_event() {
 
     let events = env.events().all();
     let last_event = events.last();
-    let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
+    let (_, _, payload) = last_event.unwrap();
+    let config_event: ConfigUpdatedEvent = payload.try_into_val(&env).unwrap();
 
     assert_eq!(
         config_event.field_name,
@@ -1969,9 +1971,9 @@ fn test_extend_release_window_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let (_, topics, payload) = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        topics,
         vec![
             &env,
             Symbol::new(&env, "escrow").into_val(&env),
@@ -1979,7 +1981,7 @@ fn test_extend_release_window_success() {
         ]
     );
 
-    let event: EscrowEvent = last_event.2.try_into_val(&env).unwrap();
+    let event: EscrowEvent = payload.try_into_val(&env).unwrap();
     assert_eq!(event.escrow_id, 1);
     assert_eq!(event.action, EscrowAction::Extended);
     assert_eq!(event.buyer, buyer);
@@ -2554,9 +2556,9 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
     assert!(is_valid);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let (_, topics, payload) = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        topics,
         vec![
             &env,
             Symbol::new(&env, "metadata_verified").into_val(&env),
@@ -2564,7 +2566,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
         ]
     );
 
-    let event: MetadataVerifiedEvent = last_event.2.try_into_val(&env).unwrap();
+    let event: MetadataVerifiedEvent = payload.try_into_val(&env).unwrap();
     assert_eq!(event.order_id, 1);
     assert_eq!(event.verifier, buyer);
     assert_eq!(event.timestamp, 1711368000);
@@ -2579,9 +2581,9 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&true);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let (_, topics, payload) = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        topics,
         vec![
             &env,
             Symbol::new(&env, "platform_paused").into_val(&env),
@@ -2589,16 +2591,16 @@ fn test_set_paused_emits_platform_status_events() {
         ]
     );
 
-    let paused_event: PlatformPausedEvent = last_event.2.try_into_val(&env).unwrap();
+    let paused_event: PlatformPausedEvent = payload.try_into_val(&env).unwrap();
     assert_eq!(paused_event.initiator, admin.clone());
     assert_eq!(paused_event.timestamp, 1711368000);
 
     client.set_paused(&false);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let (_, topics_unpaused, payload_unpaused) = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        topics_unpaused,
         vec![
             &env,
             Symbol::new(&env, "platform_unpaused").into_val(&env),
@@ -2606,7 +2608,7 @@ fn test_set_paused_emits_platform_status_events() {
         ]
     );
 
-    let unpaused_event: PlatformUnpausedEvent = last_event.2.try_into_val(&env).unwrap();
+    let unpaused_event: PlatformUnpausedEvent = payload_unpaused.try_into_val(&env).unwrap();
     assert_eq!(unpaused_event.initiator, admin);
     assert_eq!(unpaused_event.timestamp, 1711368000);
 }
