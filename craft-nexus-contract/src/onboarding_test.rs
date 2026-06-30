@@ -21,6 +21,7 @@ fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     (client, admin)
 }
 
+#[allow(dead_code)]
 fn to_bytes(env: &Env, s: &String) -> Bytes {
     let mut bytes = Bytes::new(env);
     let len = s.len() as usize;
@@ -1709,7 +1710,7 @@ fn test_has_active_contracts() {
     let seller = Address::generate(&env);
     let token_admin = Address::generate(&env);
     let token_id = env.register_stellar_asset_contract_v2(token_admin);
-    let token_client = token::Client::new(&env, &token_id.address());
+    let _token_client = token::Client::new(&env, &token_id.address());
     let token_asset = token::StellarAssetClient::new(&env, &token_id.address());
     token_asset.mint(&user, &10_000_000);
 
