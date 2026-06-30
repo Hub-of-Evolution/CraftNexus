@@ -10,6 +10,7 @@ use soroban_sdk::{
     Symbol, TryFromVal, Val, Vec,
 };
 extern crate alloc;
+use crate::alloc::string::ToString;
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;

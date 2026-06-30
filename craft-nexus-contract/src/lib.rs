@@ -2344,13 +2344,17 @@ impl CraftNexusContract {
             env.panic_with_error(Error::InvalidAdminAddress);
         }
 
-        let _previous_admin = config.admin.clone();
-        config.admin = pending.clone();
+        let previous_admin = config.admin.clone();
+        let new_admin = pending.clone();
+        config.admin = new_admin.clone();
         config.pending_admin = None;
 
         env.storage()
             .instance()
             .set(&DataKey::PlatformConfig, &config);
+
+        // Emit audit event for the completed two-step admin transfer (#631)
+        Self::emit_admin_changed(&env, previous_admin, new_admin, "admin_claimed");
     }
 
     /// Cancel an in-progress two-step admin transfer (current admin only).
