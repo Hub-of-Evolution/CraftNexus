@@ -36,7 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "arty2"
+                  "string": "rep_max"
                 },
                 {
                   "u32": 2
@@ -59,7 +59,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "arty2"
+                  "string": "rep_max"
                 },
                 {
                   "u32": 2
@@ -73,15 +73,21 @@
     ],
     [
       [
-        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
         {
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "auto_verify_user",
+              "function_name": "update_reputation",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "u32": 4294967295
+                },
+                {
+                  "u32": 4294967295
                 }
               ]
             }
@@ -97,7 +103,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "is_verified",
+              "function_name": "get_user_reputation",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -399,7 +405,7 @@
                         "symbol": "disputed_trades"
                       },
                       "val": {
-                        "u32": 0
+                        "u32": 4294967295
                       }
                     },
                     {
@@ -445,7 +451,7 @@
                         "symbol": "successful_trades"
                       },
                       "val": {
-                        "u32": 0
+                        "u32": 4294967295
                       }
                     },
                     {
@@ -453,7 +459,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "symbol": "arty2"
+                        "symbol": "rep_max"
                       }
                     },
                     {
@@ -528,7 +534,7 @@
                   "symbol": "Username"
                 },
                 {
-                  "string": "arty2"
+                  "string": "rep_max"
                 }
               ]
             },
@@ -548,7 +554,7 @@
                       "symbol": "Username"
                     },
                     {
-                      "string": "arty2"
+                      "string": "rep_max"
                     }
                   ]
                 },
@@ -664,6 +670,39 @@
       [
         {
           "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": 4837995959683129791
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": 4837995959683129791
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
+        ]
+      ],
+      [
+        {
+          "contract_data": {
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
             "key": {
               "ledger_key_nonce": {
@@ -683,39 +722,6 @@
                 "key": {
                   "ledger_key_nonce": {
                     "nonce": 2032731177588607455
-                  }
-                },
-                "durability": "temporary",
-                "val": "void"
-              }
-            },
-            "ext": "v0"
-          },
-          6311999
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-            "key": {
-              "ledger_key_nonce": {
-                "nonce": 4837995959683129791
-              }
-            },
-            "durability": "temporary"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-                "key": {
-                  "ledger_key_nonce": {
-                    "nonce": 4837995959683129791
                   }
                 },
                 "durability": "temporary",
@@ -923,7 +929,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "arty2"
+                  "string": "rep_max"
                 },
                 {
                   "u32": 2
@@ -970,7 +976,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "arty2"
+                    "string": "rep_max"
                   }
                 }
               ]
@@ -1064,7 +1070,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "symbol": "arty2"
+                    "symbol": "rep_max"
                   }
                 },
                 {
@@ -1097,11 +1103,21 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "auto_verify_user"
+                "symbol": "update_reputation"
               }
             ],
             "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "u32": 4294967295
+                },
+                {
+                  "u32": 4294967295
+                }
+              ]
             }
           }
         }
@@ -1120,12 +1136,10 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "auto_verify_user"
+                "symbol": "update_reputation"
               }
             ],
-            "data": {
-              "bool": false
-            }
+            "data": "void"
           }
         }
       },
@@ -1146,7 +1160,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "is_verified"
+                "symbol": "get_user_reputation"
               }
             ],
             "data": {
@@ -1169,11 +1183,18 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "is_verified"
+                "symbol": "get_user_reputation"
               }
             ],
             "data": {
-              "bool": false
+              "vec": [
+                {
+                  "u32": 4294967295
+                },
+                {
+                  "u32": 4294967295
+                }
+              ]
             }
           }
         }

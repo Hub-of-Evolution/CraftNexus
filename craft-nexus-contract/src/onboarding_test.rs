@@ -808,6 +808,8 @@ fn test_process_verification_request_unauthorized() {
     // No platform-admin signature is present, so require_auth() must panic and
     // the verification state transition must never execute.
     client.process_verification_request(&user, &true);
+}
+
 // ============================================================
 // Issue #41 – admin_clear_verification_request authorization
 // ============================================================
@@ -974,6 +976,46 @@ fn test_update_reputation_unknown_address_is_no_op() {
     let (successful, disputed) = client.get_user_reputation(&unknown);
     assert_eq!(successful, 0);
     assert_eq!(disputed, 0);
+}
+
+/// update_reputation with zero successful and zero disputed trades is a no-op.
+#[test]
+fn test_reputation_zero_trades_no_op() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "rep_zero"), &UserRole::Artisan);
+
+    // Set initial reputation
+    client.update_reputation(&user, &5u32, &2u32);
+    let (successful, disputed) = client.get_user_reputation(&user);
+    assert_eq!(successful, 5);
+    assert_eq!(disputed, 2);
+
+    // Update with zero values should be a no-op
+    client.update_reputation(&user, &0u32, &0u32);
+    let (successful2, disputed2) = client.get_user_reputation(&user);
+    assert_eq!(successful2, 5);
+    assert_eq!(disputed2, 2);
+}
+
+/// update_reputation handles u32::MAX without overflow panic.
+#[test]
+fn test_reputation_max_trades_no_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "rep_max"), &UserRole::Artisan);
+
+    // Update with u32::MAX should not panic
+    client.update_reputation(&user, &u32::MAX, &u32::MAX);
+    let (successful, disputed) = client.get_user_reputation(&user);
+    assert_eq!(successful, u32::MAX);
+    assert_eq!(disputed, u32::MAX);
 }
 
 #[test]
@@ -1245,7 +1287,8 @@ fn test_change_username_with_special_characters() {
     assert_eq!(
         updated.username,
         Symbol::new(&env, "new_user_name_123")
-    );}
+    );
+}
 
 #[test]
 fn test_change_username_preserves_other_fields() {

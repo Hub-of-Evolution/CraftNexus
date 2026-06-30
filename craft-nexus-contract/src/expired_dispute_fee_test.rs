@@ -65,7 +65,7 @@ fn setup_test() -> (
         admin,
         platform_wallet,
         arbitrator,
-        onboarding_contract,
+        onboarding_contract.clone(),
     )
 }
 
