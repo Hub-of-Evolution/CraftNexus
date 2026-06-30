@@ -80,8 +80,7 @@
 //! on first read (internal `try_get_user_profile`); integrators never observe an
 //! out-of-date shape through the read API.
 
-
-
+use crate::alloc::string::ToString;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
     Symbol, TryFromVal, Val, Vec,
