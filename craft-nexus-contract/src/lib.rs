@@ -2491,9 +2491,9 @@ impl CraftNexusContract {
         // by get_platform_config_internal. No redundant extend_persistent needed.
         env.storage().instance().set(&DataKey::PlatformConfig, &config);
 
-        // Sync to persistent backup key for recovery consistency (no TTL extension needed
-        // since this is a one-time sync, not a read-heavy path).
+        // Sync to persistent backup key for recovery consistency.
         env.storage().persistent().set(&PLATFORM_FEE, &config);
+        Self::extend_persistent(&env, &PLATFORM_FEE);
 
         // Clear the recovery time lock for next cycle
         env.storage()
@@ -3475,6 +3475,7 @@ impl CraftNexusContract {
         // Update status
         escrow.status = EscrowStatus::Released;
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::extend_persistent(&env, &(ESCROW, order_id));
 
         // Decrement active counts
         Self::update_active_obligations(&env, &escrow.buyer, -1);
@@ -3576,6 +3577,7 @@ impl CraftNexusContract {
         // Update status
         escrow.status = EscrowStatus::Released;
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::extend_persistent(&env, &(ESCROW, order_id));
 
         // Decrement active counts
         Self::update_active_obligations(&env, &escrow.buyer, -1);
@@ -3671,6 +3673,7 @@ impl CraftNexusContract {
 
         escrow.release_window = new_window;
         env.storage().persistent().set(&escrow_key, &escrow);
+        Self::extend_persistent(&env, &escrow_key);
 
         Self::emit_escrow_created(
             &env,
@@ -4296,6 +4299,7 @@ impl CraftNexusContract {
         escrow.dispute_reason = Some(dispute_reason); // Assign Symbol
         escrow.dispute_initiated_at = Some(env.ledger().timestamp());
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::extend_persistent(&env, &(ESCROW, order_id));
 
         Self::emit_escrow_created(
             &env,
@@ -4348,6 +4352,7 @@ impl CraftNexusContract {
         // CRITICAL: Update status BEFORE external calls (CEI pattern)
         escrow.status = EscrowStatus::Resolved;
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::extend_persistent(&env, &(ESCROW, order_id));
 
         // Decrement active counts
         Self::update_active_obligations(&env, &escrow.buyer, -1);
@@ -5049,6 +5054,7 @@ impl CraftNexusContract {
                     // Update status
                     escrow.status = EscrowStatus::Released;
                     env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+                    Self::extend_persistent(&env, &(ESCROW, order_id));
 
                     // Decrement active counts
                     Self::update_active_obligations(&env, &escrow.buyer, -1);
@@ -5251,6 +5257,7 @@ impl CraftNexusContract {
         // CRITICAL: Update status BEFORE external calls (CEI pattern)
         escrow.status = EscrowStatus::Resolved;
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::extend_persistent(&env, &(ESCROW, order_id));
 
         // Decrement active counts
         Self::update_active_obligations(&env, &escrow.buyer, -1);
@@ -5865,6 +5872,7 @@ impl CraftNexusContract {
         // CEI Pattern: EFFECTS - Update state BEFORE external calls
         escrow.status = EscrowStatus::Resolved;
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::extend_persistent(&env, &(ESCROW, order_id));
 
         // Clean up proposal
         env.storage().persistent().remove(&proposal_key);
