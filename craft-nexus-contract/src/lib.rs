@@ -1351,7 +1351,7 @@ impl CraftNexusContract {
 
     fn emit_escrow_created(env: &Env, event: EscrowEvent) {
         env.events()
-            .publish((Symbol::new(env, "escrow"), event.escrow_id), event);
+            .publish((symbol_short!("escrow"), event.escrow_id), event);
     }
 
     fn emit_escrow_resolved_event(env: &Env, event: EscrowResolvedEvent) {

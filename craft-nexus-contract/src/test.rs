@@ -100,7 +100,7 @@ fn test_create_escrow_success() {
     // Verify event
     let events = env.events().all();
     assert!(!events.is_empty(), "No events emitted");
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(last_event.0, client.address);
     // Topics: ["escrow_created", escrow_id]
     assert_eq!(
@@ -263,7 +263,7 @@ fn test_dispute_escrow_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -597,7 +597,7 @@ fn test_update_platform_fee() {
     assert_eq!(client.get_platform_fee(), 800);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
     assert_eq!(
         config_event.field_name,
@@ -726,7 +726,7 @@ fn test_set_artisan_fee_tier_emits_dedicated_event() {
     assert_eq!(client.get_effective_fee_bps(&seller), 750);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -1361,7 +1361,7 @@ fn test_set_min_escrow_amount_emits_config_event() {
     client.set_min_escrow_amount(&token_id, &1_00000);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
 
     assert_eq!(
@@ -1969,7 +1969,7 @@ fn test_extend_release_window_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -2554,7 +2554,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
     assert!(is_valid);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -2579,7 +2579,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&true);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -2596,7 +2596,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&false);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
