@@ -19,16 +19,32 @@ mod reentrancy_test;
 mod scalability_test;
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod event_snapshot_test;
 // Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
 // artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
 #[cfg(not(target_family = "wasm"))]
 pub mod onboarding;
 
+/// Error codes grouped by category for off-chain triage.
+///
+/// # Categories
+///
+/// | Range   | Category     | Meaning                                         | Triage                    |
+/// |---------|-------------|-------------------------------------------------|---------------------------|
+/// | 1–9     | Auth/Access | Authorization, ownership, or existence failures | Rollback immediately      |
+/// | 10–19   | State       | Invalid state transitions or preconditions      | Retry after state change  |
+/// | 20–29   | Config      | Operator-configurable limits or misconfig       | Operator must act         |
+/// | 30–39   | Operational | System or cooldown gates                        | Retry after cooldown      |
+/// | 40–42   | Validation  | Input validation failures                       | Fix caller input          |
+///
+/// Use [`is_retryable`] to determine whether an error may succeed on retry.
 #[contracterror]
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 #[repr(u32)]
 pub enum Error {
+    // ── Auth / Access (1–9): rollback immediately ──
     /// Unauthorized operation
     Unauthorized = 1,
     /// Escrow not found
@@ -47,6 +63,7 @@ pub enum Error {
     NotInDispute = 8,
     /// DEPRECATED: Handled by onboarding contract. Retained for ABI compatibility.
     AlreadyOnboarded = 9,
+    // ── State / Transition (10–19): retry after state change ──
     /// Invalid fee amount (must be <= MAX_PLATFORM_FEE_BPS)
     InvalidFee = 10,
     /// Buyer and seller cannot be the same
@@ -67,6 +84,7 @@ pub enum Error {
     StakeCooldownActive = 18,
     /// Refund amount is invalid (zero, negative, or exceeds escrow amount)
     InvalidRefundAmount = 19,
+    // ── Config / Resource (20–29): operator must act ──
     /// Partial refund proposal not found
     ProposalNotFound = 20,
     /// Partial refund proposal already exists for this order
@@ -87,6 +105,7 @@ pub enum Error {
     AdminRecoveryFailed = 28,
     /// Batch operation limit exceeded
     BatchLimitExceeded = 29,
+    // ── Operational / Gates (30–39): retry after cooldown ──
     /// Deprecated function called (no-op for ABI compatibility)
     DeprecatedFunction = 30,
     /// No pending admin transfer to accept or cancel
@@ -107,12 +126,36 @@ pub enum Error {
     RecurringEscrowIdExhausted = 38,
     /// Onboarding contract address has not been configured
     OnboardingContractNotSet = 39,
+    // ── Validation (40+): fix caller input ──
     /// Provided metadata hash is invalid
     InvalidMetadataHash = 40,
     /// Provided IPFS hash is invalid
     InvalidIpfsHash = 41,
     /// Caller is not an authorized upgrade signer
     NotAnUpgradeSigner = 42,
+}
+
+/// Returns `true` if the error is transient and the operation may succeed on retry.
+///
+/// Retryable errors are those that depend on time, state change, or operator
+/// action that is expected to resolve. Non-retryable errors (auth, not-found,
+/// validation, permanent config) will **never** succeed on retry without
+/// a different input or caller.
+#[must_use]
+pub fn is_retryable(error: Error) -> bool {
+    matches!(
+        error,
+        Error::InvalidEscrowState
+            | Error::ReleaseWindowNotElapsed
+            | Error::ContractPaused
+            | Error::DisputeExpired
+            | Error::StakeCooldownActive
+            | Error::ReentryDetected
+            | Error::StakeQueueFull
+            | Error::UpgradeCooldownActive
+            | Error::CycleNotReady
+            | Error::BatchLimitExceeded
+    )
 }
 
 const ESCROW: Symbol = symbol_short!("ESCROW");
