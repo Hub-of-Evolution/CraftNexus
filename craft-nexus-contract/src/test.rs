@@ -2556,7 +2556,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
     let events = env.events().all();
     let last_event = events.last();
     assert_eq!(
-        last_event.1,
+        last_event.unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "metadata_verified").into_val(&env),
@@ -2564,7 +2564,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
         ]
     );
 
-    let event: MetadataVerifiedEvent = last_event.2.try_into_val(&env).unwrap();
+    let event: MetadataVerifiedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(event.order_id, 1);
     assert_eq!(event.verifier, buyer);
     assert_eq!(event.timestamp, 1711368000);
@@ -2581,7 +2581,7 @@ fn test_set_paused_emits_platform_status_events() {
     let events = env.events().all();
     let last_event = events.last();
     assert_eq!(
-        last_event.1,
+        last_event.unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "platform_paused").into_val(&env),
@@ -2589,7 +2589,7 @@ fn test_set_paused_emits_platform_status_events() {
         ]
     );
 
-    let paused_event: PlatformPausedEvent = last_event.2.try_into_val(&env).unwrap();
+    let paused_event: PlatformPausedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(paused_event.initiator, admin.clone());
     assert_eq!(paused_event.timestamp, 1711368000);
 
@@ -2598,7 +2598,7 @@ fn test_set_paused_emits_platform_status_events() {
     let events = env.events().all();
     let last_event = events.last();
     assert_eq!(
-        last_event.1,
+        last_event.unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "platform_unpaused").into_val(&env),
@@ -2606,7 +2606,7 @@ fn test_set_paused_emits_platform_status_events() {
         ]
     );
 
-    let unpaused_event: PlatformUnpausedEvent = last_event.2.try_into_val(&env).unwrap();
+    let unpaused_event: PlatformUnpausedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(unpaused_event.initiator, admin);
     assert_eq!(unpaused_event.timestamp, 1711368000);
 }
