@@ -11,6 +11,8 @@ use soroban_sdk::{
 };
 extern crate alloc;
 
+use alloc::string::ToString;
+
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
@@ -3158,6 +3160,7 @@ impl OnboardingContract {
                 .persistent()
                 .get::<DataKey, Address>(&queue_index_key)
             {
+                Self::extend_persistent(&env, &queue_index_key);
                 if Self::is_verification_pending_internal(&env, &user) {
                     queue.push_back(user);
                 }
