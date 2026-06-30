@@ -27,6 +27,18 @@ if [ ! -f "${WASM_ARTIFACT}" ]; then
     exit 1
 fi
 
+# Apply wasm-opt for additional size reduction if available
+if command -v wasm-opt >/dev/null 2>&1; then
+    echo "Applying wasm-opt optimization..."
+    wasm-opt -Oz -o "${WASM_ARTIFACT}.opt" "${WASM_ARTIFACT}"
+    if [ -f "${WASM_ARTIFACT}.opt" ]; then
+        mv "${WASM_ARTIFACT}.opt" "${WASM_ARTIFACT}"
+        echo "wasm-opt optimization completed"
+    fi
+else
+    echo "Note: wasm-opt not found in PATH. Install it for additional size reduction: npm install -g wasm-opt"
+fi
+
 WASM_SIZE_BYTES="$(wc -c < "${WASM_ARTIFACT}" | tr -d '[:space:]')"
 echo "Built artifact: ${WASM_ARTIFACT}"
 echo "Contract size: ${WASM_SIZE_BYTES} bytes (limit: ${MAX_WASM_SIZE_BYTES} bytes)"
