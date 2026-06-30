@@ -1,6 +1,6 @@
 use super::*;
 use super::Error;
-use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, String};
+use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, String, IntoVal};
 
 fn string_to_bytes(env: &Env, s: &soroban_sdk::String) -> Bytes {
     let mut buf = [0u8; 128];
@@ -2153,5 +2153,28 @@ fn test_set_verification_thresholds_unauthorized_rejected() {
     // Without any auth mocked, require_auth must cause a panic.
     let env = Env::default();
     let (client, _) = setup_test(&env);
+    client.set_verification_thresholds(&10u32, &5_000_000_000i128);
+}
+}
+
+#[test]
+#[should_panic]
+fn test_set_verification_thresholds_non_admin_rejected() {
+    let env = Env::default();
+    let (client, _) = setup_test(&env);
+    let non_admin = Address::generate(&env);
+    
+    env.mock_auths(&[
+        soroban_sdk::testutils::MockAuth {
+            address: &non_admin,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "set_verification_thresholds",
+                args: soroban_sdk::vec![&env, 10u32.into_val(&env), 5_000_000_000i128.into_val(&env)],
+                sub_invokes: &[],
+            },
+        }
+    ]);
+    
     client.set_verification_thresholds(&10u32, &5_000_000_000i128);
 }
