@@ -2,6 +2,83 @@
 //!
 //! Handles user registration (onboarding), role assignments, username configuration,
 //! profile management, and verification processes for buyers and artisans on the CraftNexus platform.
+//!
+//! # Integration guide
+//!
+//! This section documents the integration surface that off-chain indexers and
+//! client interfaces depend on (Issue #453 / component #52). Three integration
+//! channels exist: the **read API** (view functions), the **event stream**, and
+//! the **cross-contract interface** shared with the escrow contract.
+//!
+//! ## Read API for indexers and clients
+//!
+//! All read functions are side-effect free with respect to *state shape* but
+//! refresh the persistent TTL of the entries they touch (via the internal
+//! `extend_persistent` helper). Repeatedly reading a profile is
+//! therefore safe and additionally keeps the entry from being archived.
+//!
+//! | Function | Returns | Notes |
+//! |----------|---------|-------|
+//! | [`OnboardingContract::get_user`] | [`UserProfile`] | Panics with [`Error::UserNotFound`] when absent. |
+//! | [`OnboardingContract::get_user_by_username`] | [`UserProfile`] | Looks up by the *normalized* username (lowercased, see `onboard_user`). |
+//! | [`OnboardingContract::is_onboarded`] | `bool` | Non-panicking existence check. |
+//! | [`OnboardingContract::is_username_taken`] | `bool` | Accepts any casing; normalizes internally. |
+//! | [`OnboardingContract::get_user_role`] | [`UserRole`] | Returns [`UserRole::None`] for unknown users. |
+//! | [`OnboardingContract::is_verified`] | `bool` | Reflects manual or auto verification. |
+//! | [`OnboardingContract::get_user_metrics`] | [`UserMetrics`] | Escrow count / volume used for auto-verification. |
+//! | [`OnboardingContract::get_user_reputation`] | `(u32, u32)` | `(successful_trades, disputed_trades)`. |
+//! | [`OnboardingContract::get_verification_history`] | `Vec<VerificationEntry>` | Compact entries decoded to human-readable actions. |
+//! | [`OnboardingContract::get_verification_queue`] | `Vec<Address>` | Pending manual-verification requests in FIFO order. |
+//! | [`OnboardingContract::get_config`] | [`OnboardingConfig`] | Global contract configuration. |
+//!
+//! ## Event stream
+//!
+//! Events are the canonical integration signal for indexers; subscribe to these
+//! topics rather than polling. Consumers should treat an event as authoritative
+//! only after it appears in a closed ledger. Each row lists the topic tuple, the
+//! data payload, and the function that emits it.
+//!
+//! | Topic tuple | Data payload | Emitted by |
+//! |-------------|--------------|------------|
+//! | `("UserOnboarded",)` | [`UserOnboardedEvent`] `{ user, username, role }` | [`OnboardingContract::onboard_user`] |
+//! | `("RoleUpdated",)` | `(user: Address, old_role: UserRole, new_role: UserRole)` | [`OnboardingContract::update_user_role`] |
+//! | `("UserVerified",)` | `user: Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
+//! | `("ProfileDeactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::deactivate_profile`] |
+//! | `("ProfileReactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::reactivate_profile`] |
+//! | `("UsernameChanged",)` | `user: Address` | [`OnboardingContract::change_username`] |
+//! | `("PortfolioUpdated",)` | `user: Address` | [`OnboardingContract::update_portfolio`] |
+//!
+//! Notes for consumers:
+//! - `ProfileDeactivated` / `ProfileReactivated` carry the user **in the topic
+//!   tuple** so indexers can filter the stream per user without decoding the
+//!   payload; the payload additionally carries the role captured at the time of
+//!   the transition so no follow-up profile read is required.
+//! - `UserVerified`, `UsernameChanged`, and `PortfolioUpdated` carry only the
+//!   address; fetch the current value via [`OnboardingContract::get_user`] when
+//!   the new field value is needed.
+//! - `UserOnboarded` is emitted exactly once per address — a second
+//!   `onboard_user` call for the same address panics with
+//!   [`Error::AlreadyOnboarded`] and emits nothing.
+//!
+//! ## Cross-contract interface
+//!
+//! Onboarding both calls and is called by the escrow contract:
+//! - **Outbound:** during [`OnboardingContract::deactivate_profile`] the contract
+//!   invokes [`EscrowInterface::has_active_escrows`] (via the generated
+//!   `EscrowClient`) to block deactivation while escrows are open.
+//! - **Inbound:** the escrow contract — the address stored in
+//!   [`OnboardingConfig::escrow_contract`] — is the only authorized caller of
+//!   [`OnboardingContract::update_reputation`],
+//!   [`OnboardingContract::update_user_metrics`], and
+//!   [`OnboardingContract::update_active_contracts`]. When `escrow_contract` is
+//!   `None`, the `platform_admin` is used as the authorized fallback.
+//!
+//! ## Profile versioning
+//!
+//! Stored profiles are versioned by [`CURRENT_USER_PROFILE_VERSION`]. Older
+//! entries (including the legacy version-less shape) are migrated transparently
+//! on first read (internal `try_get_user_profile`); integrators never observe an
+//! out-of-date shape through the read API.
 
 
 
@@ -490,8 +567,25 @@ pub enum Error {
     ActiveContractUnderflow = 15,
 }
 
+/// Cross-contract interface the onboarding contract uses to query the escrow
+/// contract.
+///
+/// The `#[contractclient]` attribute generates an `EscrowClient` that onboarding
+/// uses to call into the configured [`OnboardingConfig::escrow_contract`]. This
+/// is the only outbound cross-contract dependency of the onboarding contract.
+///
+/// Integrators implementing an escrow-compatible contract must expose a matching
+/// `has_active_escrows` entrypoint with this exact signature, otherwise
+/// [`OnboardingContract::deactivate_profile`] will fail to resolve the call.
 #[soroban_sdk::contractclient(name = "EscrowClient")]
 pub trait EscrowInterface {
+    /// Returns `true` when `user` still has at least one open/active escrow.
+    ///
+    /// Called during [`OnboardingContract::deactivate_profile`] to enforce the
+    /// "no deactivation with active escrows" rule ([`Error::ActiveEscrowsExist`]).
+    ///
+    /// # Parameters
+    /// - `user`: address whose active-escrow status is being queried.
     fn has_active_escrows(env: Env, user: Address) -> bool;
 }
 
