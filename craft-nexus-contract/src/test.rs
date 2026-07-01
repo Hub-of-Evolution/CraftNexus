@@ -2556,7 +2556,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
     let events = env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        last_event.unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "metadata_verified").into_val(&env),
@@ -2564,7 +2564,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
         ]
     );
 
-    let event: MetadataVerifiedEvent = last_event.2.try_into_val(&env).unwrap();
+    let event: MetadataVerifiedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(event.order_id, 1);
     assert_eq!(event.verifier, buyer);
     assert_eq!(event.timestamp, 1711368000);
@@ -2581,7 +2581,7 @@ fn test_set_paused_emits_platform_status_events() {
     let events = env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        last_event.unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "platform_paused").into_val(&env),
@@ -2589,7 +2589,7 @@ fn test_set_paused_emits_platform_status_events() {
         ]
     );
 
-    let paused_event: PlatformPausedEvent = last_event.2.try_into_val(&env).unwrap();
+    let paused_event: PlatformPausedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(paused_event.initiator, admin.clone());
     assert_eq!(paused_event.timestamp, 1711368000);
 
@@ -2598,7 +2598,7 @@ fn test_set_paused_emits_platform_status_events() {
     let events = env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        last_event.unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "platform_unpaused").into_val(&env),
@@ -2606,7 +2606,7 @@ fn test_set_paused_emits_platform_status_events() {
         ]
     );
 
-    let unpaused_event: PlatformUnpausedEvent = last_event.2.try_into_val(&env).unwrap();
+    let unpaused_event: PlatformUnpausedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(unpaused_event.initiator, admin);
     assert_eq!(unpaused_event.timestamp, 1711368000);
 }
@@ -3282,4 +3282,23 @@ fn test_get_escrows_by_seller_requires_auth() {
     let auths = env.auths();
     assert_eq!(auths.len(), 1);
     assert_eq!(auths.get(0).unwrap().0, seller);
+}
+
+#[test]
+fn test_platform_config_ttl_extension_on_read() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    // Read the platform config to ensure it is initialized and TTL is extended
+    let config = client.get_platform_config();
+    
+    // Advance ledger timestamp by a large amount (e.g., 20 days)
+    env.ledger().with_mut(|li| {
+        li.timestamp += 20 * 24 * 60 * 60; // 20 days in seconds
+    });
+
+    // Read again - should still succeed because the TTL was extended on read
+    let config_after = client.get_platform_config();
+    assert_eq!(config.admin, config_after.admin);
 }

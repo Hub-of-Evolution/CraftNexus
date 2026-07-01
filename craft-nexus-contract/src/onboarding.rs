@@ -92,6 +92,7 @@ use crate::alloc::string::ToString;
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
+const READ_TTL_THRESHOLD: u32 = 1_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
 const TTL_EXTENSION: u32 = 518_400;
 const CURRENT_USER_PROFILE_VERSION: u32 = 4;
@@ -1423,6 +1424,12 @@ impl OnboardingContract {
             .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
     }
 
+    fn extend_persistent_read(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
+    }
+
     /// TTL-bump variant that first checks the entry exists (Issue #82 optimization).
     ///
     /// [PERFORMANCE #82] Optimized storage layout: Validates storage entry presence before
@@ -2128,6 +2135,7 @@ impl OnboardingContract {
     /// # Returns
     /// Updated `UserProfile` with the new Moderator role assigned.
     pub fn set_moderator(env: Env, user: Address) -> UserProfile {
+        Self::extend_persistent_read(&env, &DataKey::Config);
         let config: OnboardingConfig = env
             .storage()
             .persistent()
@@ -2465,6 +2473,7 @@ impl OnboardingContract {
     /// # Errors
     /// - Panics with [`Error::NotInitialized`] if config is missing.
     pub fn get_config(env: Env) -> OnboardingConfig {
+        Self::extend_persistent_read(&env, &DataKey::Config);
         env.storage()
             .persistent()
             .get(&DataKey::Config)

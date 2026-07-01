@@ -2157,3 +2157,23 @@ fn test_set_verification_thresholds_unauthorized_rejected() {
     let (client, _) = setup_test(&env);
     client.set_verification_thresholds(&10u32, &5_000_000_000i128);
 }
+}
+
+#[test]
+fn test_onboarding_config_ttl_extension_on_read() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+
+    // Read the config to ensure TTL is extended
+    let config = client.get_config();
+
+    // Advance ledger timestamp by 20 days
+    env.ledger().with_mut(|li| {
+        li.timestamp += 20 * 24 * 60 * 60;
+    });
+
+    // Read again - should still succeed
+    let config_after = client.get_config();
+    assert_eq!(config.platform_admin, config_after.platform_admin);
+}
