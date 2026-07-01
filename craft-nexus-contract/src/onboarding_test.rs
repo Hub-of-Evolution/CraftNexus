@@ -920,6 +920,28 @@ fn test_verification_history_tracking() {
     assert!(history.len() >= 2);
 }
 
+#[test]
+fn test_verification_history_read_budget_is_bounded() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "hist_perf"), &UserRole::Artisan);
+
+    for _ in 0..MAX_VERIFICATION_HISTORY {
+        client.request_verification(&user);
+        client.process_verification_request(&user, &true);
+    }
+
+    env.budget().reset_default();
+    let history = client.get_verification_history(&user);
+
+    assert_eq!(history.len(), MAX_VERIFICATION_HISTORY);
+    assert!(env.budget().cpu_instruction_count() < 250_000);
+    assert!(env.budget().ledger_read_count() <= MAX_VERIFICATION_HISTORY as u64 + 3);
+}
+
 // ============================================================
 // Issue #100 – Reputation System (Trust Score)
 // ============================================================
