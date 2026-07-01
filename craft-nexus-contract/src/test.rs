@@ -1136,6 +1136,15 @@ fn test_unstake_rejects_different_token_than_original_stake() {
 }
 
 #[test]
+fn test_normalize_amount_to_7_decimals_preserves_7_decimal_units() {
+    let env = Env::default();
+    let (_, _, _, token_id, _, _, _) = setup_test(&env, true);
+
+    let normalized = CraftNexusContract::normalize_amount_to_7_decimals(&env, &token_id, 1_234_567);
+    assert_eq!(normalized, 1_234_567);
+}
+
+#[test]
 fn test_create_escrow_with_metadata_success_cid_v0() {
     let env = Env::default();
     env.mock_all_auths();
