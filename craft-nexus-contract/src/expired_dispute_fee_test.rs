@@ -48,13 +48,14 @@ fn setup_test() -> (
     let onboarding_contract = Address::generate(&env);
 
     // Initialize the escrow contract
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &500, // 5% platform fee
-        &Some(onboarding_contract.clone()),
-    );
+    let onboarding_contract_clone = onboarding_contract.clone();
+client.initialize(
+    &platform_wallet,
+    &admin,
+    &arbitrator,
+    &500,
+    &Some(onboarding_contract_clone),
+);
 
     (
         env,
