@@ -87,10 +87,13 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
     Symbol, IntoVal, TryFromVal, Val, Vec,
 };
+use alloc::string::ToString;
 extern crate alloc;
+use crate::alloc::string::ToString;
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
+const READ_TTL_THRESHOLD: u32 = 1_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
 const TTL_EXTENSION: u32 = 518_400;
 const CURRENT_USER_PROFILE_VERSION: u32 = 4;
@@ -1310,7 +1313,12 @@ impl OnboardingContract {
         Self::extend_persistent(env, &count_key);
     }
 
-    fn collect_username_change_fee(env: &Env, user: &Address, config: &OnboardingConfig) {
+    fn collect_username_change_fee(
+        env: &Env,
+        user: &Address,
+        config: &OnboardingConfig,
+        snapshotted_token: Option<Address>,
+    ) {
         let fee_amount: i128 = env
             .storage()
             .persistent()
@@ -1323,8 +1331,16 @@ impl OnboardingContract {
 
         Self::extend_persistent(env, &DataKey::UsernameChangeFee);
 
-        let fee_token = Self::read_username_fee_token(env)
-            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        let fee_token = match snapshotted_token {
+            Some(ref token) => {
+                let current = Self::read_username_fee_token(env)
+                    .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+                assert_eq!(current, *token, "Fee token changed mid-call");
+                current
+            }
+            None => Self::read_username_fee_token(env)
+                .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized)),
+        };
         let fee_wallet = Self::read_username_fee_wallet(env, config);
 
         let token_client = token::Client::new(env, &fee_token);
@@ -1415,6 +1431,12 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
+    }
+
+    fn extend_persistent_read(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
     }
 
     /// TTL-bump variant that first checks the entry exists (Issue #82 optimization).
@@ -2122,6 +2144,7 @@ impl OnboardingContract {
     /// # Returns
     /// Updated `UserProfile` with the new Moderator role assigned.
     pub fn set_moderator(env: Env, user: Address) -> UserProfile {
+        Self::extend_persistent_read(&env, &DataKey::Config);
         let config: OnboardingConfig = env
             .storage()
             .persistent()
@@ -2461,6 +2484,7 @@ impl OnboardingContract {
     /// # Errors
     /// - Panics with [`Error::NotInitialized`] if config is missing.
     pub fn get_config(env: Env) -> OnboardingConfig {
+        Self::extend_persistent_read(&env, &DataKey::Config);
         env.storage()
             .persistent()
             .get(&DataKey::Config)
@@ -3444,6 +3468,9 @@ impl OnboardingContract {
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
         Self::extend_persistent(&env, &DataKey::Config);
 
+        // Snapshot fee token before any state changes (CEI safety)
+        let snapshotted_fee_token = Self::read_username_fee_token(&env);
+
         // Get current user profile
         let profile_key = DataKey::UserProfile(user.clone());
         let mut profile: UserProfile = env
@@ -3546,7 +3573,7 @@ impl OnboardingContract {
             .publish((Symbol::new(&env, "UsernameChanged"),), &user);
 
         // Interaction (CEI pattern: external transfer is the last step)
-        Self::collect_username_change_fee(&env, &user, &config);
+        Self::collect_username_change_fee(&env, &user, &config, snapshotted_fee_token);
 
         profile
     }

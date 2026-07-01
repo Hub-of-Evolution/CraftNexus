@@ -66,7 +66,7 @@ client.initialize(
         admin,
         platform_wallet,
         arbitrator,
-        onboarding_contract,
+        onboarding_contract.clone(),
     )
 }
 

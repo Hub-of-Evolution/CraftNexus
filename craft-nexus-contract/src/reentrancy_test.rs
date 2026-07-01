@@ -542,3 +542,112 @@ fn test_active_obligations_updated_before_transfers() {
     assert!(!client.has_active_escrows(&buyer));
     assert!(!client.has_active_escrows(&seller));
 }
+
+/// Direct unit test of the `ReentryGuardScope` RAII guard (issue #607).
+///
+/// This exercises the fix mechanism itself rather than going through the host's
+/// transaction-rollback safety net: it asserts the guard is set while the scope
+/// is alive and is unconditionally cleared the instant the scope is dropped —
+/// the property that makes early `Err(...)` returns safe. It fails if the `Drop`
+/// implementation is ever removed or broken.
+#[test]
+fn test_reentry_guard_scope_releases_on_drop() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+
+    env.as_contract(&contract_id, || {
+        assert!(
+            !env.storage().temporary().has(&DataKey::ReentryGuard),
+            "guard should start clear"
+        );
+
+        {
+            let _guard = ReentryGuardScope::new(&env);
+            assert!(
+                env.storage().temporary().has(&DataKey::ReentryGuard),
+                "guard must be set while the scope is alive"
+            );
+        } // `_guard` dropped here
+
+        assert!(
+            !env.storage().temporary().has(&DataKey::ReentryGuard),
+            "ReentryGuardScope must clear the guard on drop"
+        );
+    });
+}
+
+/// Regression test for issue #607.
+///
+/// A guarded function that fails *mid-call* and returns `Err(...)` (rather than
+/// panicking) must still clear the reentrancy guard. Otherwise the guard stays
+/// set in temporary storage and permanently locks every other guarded entry
+/// point (a denial-of-service). The `ReentryGuardScope` RAII guard guarantees
+/// the guard is released on *every* exit path — `Ok`, `Err`, or panic.
+#[test]
+fn test_reentry_guard_cleared_after_failing_call() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.budget().reset_unlimited();
+
+    let admin = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let seller = Address::generate(&env);
+    let platform_wallet = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let onboarding_contract = Address::generate(&env);
+
+    let token = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token.address());
+
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    client.initialize(
+        &platform_wallet,
+        &admin,
+        &Address::generate(&env),
+        &500,
+        &Some(onboarding_contract),
+    );
+
+    token_client.mint(&buyer, &10000);
+
+    let order_id = 1u32;
+    client.create_escrow(
+        &buyer,
+        &seller,
+        &token.address(),
+        &5000,
+        &order_id,
+        &Some(86400),
+    );
+
+    // `refund` enters the guard, then bails out early with `Err(EscrowNotFound)`
+    // because escrow 999 does not exist. This is precisely the non-panicking
+    // early-return path that previously leaked the guard.
+    let failed = client.try_refund(&999u64);
+    assert!(
+        failed.is_err() || failed.unwrap().is_err(),
+        "refund of a non-existent escrow should fail"
+    );
+
+    // The guard must NOT remain set in temporary storage after the failure.
+    let guard_still_set: bool = env.as_contract(&contract_id, || {
+        env.storage().temporary().has(&DataKey::ReentryGuard)
+    });
+    assert!(
+        !guard_still_set,
+        "ReentryGuard leaked after a failing call — contract would be permanently locked"
+    );
+
+    // A subsequent legitimate guarded call must still succeed. If the guard had
+    // leaked, this would panic with `ReentryDetected`.
+    client.release_funds(&order_id);
+    let escrow: Escrow = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get(&(Symbol::new(&env, "ESCROW"), order_id))
+            .unwrap()
+    });
+    assert_eq!(escrow.status, EscrowStatus::Released);
+}

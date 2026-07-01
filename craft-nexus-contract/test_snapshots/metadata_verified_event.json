@@ -1,0 +1,8 @@
+{
+  "struct": "MetadataVerifiedEvent",
+  "fields": [
+    {"name": "order_id", "type": "u64"},
+    {"name": "verifier", "type": "Address"},
+    {"name": "timestamp", "type": "u64"}
+  ]
+}

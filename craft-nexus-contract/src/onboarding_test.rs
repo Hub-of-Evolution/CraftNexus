@@ -21,6 +21,7 @@ fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     (client, admin)
 }
 
+#[allow(dead_code)]
 fn to_bytes(env: &Env, s: &String) -> Bytes {
     let mut bytes = Bytes::new(env);
     let len = s.len() as usize;
@@ -808,6 +809,7 @@ fn test_process_verification_request_unauthorized() {
     // No platform-admin signature is present, so require_auth() must panic and
     // the verification state transition must never execute.
     client.process_verification_request(&user, &true);
+}
 // ============================================================
 // Issue #41 – admin_clear_verification_request authorization
 // ============================================================
@@ -1707,7 +1709,7 @@ fn test_has_active_contracts() {
     let seller = Address::generate(&env);
     let token_admin = Address::generate(&env);
     let token_id = env.register_stellar_asset_contract_v2(token_admin);
-    let token_client = token::Client::new(&env, &token_id.address());
+    let _token_client = token::Client::new(&env, &token_id.address());
     let token_asset = token::StellarAssetClient::new(&env, &token_id.address());
     token_asset.mint(&user, &10_000_000);
 
