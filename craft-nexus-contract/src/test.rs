@@ -100,7 +100,7 @@ fn test_create_escrow_success() {
     // Verify event
     let events = env.events().all();
     assert!(!events.is_empty(), "No events emitted");
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(last_event.0, client.address);
     // Topics: ["escrow_created", escrow_id]
     assert_eq!(
@@ -263,7 +263,7 @@ fn test_dispute_escrow_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -597,7 +597,7 @@ fn test_update_platform_fee() {
     assert_eq!(client.get_platform_fee(), 800);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
     assert_eq!(
         config_event.field_name,
@@ -726,7 +726,7 @@ fn test_set_artisan_fee_tier_emits_dedicated_event() {
     assert_eq!(client.get_effective_fee_bps(&seller), 750);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -1361,7 +1361,7 @@ fn test_set_min_escrow_amount_emits_config_event() {
     client.set_min_escrow_amount(&token_id, &1_00000);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
 
     assert_eq!(
@@ -1602,8 +1602,7 @@ fn test_multisig_threshold_two_of_two() {
 }
 
 #[test]
-fn test_duplicate_approval_ignored() {
-    // The same signer approving twice must not count as two approvals.
+fn test_duplicate_approval_returns_already_approved() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, _, _, _, _, _, admin) = setup_test(&env, true);
@@ -1619,12 +1618,39 @@ fn test_duplicate_approval_ignored() {
     let hash = BytesN::from_array(&env, &[5u8; 32]);
 
     client.propose_upgrade_wasm(&admin, &hash);
-    // Duplicate call from the same signer — idempotent, no panic.
-    client.propose_upgrade_wasm(&admin, &hash);
+    let result = client.try_propose_upgrade_wasm(&admin, &hash);
+    assert!(result.is_err());
+    assert!(result.is_err());
 
-    // Still only 1 unique approval.
     assert_eq!(client.get_upgrade_approvals(&hash).len(), 1);
     assert!(client.get_upgrade_proposal().is_none());
+}
+
+#[test]
+fn test_unique_signers_only_reach_threshold() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let signer2 = Address::generate(&env);
+    let signer3 = Address::generate(&env);
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer2.clone());
+    signers.push_back(signer3.clone());
+
+    client.set_upgrade_signers(&signers);
+    client.set_upgrade_threshold(&2);
+
+    let hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    client.propose_upgrade_wasm(&admin, &hash);
+    assert!(client.get_upgrade_proposal().is_none());
+
+    client.propose_upgrade_wasm(&signer2, &hash);
+    let proposal = client.get_upgrade_proposal().expect("proposal missing");
+    assert_eq!(proposal.wasm_hash, hash);
+    assert_eq!(proposal.proposed_by, signer2);
 }
 
 #[test]
@@ -1969,7 +1995,7 @@ fn test_extend_release_window_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -2554,7 +2580,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
     assert!(is_valid);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -2579,7 +2605,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&true);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -2596,7 +2622,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&false);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![

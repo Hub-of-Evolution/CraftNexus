@@ -113,6 +113,8 @@ pub enum Error {
     InvalidIpfsHash = 41,
     /// Caller is not an authorized upgrade signer
     NotAnUpgradeSigner = 42,
+    /// The same signer already approved this WASM upgrade hash
+    AlreadyApproved = 43,
 }
 
 const ESCROW: Symbol = symbol_short!("ESCROW");
@@ -3776,9 +3778,8 @@ impl CraftNexusContract {
             .get(&approvals_key)
             .unwrap_or_else(|| Vec::new(&env));
 
-        // Idempotent: ignore duplicate approvals from the same signer.
         if approvals.iter().any(|a| a == signer) {
-            return Ok(());
+            return Err(Error::AlreadyApproved);
         }
         approvals.push_back(signer.clone());
 

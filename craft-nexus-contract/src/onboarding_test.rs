@@ -808,6 +808,8 @@ fn test_process_verification_request_unauthorized() {
     // No platform-admin signature is present, so require_auth() must panic and
     // the verification state transition must never execute.
     client.process_verification_request(&user, &true);
+}
+
 // ============================================================
 // Issue #41 – admin_clear_verification_request authorization
 // ============================================================
@@ -1245,7 +1247,8 @@ fn test_change_username_with_special_characters() {
     assert_eq!(
         updated.username,
         Symbol::new(&env, "new_user_name_123")
-    );}
+    );
+}
 
 #[test]
 fn test_change_username_preserves_other_fields() {

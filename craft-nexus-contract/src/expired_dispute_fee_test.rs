@@ -82,7 +82,7 @@ fn create_and_dispute_escrow(
     client.dispute_escrow(
         &order_id,
         &soroban_sdk::Symbol::new(&client.env, "Test_dispute"),
-        buyer,
+        &buyer,
     );
 }
 
