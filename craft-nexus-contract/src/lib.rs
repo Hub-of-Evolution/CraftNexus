@@ -3682,11 +3682,10 @@ impl CraftNexusContract {
         );
     }
 
-    /// Extend the release window for an escrow (only buyer can call)
-    ///
-    /// # Arguments
-    /// * `order_id` - Order identifier
-    /// * `additional_seconds` - Time in seconds to add to the release window
+   /// Extends the existing release window by `additional_seconds`.
+///
+/// The resulting cumulative release window must never exceed
+/// `MAX_TOTAL_RELEASE_WINDOW`.
     pub fn extend_release_window(env: Env, order_id: u32, additional_seconds: u32) {
         Self::enter_reentry_guard(&env);
         let escrow_key = (ESCROW, order_id);
