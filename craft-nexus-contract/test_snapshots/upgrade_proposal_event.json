@@ -1,0 +1,10 @@
+{
+  "struct": "UpgradeProposalEvent",
+  "fields": [
+    {"name": "action", "type": "Symbol"},
+    {"name": "wasm_hash", "type": "BytesN<32>"},
+    {"name": "admin", "type": "Address"},
+    {"name": "timestamp", "type": "u64"},
+    {"name": "upgrade_at", "type": "u64"}
+  ]
+}

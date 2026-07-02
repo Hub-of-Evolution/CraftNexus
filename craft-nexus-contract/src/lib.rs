@@ -19,16 +19,32 @@ mod reentrancy_test;
 mod scalability_test;
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod event_snapshot_test;
 // Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
 // artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
 #[cfg(not(target_family = "wasm"))]
 pub mod onboarding;
 
+/// Error codes grouped by category for off-chain triage.
+///
+/// # Categories
+///
+/// | Range   | Category     | Meaning                                         | Triage                    |
+/// |---------|-------------|-------------------------------------------------|---------------------------|
+/// | 1–9     | Auth/Access | Authorization, ownership, or existence failures | Rollback immediately      |
+/// | 10–19   | State       | Invalid state transitions or preconditions      | Retry after state change  |
+/// | 20–29   | Config      | Operator-configurable limits or misconfig       | Operator must act         |
+/// | 30–39   | Operational | System or cooldown gates                        | Retry after cooldown      |
+/// | 40–42   | Validation  | Input validation failures                       | Fix caller input          |
+///
+/// Use [`is_retryable`] to determine whether an error may succeed on retry.
 #[contracterror]
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 #[repr(u32)]
 pub enum Error {
+    // ── Auth / Access (1–9): rollback immediately ──
     /// Unauthorized operation
     Unauthorized = 1,
     /// Escrow not found
@@ -47,6 +63,7 @@ pub enum Error {
     NotInDispute = 8,
     /// DEPRECATED: Handled by onboarding contract. Retained for ABI compatibility.
     AlreadyOnboarded = 9,
+    // ── State / Transition (10–19): retry after state change ──
     /// Invalid fee amount (must be <= MAX_PLATFORM_FEE_BPS)
     InvalidFee = 10,
     /// Buyer and seller cannot be the same
@@ -67,6 +84,7 @@ pub enum Error {
     StakeCooldownActive = 18,
     /// Refund amount is invalid (zero, negative, or exceeds escrow amount)
     InvalidRefundAmount = 19,
+    // ── Config / Resource (20–29): operator must act ──
     /// Partial refund proposal not found
     ProposalNotFound = 20,
     /// Partial refund proposal already exists for this order
@@ -87,6 +105,7 @@ pub enum Error {
     AdminRecoveryFailed = 28,
     /// Batch operation limit exceeded
     BatchLimitExceeded = 29,
+    // ── Operational / Gates (30–39): retry after cooldown ──
     /// Deprecated function called (no-op for ABI compatibility)
     DeprecatedFunction = 30,
     /// No pending admin transfer to accept or cancel
@@ -107,6 +126,7 @@ pub enum Error {
     RecurringEscrowIdExhausted = 38,
     /// Onboarding contract address has not been configured
     OnboardingContractNotSet = 39,
+    // ── Validation (40+): fix caller input ──
     /// Provided metadata hash is invalid
     InvalidMetadataHash = 40,
     /// Provided IPFS hash is invalid
@@ -115,9 +135,74 @@ pub enum Error {
     NotAnUpgradeSigner = 42,
 }
 
+/// Returns `true` if the error is transient and the operation may succeed on retry.
+///
+/// Retryable errors are those that depend on time, state change, or operator
+/// action that is expected to resolve. Non-retryable errors (auth, not-found,
+/// validation, permanent config) will **never** succeed on retry without
+/// a different input or caller.
+#[must_use]
+pub fn is_retryable(error: Error) -> bool {
+    matches!(
+        error,
+        Error::InvalidEscrowState
+            | Error::ReleaseWindowNotElapsed
+            | Error::ContractPaused
+            | Error::DisputeExpired
+            | Error::StakeCooldownActive
+            | Error::ReentryDetected
+            | Error::StakeQueueFull
+            | Error::UpgradeCooldownActive
+            | Error::CycleNotReady
+            | Error::BatchLimitExceeded
+    )
+}
+
 const ESCROW: Symbol = symbol_short!("ESCROW");
 const PLATFORM_FEE: Symbol = symbol_short!("PLAT_FEE");
 const PLATFORM_WALLET: Symbol = symbol_short!("PLAT_WAL");
+
+const BASE58_BTC_CHARSET: [bool; 256] = {
+    let mut chars = [false; 256];
+
+    let mut i = b'1' as usize;
+    while i <= b'9' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'A' as usize;
+    while i <= b'H' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'J' as usize;
+    while i <= b'N' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'P' as usize;
+    while i <= b'Z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'a' as usize;
+    while i <= b'k' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'm' as usize;
+    while i <= b'z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    chars
+};
 const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
 const ADMIN: Symbol = symbol_short!("ADMIN");
 
@@ -182,6 +267,9 @@ const MAX_STAKE_QUEUE_SIZE: u32 = 50;
 const STAKE_QUEUE_PRUNE_THRESHOLD: u32 = 40;
 /// Time lock period before admin recovery is allowed (7 days) (#240)
 const ADMIN_RECOVERY_DELAY: u64 = 7 * 24 * 60 * 60;
+/// Minimum allowed admin recovery cooldown. Deploys attempting to set a
+/// shorter window (including zero) will be rejected during recovery.
+const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
@@ -272,6 +360,9 @@ pub enum DataKey {
     /// Timestamp when admin recovery mechanism becomes available (time-lock safety).
     /// Stored as a compact `u64` ledger timestamp (#431 / key index #30).
     AdminRecoveryTime,
+    /// The configured delay (seconds) that was recorded when the recovery time
+    /// was initiated. Used to validate that a minimum cooldown was respected.
+    AdminRecoveryDelay,
     /// Historical record of stake changes per artisan (bounded queue for audit trail) (#237)
     StakeHistory(Address),
     /// Count of entries in the stake history queue (bounds checking)
@@ -1078,12 +1169,10 @@ pub type EscrowContractClient<'a> = CraftNexusContractClient<'a>;
 /// Guard to ensure reentry protection is cleared even if a panic or error occurs.
 /// This is essential to prevent contract locks from persisting across failed calls.
 /// Automatically removes the guard when dropped, ensuring cleanup in all control flows.
-#[allow(dead_code)]
 struct ReentryGuardScope<'a> {
     env: &'a Env,
 }
 
-#[allow(dead_code)]
 impl<'a> ReentryGuardScope<'a> {
     fn new(env: &'a Env) -> Self {
         CraftNexusContract::enter_reentry_guard(env);
@@ -1116,34 +1205,10 @@ impl CraftNexusContract {
         cid.copy_into_slice(&mut buf[0..len]);
         let cid_bytes = &buf[0..len];
 
-        // CIDv0: exactly 46 chars, starts with "Qm", Base58btc alphabet.
-        //
-        // Issue #521 — the Base58btc alphabet explicitly EXCLUDES
-        // visually-confusable characters: `0` (zero), `O` (capital o),
-        // `I` (capital i), and `l` (lowercase L). The ranges below are
-        // the canonical Base58btc set:
-        //   1..=9               (no leading 0)
-        //   A..=H, J..=N, P..=Z (no I, no O)
-        //   a..=k, m..=z        (no l)
-        // A CIDv0 hash is always 32 bytes of multihash digest →
-        // 46 Base58btc characters. Off-chain indexers that need to
-        // resolve a CIDv0 reference should pin it via an IPFS gateway
-        // such as `https://ipfs.io/ipfs/<CID>` or by talking to a
-        // dedicated cluster (Pinata, web3.storage).
         let is_v0 = len == 46
             && cid_bytes[0] == b'Q'
             && cid_bytes[1] == b'm'
-            && cid_bytes.iter().all(|b| {
-                matches!(
-                    *b,
-                    b'1'..=b'9'
-                        | b'A'..=b'H'
-                        | b'J'..=b'N'
-                        | b'P'..=b'Z'
-                        | b'a'..=b'k'
-                        | b'm'..=b'z'
-                )
-            });
+            && cid_bytes.iter().all(|b| Self::is_base58_btc_char(*b));
 
         if is_v0 {
             return true;
@@ -1160,12 +1225,7 @@ impl CraftNexusContract {
         match prefix {
             // base32lower (most common CIDv1 encoding)
             b'b' => {
-                // Stricter length check for typical CIDv1 base32 (sha256/dag-pb is 59 chars)
-                if len < 50 || len > 100 {
-                    return false;
-                }
-                // Logic check: CIDv1 base32 ALWAYS starts with 'ba'
-                if cid_bytes[1] != b'a' {
+                if len < 50 || len > 100 || cid_bytes[1] != b'a' {
                     return false;
                 }
                 payload
@@ -1174,12 +1234,7 @@ impl CraftNexusContract {
             }
             // base16lower (hex)
             b'f' => {
-                // CIDv1 base16 typically ~73 chars
-                if len < 60 || len > 120 {
-                    return false;
-                }
-                // Logic check: CIDv1 base16 ALWAYS starts with 'f01'
-                if cid_bytes[1] != b'0' || cid_bytes[2] != b'1' {
+                if len < 60 || len > 120 || cid_bytes[1] != b'0' || cid_bytes[2] != b'1' {
                     return false;
                 }
                 payload
@@ -1188,24 +1243,17 @@ impl CraftNexusContract {
             }
             // base58btc
             b'z' => {
-                // CIDv1 base58 typically ~50 chars
                 if len < 40 || len > 100 {
                     return false;
                 }
-                payload.iter().all(|b| {
-                    matches!(
-                        *b,
-                        b'1'..=b'9'
-                            | b'A'..=b'H'
-                            | b'J'..=b'N'
-                            | b'P'..=b'Z'
-                            | b'a'..=b'k'
-                            | b'm'..=b'z'
-                    )
-                })
+                payload.iter().all(|b| Self::is_base58_btc_char(*b))
             }
             _ => false,
         }
+    }
+
+    fn is_base58_btc_char(byte: u8) -> bool {
+        BASE58_BTC_CHARSET[byte as usize]
     }
 
     /// Validate an optional IPFS CID string, panicking with `InvalidIpfsHash` if present but invalid.
@@ -2344,13 +2392,17 @@ impl CraftNexusContract {
             env.panic_with_error(Error::InvalidAdminAddress);
         }
 
-        let _previous_admin = config.admin.clone();
-        config.admin = pending.clone();
+        let previous_admin = config.admin.clone();
+        let new_admin = pending.clone();
+        config.admin = new_admin.clone();
         config.pending_admin = None;
 
         env.storage()
             .instance()
             .set(&DataKey::PlatformConfig, &config);
+
+        // Emit audit event for the completed two-step admin transfer (#631)
+        Self::emit_admin_changed(&env, previous_admin, new_admin, "admin_claimed");
     }
 
     /// Cancel an in-progress two-step admin transfer (current admin only).
@@ -2460,7 +2512,9 @@ impl CraftNexusContract {
 
         let current_time = env.ledger().timestamp();
 
-        // If this is the first recovery request, initiate time lock
+        // If this is the first recovery request, initiate time lock and record
+        // the delay used so that malicious direct writes to `AdminRecoveryTime`
+        // cannot bypass the minimum cooldown requirement.
         if recovery_time == 0 {
             let new_recovery_time = current_time + ADMIN_RECOVERY_DELAY;
             let recovery_time_key = DataKey::AdminRecoveryTime;
@@ -2468,6 +2522,14 @@ impl CraftNexusContract {
                 .persistent()
                 .set(&recovery_time_key, &new_recovery_time);
             Self::extend_persistent(&env, &recovery_time_key);
+
+            // Record the delay used for this initiation so it can be validated
+            // later when recovery is attempted.
+            let delay_key = DataKey::AdminRecoveryDelay;
+            env.storage()
+                .persistent()
+                .set(&delay_key, &ADMIN_RECOVERY_DELAY);
+            Self::extend_persistent(&env, &delay_key);
 
             env.events().publish(
                 (Symbol::new(&env, "admin_recovery_initiated"), true),
@@ -2478,6 +2540,14 @@ impl CraftNexusContract {
 
         // Check if time lock period has elapsed
         if current_time < recovery_time {
+            return Err(Error::AdminRecoveryFailed);
+        }
+
+        // Ensure the recorded cooldown meets the minimum floor. If the delay
+        // is missing or below the minimum, treat this as a failed recovery
+        // attempt to prevent direct-storage bypasses.
+        let recorded_delay = Self::get_persistent_u64(&env, &DataKey::AdminRecoveryDelay);
+        if recorded_delay == 0 || recorded_delay < MIN_ADMIN_RECOVERY_COOLDOWN {
             return Err(Error::AdminRecoveryFailed);
         }
 
@@ -2499,6 +2569,10 @@ impl CraftNexusContract {
         env.storage()
             .persistent()
             .remove(&DataKey::AdminRecoveryTime);
+        // Clear the recorded delay as well
+        env.storage()
+            .persistent()
+            .remove(&DataKey::AdminRecoveryDelay);
 
         // Emit audit event
         Self::emit_admin_changed(&env, previous_admin, recovered_admin, "admin_recovered");
@@ -2549,7 +2623,7 @@ impl CraftNexusContract {
         ipfs_hash: Option<String>,
         metadata_hash: Option<Bytes>,
     ) -> Escrow {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         Self::check_not_paused(&env);
         buyer.require_auth();
 
@@ -2690,7 +2764,6 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
         escrow
     }
 
@@ -2707,7 +2780,7 @@ impl CraftNexusContract {
         ipfs_hash: Option<String>,
         metadata_hash: Option<Bytes>,
     ) -> Escrow {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
 
         // Validate release window bounds
         let config = Self::get_platform_config_internal(&env);
@@ -2805,11 +2878,10 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
         escrow
     }
     pub fn fund_escrow(env: Env, order_id: u32) -> Result<(), Error> {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let mut escrow = Self::get_stored_escrow(&env, order_id);
         if escrow.funded {
             return Err(Error::InvalidEscrowState);
@@ -2844,13 +2916,12 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
         Ok(())
     }
 
     /// Cancel an escrow that has not been funded within the timeout period (#213).
     pub fn cancel_unfunded_escrow(env: Env, order_id: u32) -> Result<(), Error> {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let escrow = Self::get_stored_escrow(&env, order_id);
         if escrow.funded {
             return Err(Error::InvalidEscrowState);
@@ -2871,7 +2942,6 @@ impl CraftNexusContract {
         Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
         Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
 
-        Self::exit_reentry_guard(&env);
         Ok(())
     }
 
@@ -3027,6 +3097,7 @@ impl CraftNexusContract {
     }
 
     fn get_platform_config_internal(env: &Env) -> PlatformConfig {
+        Self::extend_persistent_read(env, &DataKey::PlatformConfig);
         env.storage()
             .instance()
             .extend_ttl(TTL_THRESHOLD, TTL_EXTENSION);
@@ -3449,7 +3520,7 @@ impl CraftNexusContract {
     /// # Arguments
     /// * `order_id` - Order identifier
     pub fn release_funds(env: Env, order_id: u32) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
         if escrow_opt.is_none() {
             env.panic_with_error(crate::Error::EscrowNotFound);
@@ -3511,7 +3582,6 @@ impl CraftNexusContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-        Self::exit_reentry_guard(&env);
 
         // Emit reputation update events — decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
@@ -3546,7 +3616,7 @@ impl CraftNexusContract {
     /// # Arguments
     /// * `order_id` - Order identifier
     pub fn auto_release(env: Env, order_id: u32) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let escrow_opt = env.storage().persistent().get(&(ESCROW, order_id));
         if escrow_opt.is_none() {
             env.panic_with_error(crate::Error::EscrowNotFound);
@@ -3609,7 +3679,6 @@ impl CraftNexusContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-        Self::exit_reentry_guard(&env);
 
         // Emit reputation update events — decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
@@ -3645,7 +3714,7 @@ impl CraftNexusContract {
     /// * `order_id` - Order identifier
     /// * `additional_seconds` - Time in seconds to add to the release window
     pub fn extend_release_window(env: Env, order_id: u32, additional_seconds: u32) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let escrow_key = (ESCROW, order_id);
         let escrow_opt = env.storage().persistent().get(&escrow_key);
 
@@ -3685,7 +3754,6 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
     }
 
     /// Reject obviously invalid WASM hashes before they touch storage.
@@ -4040,7 +4108,7 @@ impl CraftNexusContract {
     /// # Arguments
     /// * `escrow_id` - Escrow/Order identifier
     pub fn refund(env: Env, escrow_id: u64) -> Result<(), Error> {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
@@ -4090,7 +4158,6 @@ impl CraftNexusContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-        Self::exit_reentry_guard(&env);
 
         // Emit reputation update events — decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
@@ -4329,7 +4396,7 @@ impl CraftNexusContract {
         resolution: Resolution,
         authorized_address: Address,
     ) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let config = Self::get_platform_config_internal(&env);
         authorized_address.require_auth();
         let is_authorized = authorized_address == config.admin
@@ -4394,7 +4461,6 @@ impl CraftNexusContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-        Self::exit_reentry_guard(&env);
 
         // Emit reputation update events — decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
@@ -4837,7 +4903,7 @@ impl CraftNexusContract {
         batch_id: u64,
         escrows: soroban_sdk::Vec<EscrowCreateParams>,
     ) -> Result<soroban_sdk::Vec<u64>, Error> {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         Self::check_not_paused(&env);
 
         // Issue #111: Enforce batch size limit
@@ -4849,7 +4915,6 @@ impl CraftNexusContract {
 
         // Early exit for empty batch
         if escrows.is_empty() {
-            Self::exit_reentry_guard(&env);
             return Ok(results);
         }
 
@@ -4931,7 +4996,6 @@ impl CraftNexusContract {
                         results.push_back(id);
                     }
                     Err(e) => {
-                        Self::exit_reentry_guard(&env);
                         return Err(e);
                     }
                 }
@@ -4982,7 +5046,6 @@ impl CraftNexusContract {
             Self::update_escrow_indices_batch_atomic(&env, &order_ids);
         }
 
-        Self::exit_reentry_guard(&env);
         Ok(results)
     }
 
@@ -5000,7 +5063,7 @@ impl CraftNexusContract {
         order_ids: soroban_sdk::Vec<u32>,
         authorized_address: Address,
     ) -> Result<soroban_sdk::Vec<u64>, Error> {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         authorized_address.require_auth();
 
         let mut results = soroban_sdk::Vec::new(&env);
@@ -5093,7 +5156,6 @@ impl CraftNexusContract {
             }
         }
 
-        Self::exit_reentry_guard(&env);
         Ok(results)
     }
 
@@ -5996,7 +6058,7 @@ impl CraftNexusContract {
         frequency: u64,
         duration: u32,
     ) -> RecurringEscrow {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         Self::check_not_paused(&env);
         buyer.require_auth();
 
@@ -6075,13 +6137,12 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
         escrow
     }
 
     /// Release funds for the next cycle in a recurring escrow.
     pub fn release_next_cycle(env: Env, id: u64) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let key = DataKey::RecurringEscrow(id);
         let mut escrow: RecurringEscrow = env
             .storage()
@@ -6190,12 +6251,11 @@ impl CraftNexusContract {
             );
         }
 
-        Self::exit_reentry_guard(&env);
     }
 
     /// Cancel a recurring escrow and refund remaining funds to the buyer.
     pub fn cancel_recurring_escrow(env: Env, id: u64) {
-        Self::enter_reentry_guard(&env);
+        let _guard = ReentryGuardScope::new(&env);
         let key = DataKey::RecurringEscrow(id);
         let mut escrow: RecurringEscrow = env
             .storage()
@@ -6243,7 +6303,6 @@ impl CraftNexusContract {
             },
         );
 
-        Self::exit_reentry_guard(&env);
     }
 
     /// Get details of a recurring escrow.
