@@ -1166,7 +1166,7 @@ pub trait OnboardingInterface {
 pub struct CraftNexusContract;
 
 /// Alias and compatibility layers
-pub type EscrowContract = CraftNexusContract;
+pub const ESCROW_CONTRACT: CraftNexusContract = CraftNexusContract;
 
 pub type EscrowContractClient<'a> = CraftNexusContractClient<'a>;
 

@@ -226,7 +226,7 @@ pub enum UserRole {
 ///
 /// A deactivated profile releases the username back to the pool so another
 /// user may claim it. Deactivation is blocked while the user has active
-/// escrows (checked via cross-contract call to the registered EscrowContract).
+/// escrows (checked via cross-contract call to the registered ESCROW_CONTRACT).
 #[contracttype]
 #[derive(Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -567,7 +567,7 @@ pub struct OnboardingConfig {
     pub min_escrow_count_for_verify: u32,
     /// Minimum total volume (7-decimal normalized) for auto-verification (default: 10_000_000_000) (#63)
     pub min_volume_for_verify: i128,
-    /// Address of the EscrowContract authorized to call `update_reputation` / `update_user_metrics`.
+    /// Address of the ESCROW_CONTRACT authorized to call `update_reputation` / `update_user_metrics`.
     /// If `None`, the `platform_admin` is used as fallback caller. (#63, #100)
     pub escrow_contract: Option<Address>,
 }
@@ -2573,7 +2573,7 @@ impl OnboardingContract {
     // Issue #63 – Artisan Verification Logic Enhancement
     // -----------------------------------------------------------------------
 
-    /// Register the address of the deployed EscrowContract so it can update
+    /// Register the address of the deployed ESCROW_CONTRACT so it can update
     /// reputation and activity metrics via cross-contract calls (admin only).
     ///
     /// # Security — issue #498
@@ -3320,7 +3320,7 @@ impl OnboardingContract {
 
     /// Update a user's reputation counters.
     ///
-    /// Called by the EscrowContract after a state change (release / refund /
+    /// Called by the ESCROW_CONTRACT after a state change (release / refund /
     /// resolve). Increments `successful_trades` and/or `disputed_trades` on
     /// the user's profile using saturating addition to prevent overflow.
     /// Silently skips users who are not onboarded (no panic).
