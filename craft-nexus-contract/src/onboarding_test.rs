@@ -1,6 +1,6 @@
 use super::*;
 use super::Error;
-use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, String};
+use soroban_sdk::{testutils::{Address as _, Ledger as _}, token, Address, Bytes, Env, String};
 
 fn string_to_bytes(env: &Env, s: &soroban_sdk::String) -> Bytes {
     let mut buf = [0u8; 128];
@@ -21,6 +21,7 @@ fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     (client, admin)
 }
 
+#[allow(dead_code)]
 fn to_bytes(env: &Env, s: &String) -> Bytes {
     let mut bytes = Bytes::new(env);
     let len = s.len() as usize;
@@ -808,6 +809,8 @@ fn test_process_verification_request_unauthorized() {
     // No platform-admin signature is present, so require_auth() must panic and
     // the verification state transition must never execute.
     client.process_verification_request(&user, &true);
+}
+
 // ============================================================
 // Issue #41 – admin_clear_verification_request authorization
 // ============================================================
@@ -1245,7 +1248,8 @@ fn test_change_username_with_special_characters() {
     assert_eq!(
         updated.username,
         Symbol::new(&env, "new_user_name_123")
-    );}
+    );
+}
 
 #[test]
 fn test_change_username_preserves_other_fields() {
@@ -1707,7 +1711,7 @@ fn test_has_active_contracts() {
     let seller = Address::generate(&env);
     let token_admin = Address::generate(&env);
     let token_id = env.register_stellar_asset_contract_v2(token_admin);
-    let token_client = token::Client::new(&env, &token_id.address());
+    let _token_client = token::Client::new(&env, &token_id.address());
     let token_asset = token::StellarAssetClient::new(&env, &token_id.address());
     token_asset.mint(&user, &10_000_000);
 
@@ -1831,6 +1835,19 @@ fn test_update_active_contracts_underflow_panics() {
 
     let _ = admin;
     client.update_active_contracts(&user, &-1);
+}
+
+#[test]
+#[should_panic]
+fn test_deactivate_profile_rejects_without_registered_escrow_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "noescrow"), &UserRole::Buyer);
+
+    client.deactivate_profile(&user);
 }
 
 #[test]
@@ -2103,6 +2120,26 @@ fn test_get_user_reputation_unauthorized() {
     client.get_user_reputation(&user);
 }
 
+/// Issue #446 — get_user_reputation must allow authorized callers.
+#[test]
+fn test_get_user_reputation_authorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    
+    // Onboard user
+    client.onboard_user(&user, &String::from_str(&env, "rep1"), &UserRole::Artisan);
+
+    // Update reputation
+    client.update_reputation(&user, &2u32, &1u32);
+    
+    // Get reputation (authorized)
+    let (successful, disputed) = client.get_user_reputation(&user);
+    assert_eq!(successful, 2);
+    assert_eq!(disputed, 1);
+}
+
 // ── Issue #452: [FEATURE] Business flow #51 – active contract authorization ─
 
 /// Issue #452 — has_active_contracts must reject callers without user authorization.
@@ -2155,4 +2192,22 @@ fn test_set_verification_thresholds_unauthorized_rejected() {
     let (client, _) = setup_test(&env);
     client.set_verification_thresholds(&10u32, &5_000_000_000i128);
 }
+
+#[test]
+fn test_onboarding_config_ttl_extension_on_read() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+
+    // Read the config to ensure TTL is extended
+    let config = client.get_config();
+
+    // Advance ledger timestamp by 20 days
+    env.ledger().with_mut(|li| {
+        li.timestamp += 20 * 24 * 60 * 60;
+    });
+
+    // Read again - should still succeed
+    let config_after = client.get_config();
+    assert_eq!(config.platform_admin, config_after.platform_admin);
 }

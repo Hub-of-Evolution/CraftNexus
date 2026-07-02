@@ -275,7 +275,7 @@ fn test_batch_create_with_indexed_storage() {
     let mut order_ids = soroban_sdk::Vec::new(&env);
     for i in 0..10 {
         let order_id = i + 1;
-        let escrow = client.create_escrow(&buyer, &seller, &token, &1000, &order_id, &Some(604800));
+        let _escrow = client.create_escrow(&buyer, &seller, &token, &1000, &order_id, &Some(604800));
         order_ids.push_back(order_id);
     }
     assert_eq!(order_ids.len(), 10);
@@ -389,11 +389,11 @@ fn test_whitelisted_tokens_individual_storage() {
 
 #[test]
 fn test_whitelisted_tokens_scalability() {
-    let (env, client, _, _, _, admin, _, _) = setup_test();
+    let (env, client, _, _, _, _admin, _, _) = setup_test();
 
     // Create many tokens to test scalability
     let mut tokens = soroban_sdk::Vec::new(&env);
-    for i in 0..100 {
+    for _i in 0..100 {
         let token = Address::generate(&env);
         tokens.push_back(token.clone());
         client.whitelist_token(&token);
@@ -526,7 +526,7 @@ fn test_artisan_stake_queue_pruning() {
     token_asset.mint(&artisan, &100_000_000);
 
     // Add deposits up to the pruning threshold
-    for i in 1..=STAKE_QUEUE_PRUNE_THRESHOLD {
+    for _i in 1..=STAKE_QUEUE_PRUNE_THRESHOLD {
         client.stake_tokens(&artisan, &token, &1000);
     }
 

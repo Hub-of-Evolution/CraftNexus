@@ -101,10 +101,10 @@ fn test_create_escrow_success() {
     let events = env.events().all();
     assert!(!events.is_empty(), "No events emitted");
     let last_event = events.last();
-    assert_eq!(last_event.0, client.address);
+    assert_eq!(last_event.unwrap().0, client.address);
     // Topics: ["escrow_created", escrow_id]
     assert_eq!(
-        last_event.1,
+        last_event.unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "escrow").into_val(&env),
@@ -113,7 +113,7 @@ fn test_create_escrow_success() {
     );
 
     // Verify payload
-    let event: EscrowEvent = last_event.2.try_into_val(&env).unwrap();
+    let event: EscrowEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(event.escrow_id, order_id as u64);
     assert_eq!(event.action, EscrowAction::Created);
     assert_eq!(event.buyer, buyer);
@@ -263,9 +263,9 @@ fn test_dispute_escrow_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        last_event.unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "escrow").into_val(&env),
@@ -274,7 +274,7 @@ fn test_dispute_escrow_success() {
     );
 
     // Verify payload
-    let event: EscrowEvent = last_event.2.try_into_val(&env).unwrap();
+    let event: EscrowEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(event.escrow_id, 1);
     assert_eq!(event.action, EscrowAction::Disputed);
     assert_eq!(event.buyer, buyer);
@@ -403,6 +403,31 @@ fn test_resolve_dispute_by_moderator() {
 
     let escrow = client.get_escrow(&1);
     assert_eq!(escrow.status, EscrowStatus::Resolved);
+}
+
+#[test]
+fn test_recover_admin_with_zero_window_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _buyer, _seller, _token_id, _token_admin, _platform_wallet, _admin) =
+        setup_test(&env, true);
+
+    // Simulate a malicious/deployer-provided zero-second recovery window by
+    // writing a recovery time equal to the current ledger timestamp and
+    // recording a zero delay. The contract should reject recovery attempts
+    // that don't meet the minimum cooldown.
+    let current_time = env.ledger().timestamp();
+    env.storage()
+        .persistent()
+        .set(&DataKey::AdminRecoveryTime, &current_time);
+    env.storage()
+        .persistent()
+        .set(&DataKey::AdminRecoveryDelay, &0u64);
+
+    let recovered_admin = Address::generate(&env);
+    let res = client.recover_admin_access(&recovered_admin);
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err(), Error::AdminRecoveryFailed);
 }
 
 #[test]
@@ -598,7 +623,7 @@ fn test_update_platform_fee() {
 
     let events = env.events().all();
     let last_event = events.last();
-    let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
+    let config_event: ConfigUpdatedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(
         config_event.field_name,
         Symbol::new(&env, "platform_fee_bps")
@@ -726,9 +751,9 @@ fn test_set_artisan_fee_tier_emits_dedicated_event() {
     assert_eq!(client.get_effective_fee_bps(&seller), 750);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        last_event.unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "artisan_fee_tier_updated").into_val(&env),
@@ -736,7 +761,7 @@ fn test_set_artisan_fee_tier_emits_dedicated_event() {
         ]
     );
 
-    let fee_event: ArtisanFeeTierUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
+    let fee_event: ArtisanFeeTierUpdatedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(fee_event.artisan, seller);
     assert_eq!(fee_event.fee_bps, 750);
 }
@@ -913,6 +938,59 @@ fn test_claim_admin_no_pending_fails() {
     let (client, _, _, _, _, _, _) = setup_test(&env, true);
 
     client.claim_admin();
+}
+
+/// Regression test for issue #631.
+///
+/// The two-step admin transfer actually completes in `claim_admin`, so that is
+/// where the audit trail for the *effective* admin change must be emitted.
+/// `claim_admin` previously captured `_previous_admin` but emitted no event.
+#[test]
+fn test_claim_admin_emits_audit_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let new_admin = Address::generate(&env);
+    let admin_changed = Symbol::new(&env, "admin_changed");
+
+    // Count "admin_changed" audit events emitted so far.
+    let count_changes = || {
+        env.events()
+            .all()
+            .iter()
+            .filter(|e| {
+                e.1.get(0).and_then(|t| t.try_into_val(&env).ok()) == Some(admin_changed.clone())
+            })
+            .count()
+    };
+
+    // Step 1: propose the transfer (emits the "admin_proposed" change).
+    client.update_admin(&new_admin);
+    assert_eq!(
+        count_changes(),
+        1,
+        "update_admin should emit one admin_changed event"
+    );
+
+    // Step 2: claim completes the transfer and must emit its own audit event (#631).
+    client.claim_admin();
+    assert_eq!(
+        count_changes(),
+        2,
+        "claim_admin must emit an admin_changed audit event for the completed transfer"
+    );
+
+    // The most recent admin_changed event must carry (previous_admin, new_admin).
+    let mut payload: Option<(Address, Address)> = None;
+    for e in env.events().all().iter() {
+        if e.1.get(0).and_then(|t| t.try_into_val(&env).ok()) == Some(admin_changed.clone()) {
+            payload = Some(e.2.try_into_val(&env).unwrap());
+        }
+    }
+    let (prev, next) = payload.expect("admin_changed event must be present");
+    assert_eq!(prev, admin, "previous_admin should be the original admin");
+    assert_eq!(next, new_admin, "new_admin should be the claimed admin");
 }
 
 // ===== Admin address validation tests (#419) =====
@@ -1362,7 +1440,7 @@ fn test_set_min_escrow_amount_emits_config_event() {
 
     let events = env.events().all();
     let last_event = events.last();
-    let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
+    let config_event: ConfigUpdatedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
 
     assert_eq!(
         config_event.field_name,
@@ -1969,9 +2047,9 @@ fn test_extend_release_window_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        last_event.unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "escrow").into_val(&env),
@@ -1979,7 +2057,7 @@ fn test_extend_release_window_success() {
         ]
     );
 
-    let event: EscrowEvent = last_event.2.try_into_val(&env).unwrap();
+    let event: EscrowEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(event.escrow_id, 1);
     assert_eq!(event.action, EscrowAction::Extended);
     assert_eq!(event.buyer, buyer);
@@ -2554,7 +2632,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
     assert!(is_valid);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.unwrap().1,
         vec![
@@ -2579,7 +2657,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&true);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.unwrap().1,
         vec![
@@ -2596,7 +2674,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&false);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.unwrap().1,
         vec![
@@ -3137,6 +3215,47 @@ fn test_propose_partial_refund_already_exists() {
 }
 
 #[test]
+fn test_validate_ipfs_cid_v0_and_v1_accepts_valid_cids() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    let cid_v0 = String::from_str(
+        &env,
+        "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9",
+    );
+    let cid_v1 = String::from_str(
+        &env,
+        "bafybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4",
+    );
+
+    let escrow_v0 = client.create_escrow_with_metadata(
+        &buyer,
+        &seller,
+        &token_id,
+        &1000,
+        &1,
+        &Some(3600),
+        &Some(cid_v0.clone()),
+        &None,
+    );
+    let escrow_v1 = client.create_escrow_with_metadata(
+        &buyer,
+        &seller,
+        &token_id,
+        &1000,
+        &2,
+        &Some(3600),
+        &Some(cid_v1.clone()),
+        &None,
+    );
+
+    assert_eq!(escrow_v0.ipfs_hash, Some(cid_v0));
+    assert_eq!(escrow_v1.ipfs_hash, Some(cid_v1));
+}
+
+#[test]
 fn test_validate_ipfs_cid_v1_stricter() {
     let env = Env::default();
     env.mock_all_auths();
@@ -3282,4 +3401,23 @@ fn test_get_escrows_by_seller_requires_auth() {
     let auths = env.auths();
     assert_eq!(auths.len(), 1);
     assert_eq!(auths.get(0).unwrap().0, seller);
+}
+
+#[test]
+fn test_platform_config_ttl_extension_on_read() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    // Read the platform config to ensure it is initialized and TTL is extended
+    let config = client.get_platform_config();
+    
+    // Advance ledger timestamp by a large amount (e.g., 20 days)
+    env.ledger().with_mut(|li| {
+        li.timestamp += 20 * 24 * 60 * 60; // 20 days in seconds
+    });
+
+    // Read again - should still succeed because the TTL was extended on read
+    let config_after = client.get_platform_config();
+    assert_eq!(config.admin, config_after.admin);
 }

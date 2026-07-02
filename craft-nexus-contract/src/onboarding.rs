@@ -82,6 +82,7 @@
 
 
 
+use crate::alloc::string::ToString;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
     Symbol, TryFromVal, Val, Vec,
@@ -91,9 +92,52 @@ use crate::alloc::string::ToString;
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
+const READ_TTL_THRESHOLD: u32 = 1_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
 const TTL_EXTENSION: u32 = 518_400;
 const CURRENT_USER_PROFILE_VERSION: u32 = 4;
+
+const BASE58_BTC_CHARSET: [bool; 256] = {
+    let mut chars = [false; 256];
+
+    let mut i = b'1' as usize;
+    while i <= b'9' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'A' as usize;
+    while i <= b'H' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'J' as usize;
+    while i <= b'N' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'P' as usize;
+    while i <= b'Z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'a' as usize;
+    while i <= b'k' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'm' as usize;
+    while i <= b'z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    chars
+};
 
 /// Cooldown period for username changes to prevent squatting and rapid identity rotation.
 /// 30 days in seconds.
@@ -868,6 +912,10 @@ fn utf8_char_len(first_byte: u8) -> usize {
 /// - CIDv1 base32lower (prefix 'b'): lowercase a-z + 2-7
 /// - CIDv1 base16lower (prefix 'f'): lowercase hex 0-9 + a-f
 /// - CIDv1 base58btc  (prefix 'z'): Base58 alphabet
+fn is_base58_btc_char(byte: u8) -> bool {
+    BASE58_BTC_CHARSET[byte as usize]
+}
+
 fn validate_ipfs_cid(cid: &String) -> bool {
     let len = cid.len() as usize;
     if len == 0 || len > 128 {
@@ -882,17 +930,7 @@ fn validate_ipfs_cid(cid: &String) -> bool {
     let is_v0 = len == 46
         && cid_bytes[0] == b'Q'
         && cid_bytes[1] == b'm'
-        && cid_bytes.iter().all(|b| {
-            matches!(
-                *b,
-                b'1'..=b'9'
-                    | b'A'..=b'H'
-                    | b'J'..=b'N'
-                    | b'P'..=b'Z'
-                    | b'a'..=b'k'
-                    | b'm'..=b'z'
-            )
-        });
+        && cid_bytes.iter().all(|b| is_base58_btc_char(*b));
 
     if is_v0 {
         return true;
@@ -943,17 +981,7 @@ fn validate_ipfs_cid(cid: &String) -> bool {
             if len < 40 || len > 100 {
                 return false;
             }
-            payload.iter().all(|b| {
-                matches!(
-                    *b,
-                    b'1'..=b'9'
-                        | b'A'..=b'H'
-                        | b'J'..=b'N'
-                        | b'P'..=b'Z'
-                        | b'a'..=b'k'
-                        | b'm'..=b'z'
-                )
-            })
+            payload.iter().all(|b| is_base58_btc_char(*b))
         }
         _ => false,
     }
@@ -1302,7 +1330,12 @@ impl OnboardingContract {
         Self::extend_persistent(env, &count_key);
     }
 
-    fn collect_username_change_fee(env: &Env, user: &Address, config: &OnboardingConfig) {
+    fn collect_username_change_fee(
+        env: &Env,
+        user: &Address,
+        config: &OnboardingConfig,
+        snapshotted_token: Option<Address>,
+    ) {
         let fee_amount: i128 = env
             .storage()
             .persistent()
@@ -1315,8 +1348,16 @@ impl OnboardingContract {
 
         Self::extend_persistent(env, &DataKey::UsernameChangeFee);
 
-        let fee_token = Self::read_username_fee_token(env)
-            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        let fee_token = match snapshotted_token {
+            Some(ref token) => {
+                let current = Self::read_username_fee_token(env)
+                    .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+                assert_eq!(current, *token, "Fee token changed mid-call");
+                current
+            }
+            None => Self::read_username_fee_token(env)
+                .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized)),
+        };
         let fee_wallet = Self::read_username_fee_wallet(env, config);
 
         let token_client = token::Client::new(env, &fee_token);
@@ -1407,6 +1448,12 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
+    }
+
+    fn extend_persistent_read(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
     }
 
     /// TTL-bump variant that first checks the entry exists (Issue #82 optimization).
@@ -2114,6 +2161,7 @@ impl OnboardingContract {
     /// # Returns
     /// Updated `UserProfile` with the new Moderator role assigned.
     pub fn set_moderator(env: Env, user: Address) -> UserProfile {
+        Self::extend_persistent_read(&env, &DataKey::Config);
         let config: OnboardingConfig = env
             .storage()
             .persistent()
@@ -2225,7 +2273,8 @@ impl OnboardingContract {
     /// # Preconditions
     /// - User must be onboarded (have an existing profile)
     /// - Profile must not already be deactivated
-    /// - User must not have active escrows (checked via escrow contract)
+    /// - User must not have active escrows (checked via the configured escrow contract)
+    /// - If no escrow contract is registered, deactivation is rejected conservatively because active escrow obligations cannot be verified
     /// - Admin user profile cannot be deactivated
     ///
     /// # Reverts if
@@ -2241,8 +2290,8 @@ impl OnboardingContract {
             env.panic_with_error(Error::ProfileDeactivated);
         }
 
-        let username_string = String::from_str(&env, profile.username.to_string().as_ref());
-        let normalized = normalize_username(&env, &username_string);
+        let username_str = String::from_str(&env, profile.username.to_string().as_ref());
+        let normalized = normalize_username(&env, &username_str);
         if normalized == String::from_str(&env, "admin") {
             env.panic_with_error(Error::Unauthorized);
         }
@@ -2268,6 +2317,8 @@ impl OnboardingContract {
             if client.has_active_escrows(&user) {
                 env.panic_with_error(Error::ActiveEscrowsExist);
             }
+        } else {
+            env.panic_with_error(Error::ActiveEscrowsExist);
         }
 
         // Release username so others can take it
@@ -2347,8 +2398,8 @@ impl OnboardingContract {
         }
 
         // Re-claim username — fail if another user took it while deactivated
-        let username_string = String::from_str(&env, profile.username.to_string().as_ref());
-        let normalized = normalize_username(&env, &username_string);
+        let username_str = String::from_str(&env, profile.username.to_string().as_ref());
+        let normalized = normalize_username(&env, &username_str);
         if env
             .storage()
             .persistent()
@@ -2451,6 +2502,7 @@ impl OnboardingContract {
     /// # Errors
     /// - Panics with [`Error::NotInitialized`] if config is missing.
     pub fn get_config(env: Env) -> OnboardingConfig {
+        Self::extend_persistent_read(&env, &DataKey::Config);
         env.storage()
             .persistent()
             .get(&DataKey::Config)
@@ -3350,7 +3402,7 @@ impl OnboardingContract {
     /// # Returns
     /// Tuple `(successful_trades, disputed_trades)`.
     pub fn get_user_reputation(env: Env, address: Address) -> (u32, u32) {
-        // Issue #426/#434: require auth to prevent unauthorized access to sensitive trade data
+        // Issue #426/#434/#446: require auth to prevent unauthorized access to sensitive trade data
         address.require_auth();
         let key = DataKey::UserProfile(address.clone());
         match env
@@ -3436,6 +3488,9 @@ impl OnboardingContract {
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
         Self::extend_persistent(&env, &DataKey::Config);
+
+        // Snapshot fee token before any state changes (CEI safety)
+        let snapshotted_fee_token = Self::read_username_fee_token(&env);
 
         // Get current user profile
         let profile_key = DataKey::UserProfile(user.clone());
@@ -3539,7 +3594,7 @@ impl OnboardingContract {
             .publish((Symbol::new(&env, "UsernameChanged"),), &user);
 
         // Interaction (CEI pattern: external transfer is the last step)
-        Self::collect_username_change_fee(&env, &user, &config);
+        Self::collect_username_change_fee(&env, &user, &config, snapshotted_fee_token);
 
         profile
     }
