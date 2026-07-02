@@ -1,0 +1,8 @@
+{
+  "struct": "TokensUnstakedEvent",
+  "fields": [
+    {"name": "artisan", "type": "Address"},
+    {"name": "token", "type": "Address"},
+    {"name": "amount", "type": "i128"}
+  ]
+}
