@@ -2545,6 +2545,172 @@ fn test_whitelist_stores_tokens_as_individual_keys() {
 }
 
 // ============================================================
+// Issue #643 – Fee token config migration audit
+// ============================================================
+
+#[test]
+fn test_migrate_fee_token_configs_migrates_twenty_tokens_and_emits_summary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let mut fee_tokens = vec![&env];
+    for i in 0..20u32 {
+        let token = Address::generate(&env);
+        fee_tokens.push_back(token.clone());
+
+        env.as_contract(&client.address, || {
+            env.storage().persistent().set(
+                &DataKey::TotalFees(token.clone()),
+                &((i as i128 + 1) * 1_000),
+            );
+        });
+    }
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::FeeTokenIndex, &fee_tokens);
+    });
+
+    let migrated = client.migrate_fee_token_configs();
+    assert_eq!(migrated, 20);
+
+    for i in 0..fee_tokens.len() {
+        let token = fee_tokens.get(i).unwrap();
+        let cfg = client.get_fee_token_config(&token).unwrap();
+        assert_eq!(
+            cfg,
+            FeeTokenInfo {
+                active: true,
+                custom_fee_bps: None,
+                accumulated: (i as i128 + 1) * 1_000,
+            }
+        );
+    }
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(last_event.0, client.address);
+    assert_eq!(
+        last_event.1,
+        vec![&env, Symbol::new(&env, "fee_cfg_migrated").into_val(&env)]
+    );
+
+    let summary: FeeTokenConfigsMigratedEvent = last_event.2.try_into_val(&env).unwrap();
+    assert_eq!(
+        summary,
+        FeeTokenConfigsMigratedEvent {
+            scanned_tokens: 20,
+            migrated_configs: 20,
+            skipped_existing: 0,
+        }
+    );
+}
+
+#[test]
+fn test_migrate_fee_token_configs_is_idempotent_and_preserves_existing_configs() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let mut fee_tokens = vec![&env];
+    for i in 0..20u32 {
+        let token = Address::generate(&env);
+        fee_tokens.push_back(token.clone());
+
+        env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::TotalFees(token.clone()), &((i as i128 + 1) * 500));
+        });
+    }
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::FeeTokenIndex, &fee_tokens);
+
+        let preset_one = fee_tokens.get(3).unwrap();
+        let preset_two = fee_tokens.get(11).unwrap();
+
+        env.storage().persistent().set(
+            &DataKey::FeeTokenConfig(preset_one.clone()),
+            &FeeTokenInfo {
+                active: false,
+                custom_fee_bps: Some(250),
+                accumulated: 777_777,
+            },
+        );
+        env.storage().persistent().set(
+            &DataKey::FeeTokenConfig(preset_two.clone()),
+            &FeeTokenInfo {
+                active: true,
+                custom_fee_bps: Some(900),
+                accumulated: 888_888,
+            },
+        );
+    });
+
+    let migrated_first = client.migrate_fee_token_configs();
+    assert_eq!(migrated_first, 18);
+
+    let preset_one = fee_tokens.get(3).unwrap();
+    let preset_two = fee_tokens.get(11).unwrap();
+    assert_eq!(
+        client.get_fee_token_config(&preset_one).unwrap(),
+        FeeTokenInfo {
+            active: false,
+            custom_fee_bps: Some(250),
+            accumulated: 777_777,
+        }
+    );
+    assert_eq!(
+        client.get_fee_token_config(&preset_two).unwrap(),
+        FeeTokenInfo {
+            active: true,
+            custom_fee_bps: Some(900),
+            accumulated: 888_888,
+        }
+    );
+
+    for i in 0..fee_tokens.len() {
+        let token = fee_tokens.get(i).unwrap();
+        let cfg = client.get_fee_token_config(&token).unwrap();
+        if token != preset_one && token != preset_two {
+            assert_eq!(
+                cfg,
+                FeeTokenInfo {
+                    active: true,
+                    custom_fee_bps: None,
+                    accumulated: (i as i128 + 1) * 500,
+                }
+            );
+        }
+    }
+
+    let migrated_second = client.migrate_fee_token_configs();
+    assert_eq!(migrated_second, 0);
+
+    for i in 0..fee_tokens.len() {
+        let token = fee_tokens.get(i).unwrap();
+        assert!(client.get_fee_token_config(&token).is_some());
+    }
+
+    let events = env.events().all();
+    let latest_summary: FeeTokenConfigsMigratedEvent =
+        events.last().unwrap().2.try_into_val(&env).unwrap();
+    assert_eq!(
+        latest_summary,
+        FeeTokenConfigsMigratedEvent {
+            scanned_tokens: 20,
+            migrated_configs: 0,
+            skipped_existing: 20,
+        }
+    );
+}
+
+// ============================================================
 // Issue #111 – Batch Optimization Tests (Additional)
 // ============================================================
 

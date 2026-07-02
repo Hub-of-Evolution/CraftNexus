@@ -944,6 +944,20 @@ pub struct FeeTokenInfo {
     pub accumulated: i128,
 }
 
+/// Summary event emitted after a fee-token config migration run.
+///
+/// Operators can compare `scanned_tokens`, `migrated_configs`, and
+/// `skipped_existing` to verify that the legacy `FeeTokenIndex` was fully
+/// audited and that a second run is a no-op.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeTokenConfigsMigratedEvent {
+    pub scanned_tokens: u32,
+    pub migrated_configs: u32,
+    pub skipped_existing: u32,
+}
+
 /// Aggregated version metadata returned from `get_version_info`. Mirrors the
 /// fields surfaced via the upgrade history but in a flat shape suitable for
 /// dashboards / `migrate_v_x` style audits.
@@ -3559,7 +3573,9 @@ impl CraftNexusContract {
             .get(&DataKey::FeeTokenIndex)
             .unwrap_or_else(|| Vec::new(&env));
 
+        let scanned_tokens = tokens.len();
         let mut migrated: u32 = 0;
+        let mut skipped_existing: u32 = 0;
         for index in 0..tokens.len() {
             if let Some(token) = tokens.get(index) {
                 let cfg_key = DataKey::FeeTokenConfig(token.clone());
@@ -3576,9 +3592,21 @@ impl CraftNexusContract {
                     env.storage().persistent().set(&cfg_key, &info);
                     Self::extend_persistent(&env, &cfg_key);
                     migrated += 1;
+                } else {
+                    Self::extend_persistent(&env, &cfg_key);
+                    skipped_existing += 1;
                 }
             }
         }
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_cfg_migrated"),),
+            FeeTokenConfigsMigratedEvent {
+                scanned_tokens,
+                migrated_configs: migrated,
+                skipped_existing,
+            },
+        );
 
         Ok(migrated)
     }
