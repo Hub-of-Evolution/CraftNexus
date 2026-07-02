@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use crate::{CraftNexusContract, CraftNexusContractClient};
+use soroban_sdk::vec;
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     token, Address, Env, Vec,
