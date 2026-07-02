@@ -1,6 +1,17 @@
+use super::decimal_test_token::{DecimalTestToken, DecimalTestTokenClient};
 use super::*;
 use super::Error;
-use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, String};
+use soroban_sdk::{testutils::{Address as _, Ledger as _}, token, Address, Bytes, Env, String};
+
+fn register_decimal_test_token(env: &Env, decimals: u32) -> Address {
+    let admin = Address::generate(env);
+    let contract_id = env.register_contract(None, DecimalTestToken);
+    DecimalTestTokenClient::new(env, &contract_id).initialize(&admin, &decimals);
+    contract_id
+}
+
+const AUTO_VERIFY_VOLUME_THRESHOLD: i128 = 10_000_000_000;
+const AUTO_VERIFY_ESCROW_THRESHOLD: u32 = 5;
 
 fn string_to_bytes(env: &Env, s: &soroban_sdk::String) -> Bytes {
     let mut buf = [0u8; 128];
@@ -21,6 +32,7 @@ fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     (client, admin)
 }
 
+#[allow(dead_code)]
 fn to_bytes(env: &Env, s: &String) -> Bytes {
     let mut bytes = Bytes::new(env);
     let len = s.len() as usize;
@@ -1356,30 +1368,75 @@ fn test_bump_user_metrics_ttl_unauthorized() {
     client.bump_user_metrics_ttl(&user);
 }
 #[test]
-fn test_volume_normalization_across_decimals() {
+fn test_volume_normalization_7_decimal_token() {
     let env = Env::default();
     env.mock_all_auths();
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "normy"), &UserRole::Artisan);
+    client.onboard_user(&user, &String::from_str(&env, "vol7"), &UserRole::Artisan);
 
-    // 1. Test 7-decimal token (base)
     let token_admin = Address::generate(&env);
-    let token_7 = env.register_stellar_asset_contract_v2(token_admin);
-    client.update_user_metrics(&user, &1u32, &1_000_000_000i128, &token_7.address());
+    let token = env.register_stellar_asset_contract_v2(token_admin);
+    client.update_user_metrics(
+        &user,
+        &AUTO_VERIFY_ESCROW_THRESHOLD,
+        &AUTO_VERIFY_VOLUME_THRESHOLD,
+        &token.address(),
+    );
 
+    assert!(client.is_verified(&user));
     let metrics = client.get_user_metrics(&user);
-    assert_eq!(metrics.total_volume, 1_000_000_000); // 100.0000000 USDC -> 100.0000000 normalized
+    assert_eq!(metrics.total_escrow_count, AUTO_VERIFY_ESCROW_THRESHOLD);
+    assert_eq!(metrics.total_volume, AUTO_VERIFY_VOLUME_THRESHOLD);
+}
 
-    // 2. Test 6-decimal token (e.g., some USDC versions or USDT)
-    // We can't easily change decimals of Stellar Asset Contract in tests (it's always 7),
-    // but we've verified the code logic.
-    // The code logic is:
-    // let normalized_delta = if token_decimals < base_decimals {
-    //     let diff = base_decimals - token_decimals;
-    //     volume_delta.saturating_mul(10i128.pow(diff))
-    // ...
+#[test]
+fn test_volume_normalization_8_decimal_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "vol8"), &UserRole::Artisan);
+
+    let token = register_decimal_test_token(&env, 8);
+    let raw_threshold = AUTO_VERIFY_VOLUME_THRESHOLD * 10;
+    client.update_user_metrics(
+        &user,
+        &AUTO_VERIFY_ESCROW_THRESHOLD,
+        &raw_threshold,
+        &token,
+    );
+
+    assert!(client.is_verified(&user));
+    let metrics = client.get_user_metrics(&user);
+    assert_eq!(metrics.total_escrow_count, AUTO_VERIFY_ESCROW_THRESHOLD);
+    assert_eq!(metrics.total_volume, AUTO_VERIFY_VOLUME_THRESHOLD);
+}
+
+#[test]
+fn test_volume_normalization_18_decimal_token() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "vol18"), &UserRole::Artisan);
+
+    let token = register_decimal_test_token(&env, 18);
+    let raw_threshold = AUTO_VERIFY_VOLUME_THRESHOLD * 10_i128.pow(11);
+    client.update_user_metrics(
+        &user,
+        &AUTO_VERIFY_ESCROW_THRESHOLD,
+        &raw_threshold,
+        &token,
+    );
+
+    assert!(client.is_verified(&user));
+    let metrics = client.get_user_metrics(&user);
+    assert_eq!(metrics.total_escrow_count, AUTO_VERIFY_ESCROW_THRESHOLD);
+    assert_eq!(metrics.total_volume, AUTO_VERIFY_VOLUME_THRESHOLD);
 }
 
 // ===== Portfolio Tests (Issue #112) =====
@@ -1709,7 +1766,7 @@ fn test_has_active_contracts() {
     let seller = Address::generate(&env);
     let token_admin = Address::generate(&env);
     let token_id = env.register_stellar_asset_contract_v2(token_admin);
-    let token_client = token::Client::new(&env, &token_id.address());
+    let _token_client = token::Client::new(&env, &token_id.address());
     let token_asset = token::StellarAssetClient::new(&env, &token_id.address());
     token_asset.mint(&user, &10_000_000);
 
@@ -1833,6 +1890,19 @@ fn test_update_active_contracts_underflow_panics() {
 
     let _ = admin;
     client.update_active_contracts(&user, &-1);
+}
+
+#[test]
+#[should_panic]
+fn test_deactivate_profile_rejects_without_registered_escrow_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "noescrow"), &UserRole::Buyer);
+
+    client.deactivate_profile(&user);
 }
 
 #[test]
@@ -2105,6 +2175,26 @@ fn test_get_user_reputation_unauthorized() {
     client.get_user_reputation(&user);
 }
 
+/// Issue #446 — get_user_reputation must allow authorized callers.
+#[test]
+fn test_get_user_reputation_authorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    
+    // Onboard user
+    client.onboard_user(&user, &String::from_str(&env, "rep1"), &UserRole::Artisan);
+
+    // Update reputation
+    client.update_reputation(&user, &2u32, &1u32);
+    
+    // Get reputation (authorized)
+    let (successful, disputed) = client.get_user_reputation(&user);
+    assert_eq!(successful, 2);
+    assert_eq!(disputed, 1);
+}
+
 // ── Issue #452: [FEATURE] Business flow #51 – active contract authorization ─
 
 /// Issue #452 — has_active_contracts must reject callers without user authorization.
@@ -2156,4 +2246,23 @@ fn test_set_verification_thresholds_unauthorized_rejected() {
     let env = Env::default();
     let (client, _) = setup_test(&env);
     client.set_verification_thresholds(&10u32, &5_000_000_000i128);
+}
+
+#[test]
+fn test_onboarding_config_ttl_extension_on_read() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+
+    // Read the config to ensure TTL is extended
+    let config = client.get_config();
+
+    // Advance ledger timestamp by 20 days
+    env.ledger().with_mut(|li| {
+        li.timestamp += 20 * 24 * 60 * 60;
+    });
+
+    // Read again - should still succeed
+    let config_after = client.get_config();
+    assert_eq!(config.platform_admin, config_after.platform_admin);
 }

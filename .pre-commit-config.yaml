@@ -1,0 +1,45 @@
+# CraftNexus pre-commit configuration
+# Issue #682: Enforce cargo fmt and warn on snapshot file changes
+#
+# Installation:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Manual run:
+#   pre-commit run --all-files
+
+repos:
+  # Rust formatting enforcement
+  - repo: local
+    hooks:
+      - id: cargo-fmt-check
+        name: cargo fmt --check
+        description: "Fail if any Rust source files are not formatted with rustfmt"
+        language: system
+        entry: cargo fmt
+        args: ["--manifest-path", "craft-nexus-contract/Cargo.toml", "--", "--check"]
+        types: [rust]
+        pass_filenames: false
+
+      # Warn when snapshot files change to prevent accidental schema regressions
+      - id: snapshot-change-warning
+        name: Snapshot file change warning
+        description: "Warn when test snapshot files are modified (review before committing)"
+        language: system
+        entry: bash
+        args:
+          - "-c"
+          - |
+            changed_snapshots=$(git diff --cached --name-only | grep 'test_snapshots/')
+            if [ -n "$changed_snapshots" ]; then
+              echo "⚠️  WARNING: The following snapshot files have changed:"
+              echo "$changed_snapshots"
+              echo ""
+              echo "Please review snapshot changes carefully to ensure they are intentional."
+              echo "Snapshot diffs can indicate schema regressions. If the changes are expected,"
+              echo "re-run with SKIP=snapshot-change-warning pre-commit run --all-files"
+              echo "or pass --no-verify to bypass this check."
+              exit 0
+            fi
+        pass_filenames: false
+        stages: [pre-commit]
