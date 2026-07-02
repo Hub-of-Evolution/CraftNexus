@@ -90,7 +90,7 @@ PASSED: All contract addresses are in sync.
 ```markdown
 ### Address Synchronization
 
-Contract addresses in this file and in `stellar.toml` are automatically 
+Contract addresses in this file and in `stellar.toml` are automatically
 verified to stay in sync via CI. When updating a contract address:
 
 1. Update the address in **both** `README.md` and `stellar.toml`
@@ -145,7 +145,7 @@ bash scripts/check-contract-addresses.sh
 - **Type:** Soroban smart contract
 - **Length:** 56 characters
 - **Format:** Starts with 'C' followed by alphanumeric characters (Base32-encoded)
-- **Examples:** 
+- **Examples:**
   - `CABC123DEF456GHI789JKL012MNO345PQR678STU901VWX234YZ` ✓ Valid
   - `[DEPLOY_AND_UPDATE]` ✗ Placeholder (skipped)
   - `0x123abc` ✗ Not a Stellar format
@@ -226,7 +226,7 @@ bash scripts/check-contract-addresses.sh
 
 The CI workflow automatically runs when:
 - README.md is modified
-- stellar.toml is modified  
+- stellar.toml is modified
 - scripts/check-contract-addresses.sh is modified
 
 ### Updating the Check
@@ -257,4 +257,3 @@ Issue #672 has been fully implemented with:
 4. **Zero Breaking Changes** - No Rust source files modified, no build dependencies added
 
 The system now prevents deployment errors caused by mismatched contract addresses between documentation and configuration files.
-

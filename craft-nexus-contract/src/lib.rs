@@ -10,6 +10,8 @@ use soroban_sdk::{
 #[cfg(test)]
 mod enhanced_features_test;
 #[cfg(test)]
+mod event_snapshot_test;
+#[cfg(test)]
 mod expired_dispute_fee_test;
 #[cfg(test)]
 mod min_release_window_test;
@@ -19,8 +21,6 @@ mod reentrancy_test;
 mod scalability_test;
 #[cfg(test)]
 mod test;
-#[cfg(test)]
-mod event_snapshot_test;
 // Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
 // artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
 #[cfg(not(target_family = "wasm"))]
@@ -1480,8 +1480,6 @@ impl CraftNexusContract {
         );
     }
 
-   
-
     /// Atomically appends one escrow ID to the indexed global registry and
     /// increments `EscrowCount` (#515 / Issue #226).
     fn update_escrow_indices_atomic(env: &Env, order_id: u32) {
@@ -2156,7 +2154,7 @@ impl CraftNexusContract {
         config.admin.require_auth();
 
         let legacy_key = DataKey::WhitelistedTokens;
-        
+
         // Check if legacy storage exists
         if !env.storage().persistent().has(&legacy_key) {
             return 0; // Nothing to migrate
@@ -2169,7 +2167,7 @@ impl CraftNexusContract {
             .unwrap_or(Map::new(&env));
 
         let mut migrated_count = 0u32;
-        
+
         // Migrate each token to individual storage
         let keys = legacy_whitelist.keys();
         for i in 0..keys.len() {
@@ -2208,7 +2206,7 @@ impl CraftNexusContract {
         config.admin.require_auth();
 
         let legacy_key = DataKey::ArtisanStakeQueue(artisan.clone());
-        
+
         // Check if legacy storage exists
         if !env.storage().persistent().has(&legacy_key) {
             return 0; // Nothing to migrate
@@ -2261,24 +2259,28 @@ impl CraftNexusContract {
     /// Returns up to `limit` deposits starting from `offset`. Useful for
     /// inspecting queue state without loading the entire queue.
     pub fn get_artisan_stake_deposits(
-        env: Env, 
-        artisan: Address, 
-        offset: u32, 
-        limit: u32
+        env: Env,
+        artisan: Address,
+        offset: u32,
+        limit: u32,
     ) -> soroban_sdk::Vec<StakeDeposit> {
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        
+
         let mut deposits = soroban_sdk::Vec::new(&env);
         let end = core::cmp::min(offset + limit, total_count);
-        
+
         for i in offset..end {
             let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
-            if let Some(deposit) = env.storage().persistent().get::<DataKey, StakeDeposit>(&deposit_key) {
+            if let Some(deposit) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, StakeDeposit>(&deposit_key)
+            {
                 deposits.push_back(deposit);
             }
         }
-        
+
         deposits
     }
 
@@ -2519,8 +2521,7 @@ impl CraftNexusContract {
         Self::validate_admin_address(&env, &recovered_admin)?;
 
         // Check if recovery time lock has passed (#431 — TTL-friendly read)
-        let recovery_time =
-            Self::get_persistent_u64(&env, &DataKey::AdminRecoveryTime);
+        let recovery_time = Self::get_persistent_u64(&env, &DataKey::AdminRecoveryTime);
 
         let current_time = env.ledger().timestamp();
 
@@ -2571,7 +2572,9 @@ impl CraftNexusContract {
         config.pending_admin = None;
         // Write config to instance storage (primary location) — TTL already extended
         // by get_platform_config_internal. No redundant extend_persistent needed.
-        env.storage().instance().set(&DataKey::PlatformConfig, &config);
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &config);
 
         // Sync to persistent backup key for recovery consistency (no TTL extension needed
         // since this is a one-time sync, not a read-heavy path).
@@ -3215,7 +3218,7 @@ impl CraftNexusContract {
     }
 
     fn try_get_escrow_readonly(env: &Env, order_id: u32) -> Escrow {
-            let key = (ESCROW, order_id);
+        let key = (ESCROW, order_id);
         let stored: Val = env
             .storage()
             .persistent()
@@ -3245,7 +3248,7 @@ impl CraftNexusContract {
         }
 
         let legacy = LegacyEscrow::try_from_val(env, &stored).expect("");
-        
+
         let dispute_symbol = legacy.dispute_reason.map(|r| {
             // Safety bound: Symbols max at 32 chars. Truncate if legacy reason is too long.
             let len = r.len() as usize;
@@ -3277,7 +3280,6 @@ impl CraftNexusContract {
         Self::extend_persistent(env, &key); // OPTIMIZED: Ensure TTL extension on read
         upgraded
     }
-
 
     fn get_stored_escrow(env: &Env, order_id: u32) -> Escrow {
         let key = (ESCROW, order_id);
@@ -3377,9 +3379,20 @@ impl CraftNexusContract {
         }
     }
 
-    /// Calculate platform fee for a given amount
-    fn calculate_fee(amount: i128, fee_bps: u32) -> i128 {
-        (amount * (fee_bps as i128)) / 10000
+    /// Calculate platform fee for a given amount.
+    fn try_calculate_fee(amount: i128, fee_bps: u32) -> Result<i128, Error> {
+        if amount < 0 {
+            return Err(Error::InvalidFee);
+        }
+
+        amount
+            .checked_mul(fee_bps as i128)
+            .and_then(|product| product.checked_div(10_000))
+            .ok_or(Error::InvalidFee)
+    }
+
+    fn calculate_fee(env: &Env, amount: i128, fee_bps: u32) -> i128 {
+        Self::try_calculate_fee(amount, fee_bps).unwrap_or_else(|err| env.panic_with_error(err))
     }
 
     /// Maintain the dual fee-token bookkeeping (#239).
@@ -3650,7 +3663,7 @@ impl CraftNexusContract {
 
         // Calculate platform fee using effective fee bps for the seller
         let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
-        let fee_amount = Self::calculate_fee(escrow.amount, fee_bps);
+        let fee_amount = Self::calculate_fee(&env, escrow.amount, fee_bps);
         let seller_amount = escrow.amount - fee_amount;
 
         // Update status
@@ -3750,7 +3763,7 @@ impl CraftNexusContract {
 
         // Calculate platform fee
         let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
-        let fee_amount = Self::calculate_fee(escrow.amount, fee_bps);
+        let fee_amount = Self::calculate_fee(&env, escrow.amount, fee_bps);
         let seller_amount = escrow.amount - fee_amount;
 
         // Update status
@@ -3863,7 +3876,6 @@ impl CraftNexusContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-
     }
 
     /// Reject obviously invalid WASM hashes before they touch storage.
@@ -3911,7 +3923,11 @@ impl CraftNexusContract {
     ///
     /// Only one proposal may be pending at a time. Cancel with
     /// `cancel_upgrade_wasm` before starting a new one.
-    pub fn propose_upgrade_wasm(env: Env, signer: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
+    pub fn propose_upgrade_wasm(
+        env: Env,
+        signer: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), Error> {
         signer.require_auth();
 
         Self::validate_upgrade_hash(&env, &new_wasm_hash)?;
@@ -3962,9 +3978,7 @@ impl CraftNexusContract {
 
         if (approvals.len() as u32) < threshold {
             // Threshold not yet met — persist partial approvals and return.
-            env.storage()
-                .persistent()
-                .set(&approvals_key, &approvals);
+            env.storage().persistent().set(&approvals_key, &approvals);
             Self::extend_persistent(&env, &approvals_key);
             return Ok(());
         }
@@ -4012,9 +4026,7 @@ impl CraftNexusContract {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
         if signers.is_empty() {
-            env.storage()
-                .persistent()
-                .remove(&DataKey::UpgradeSigners);
+            env.storage().persistent().remove(&DataKey::UpgradeSigners);
         } else {
             env.storage()
                 .persistent()
@@ -4301,7 +4313,7 @@ impl CraftNexusContract {
     fn release_funds_to_seller(env: &Env, escrow: &Escrow) {
         let config = Self::get_platform_config_internal(env);
         let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
-        let fee_amount = Self::calculate_fee(escrow.amount, fee_bps);
+        let fee_amount = Self::calculate_fee(env, escrow.amount, fee_bps);
         let seller_amount = escrow.amount - fee_amount;
 
         let token_client = token::Client::new(env, &escrow.token);
@@ -4450,7 +4462,7 @@ impl CraftNexusContract {
     /// * `order_id` - Order identifier
     /// * `dispute_reason` - Reason for dispute
     /// * `authorized_address` - Address authorized to dispute (buyer or seller)
-   pub fn dispute_escrow(
+    pub fn dispute_escrow(
         env: Env,
         order_id: u32,
         dispute_reason: Symbol, // UPDATE ARGUMENT TYPE
@@ -4487,7 +4499,7 @@ impl CraftNexusContract {
             },
         );
     }
-    
+
     /// Resolve disputed escrow (arbitrator only).
     ///
     /// This function transitions the escrow from `Disputed` to `Resolved`.
@@ -4815,7 +4827,7 @@ impl CraftNexusContract {
     /// * `amount` - The escrow amount
     pub fn calculate_fee_for_amount(env: Env, amount: i128) -> i128 {
         let config = Self::get_platform_config_internal(&env);
-        Self::calculate_fee(amount, config.platform_fee_bps)
+        Self::calculate_fee(&env, amount, config.platform_fee_bps)
     }
 
     /// Calculate net amount seller will receive
@@ -5217,7 +5229,7 @@ impl CraftNexusContract {
 
                     // Calculate platform fee
                     let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
-                    let fee_amount = Self::calculate_fee(escrow.amount, fee_bps);
+                    let fee_amount = Self::calculate_fee(&env, escrow.amount, fee_bps);
                     let seller_amount = escrow.amount - fee_amount;
 
                     // Update status
@@ -5434,7 +5446,7 @@ impl CraftNexusContract {
 
         // Now perform token transfers (external calls)
         let token_client = token::Client::new(&env, &escrow.token);
-        let fee_amount = Self::calculate_fee(escrow.amount, config.platform_fee_bps);
+        let fee_amount = Self::calculate_fee(&env, escrow.amount, config.platform_fee_bps);
 
         // Apply the configured fee policy
         match config.expired_dispute_fee_policy {
@@ -5582,7 +5594,7 @@ impl CraftNexusContract {
         // Check queue capacity and prune if necessary
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        
+
         if current_count >= STAKE_QUEUE_PRUNE_THRESHOLD {
             Self::prune_matured_stake_deposits(&env, &artisan);
         }
@@ -5598,19 +5610,24 @@ impl CraftNexusContract {
     fn add_stake_deposit(env: &Env, artisan: &Address, amount: i128, cooldown_end: u64) {
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        
+
         if current_count >= MAX_STAKE_QUEUE_SIZE {
             env.panic_with_error(Error::StakeQueueFull);
         }
 
         // Add new deposit at the end of the queue
         let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), current_count);
-        let deposit = StakeDeposit { amount, cooldown_end };
+        let deposit = StakeDeposit {
+            amount,
+            cooldown_end,
+        };
         env.storage().persistent().set(&deposit_key, &deposit);
         Self::extend_persistent(env, &deposit_key);
 
         // Update count
-        env.storage().persistent().set(&count_key, &(current_count + 1));
+        env.storage()
+            .persistent()
+            .set(&count_key, &(current_count + 1));
         Self::extend_persistent(env, &count_key);
     }
 
@@ -5622,7 +5639,7 @@ impl CraftNexusContract {
     fn prune_matured_stake_deposits(env: &Env, artisan: &Address) {
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        
+
         if current_count == 0 {
             return;
         }
@@ -5633,19 +5650,24 @@ impl CraftNexusContract {
         // Compact queue by moving non-matured deposits to fill gaps
         for read_index in 0..current_count {
             let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), read_index);
-            
-            if let Some(deposit) = env.storage().persistent().get::<DataKey, StakeDeposit>(&deposit_key) {
+
+            if let Some(deposit) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, StakeDeposit>(&deposit_key)
+            {
                 if deposit.cooldown_end > now {
                     // Deposit is not matured, keep it
                     if write_index != read_index {
                         // Move deposit to new position
-                        let new_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
+                        let new_key =
+                            DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
                         env.storage().persistent().set(&new_key, &deposit);
                         Self::extend_persistent(env, &new_key);
                     }
                     write_index += 1;
                 }
-                
+
                 // Remove old entry if we moved it or if it was matured
                 if write_index != read_index + 1 {
                     env.storage().persistent().remove(&deposit_key);
@@ -5689,8 +5711,12 @@ impl CraftNexusContract {
         // Process all deposits, collecting matured amounts and compacting the queue
         for read_index in 0..current_count {
             let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), read_index);
-            
-            if let Some(deposit) = env.storage().persistent().get::<DataKey, StakeDeposit>(&deposit_key) {
+
+            if let Some(deposit) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, StakeDeposit>(&deposit_key)
+            {
                 if now >= deposit.cooldown_end {
                     // Deposit is matured, add to unstake amount
                     matured_amount += deposit.amount;
@@ -5700,7 +5726,8 @@ impl CraftNexusContract {
                     // Deposit is not matured, keep it in the queue
                     if write_index != read_index {
                         // Move deposit to new position to compact the queue
-                        let new_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
+                        let new_key =
+                            DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
                         env.storage().persistent().set(&new_key, &deposit);
                         Self::extend_persistent(&env, &new_key);
                         // Remove old position
@@ -6031,7 +6058,7 @@ impl CraftNexusContract {
         // Deduct platform fee from seller's portion using effective fee bps
         let config = Self::get_platform_config_internal(&env);
         let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
-        let seller_fee = Self::calculate_fee(seller_gross, fee_bps);
+        let seller_fee = Self::calculate_fee(&env, seller_gross, fee_bps);
         let seller_net = seller_gross - seller_fee;
         let total_platform_fee = refund_fee.saturating_add(seller_fee);
 
@@ -6142,7 +6169,7 @@ impl CraftNexusContract {
     /// Calculate refund-side fee charged against a proposed gross partial refund.
     fn calculate_partial_refund_fee(env: &Env, gross_refund_amount: i128) -> i128 {
         let refund_fee_bps = Self::get_refund_fee_bps(env);
-        Self::calculate_fee(gross_refund_amount, refund_fee_bps)
+        Self::calculate_fee(env, gross_refund_amount, refund_fee_bps)
     }
 
     /// Validate gross partial refund amount against escrow solvency including any
@@ -6193,7 +6220,9 @@ impl CraftNexusContract {
         if id > MAX_RECURRING_ESCROW_ID {
             return Err(crate::Error::RecurringEscrowIdExhausted);
         }
-        let next_id = id.checked_add(1).ok_or(crate::Error::RecurringEscrowIdExhausted)?;
+        let next_id = id
+            .checked_add(1)
+            .ok_or(crate::Error::RecurringEscrowIdExhausted)?;
         env.storage()
             .persistent()
             .set(&DataKey::NextRecurringEscrowId, &next_id);
@@ -6281,7 +6310,7 @@ impl CraftNexusContract {
         // Calculate and transfer platform fee
         let config = Self::get_platform_config_internal(&env);
         let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.artisan.clone());
-        let fee_amount = Self::calculate_fee(cycle_amount, fee_bps);
+        let fee_amount = Self::calculate_fee(&env, cycle_amount, fee_bps);
         let artisan_amount = cycle_amount - fee_amount;
 
         if fee_amount > 0 {
@@ -6359,7 +6388,6 @@ impl CraftNexusContract {
                 },
             );
         }
-
     }
 
     /// Cancel a recurring escrow and refund remaining funds to the buyer.
@@ -6411,7 +6439,6 @@ impl CraftNexusContract {
                 timestamp: env.ledger().timestamp(),
             },
         );
-
     }
 
     /// Get details of a recurring escrow.
@@ -6465,5 +6492,4 @@ impl CraftNexusContract {
     fn exit_reentry_guard(env: &Env) {
         env.storage().temporary().remove(&DataKey::ReentryGuard);
     }
-
 }

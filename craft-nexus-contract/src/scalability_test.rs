@@ -2,10 +2,9 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::Address as _,
+    testutils::{Address as _, Ledger},
     token, Address, Env, Map,
 };
-use soroban_sdk::testutils::Ledger;
 
 fn setup_test() -> (
     Env,
@@ -275,7 +274,8 @@ fn test_batch_create_with_indexed_storage() {
     let mut order_ids = soroban_sdk::Vec::new(&env);
     for i in 0..10 {
         let order_id = i + 1;
-        let _escrow = client.create_escrow(&buyer, &seller, &token, &1000, &order_id, &Some(604800));
+        let _escrow =
+            client.create_escrow(&buyer, &seller, &token, &1000, &order_id, &Some(604800));
         order_ids.push_back(order_id);
     }
     assert_eq!(order_ids.len(), 10);
@@ -452,7 +452,7 @@ fn test_whitelisted_tokens_migration() {
     legacy_map.set(token1.clone(), true);
     legacy_map.set(token2.clone(), true);
     legacy_map.set(token3.clone(), false); // This should not be migrated
-    
+
     env.as_contract(&client.address, || {
         env.storage().persistent().set(&legacy_key, &legacy_map);
     });
@@ -492,18 +492,16 @@ fn test_whitelist_migration_50_tokens() {
 
     let legacy_key = DataKey::WhitelistedTokens;
     let mut legacy_map = Map::new(&env);
-    for i in 0..num_tokens {
+    for _i in 0..num_tokens {
         let token = Address::generate(&env);
         tokens.push_back(token.clone());
         legacy_map.set(token, true);
     }
     let false_token = Address::generate(&env);
-    legacy_map.set(false_token, false);
+    legacy_map.set(false_token.clone(), false);
 
     env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .set(&legacy_key, &legacy_map);
+        env.storage().persistent().set(&legacy_key, &legacy_map);
     });
 
     let migrated_count = client.migrate_whitelist_storage();
@@ -514,7 +512,11 @@ fn test_whitelist_migration_50_tokens() {
 
     for i in 0..tokens.len() {
         if let Some(token) = tokens.get(i) {
-            assert!(client.is_token_whitelisted(&token), "token {} not whitelisted", i);
+            assert!(
+                client.is_token_whitelisted(&token),
+                "token {} not whitelisted",
+                i
+            );
         }
     }
     assert!(!client.is_token_whitelisted(&false_token));
@@ -534,16 +536,14 @@ fn test_whitelist_scalability_beyond_1800() {
 
     let legacy_key = DataKey::WhitelistedTokens;
     let mut legacy_map = Map::new(&env);
-    for i in 0..num_tokens {
+    for _i in 0..num_tokens {
         let token = Address::generate(&env);
         tokens.push_back(token.clone());
         legacy_map.set(token, true);
     }
 
     env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .set(&legacy_key, &legacy_map);
+        env.storage().persistent().set(&legacy_key, &legacy_map);
     });
 
     let migrated_count = client.migrate_whitelist_storage();
@@ -620,15 +620,22 @@ fn test_artisan_stake_queue_pruning() {
     assert_eq!(count_after_pruning, 1);
 
     let stored_deposit: Option<StakeDeposit> = env.as_contract(&client.address, || {
-        env.storage().persistent().get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 0))
+        env.storage()
+            .persistent()
+            .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 0))
     });
     let deposit = stored_deposit.expect("pruned queue should retain the latest deposit in storage");
     assert_eq!(deposit.amount, 1000);
 
     let missing_deposit: Option<StakeDeposit> = env.as_contract(&client.address, || {
-        env.storage().persistent().get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 1))
+        env.storage()
+            .persistent()
+            .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 1))
     });
-    assert!(missing_deposit.is_none(), "only the latest deposit should remain after pruning");
+    assert!(
+        missing_deposit.is_none(),
+        "only the latest deposit should remain after pruning"
+    );
 }
 
 #[test]
@@ -638,9 +645,18 @@ fn test_artisan_stake_queue_migration() {
     // Simulate legacy storage by directly setting the old Vec format
     let legacy_key = DataKey::ArtisanStakeQueue(artisan.clone());
     let mut legacy_queue = soroban_sdk::Vec::new(&env);
-    legacy_queue.push_back(StakeDeposit { amount: 1000, cooldown_end: 1000 });
-    legacy_queue.push_back(StakeDeposit { amount: 2000, cooldown_end: 2000 });
-    legacy_queue.push_back(StakeDeposit { amount: 3000, cooldown_end: 3000 });
+    legacy_queue.push_back(StakeDeposit {
+        amount: 1000,
+        cooldown_end: 1000,
+    });
+    legacy_queue.push_back(StakeDeposit {
+        amount: 2000,
+        cooldown_end: 2000,
+    });
+    legacy_queue.push_back(StakeDeposit {
+        amount: 3000,
+        cooldown_end: 3000,
+    });
 
     env.as_contract(&client.address, || {
         env.storage().persistent().set(&legacy_key, &legacy_queue);
