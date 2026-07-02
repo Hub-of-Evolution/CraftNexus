@@ -2201,7 +2201,7 @@ impl OnboardingContract {
     /// # Reverts if
     /// - Caller is not the platform admin (authorization check fails)
     /// - User not found in persistent storage
-    /// - New role is Admin or None (invalid assignment)
+    /// - New role is Admin or None (invalid assignment - prevents unauthorized role escalation)
     /// - Config not initialized
     pub fn update_user_role(env: Env, user: Address, new_role: UserRole) -> UserProfile {
         // Security: Get config to verify admin authorization
