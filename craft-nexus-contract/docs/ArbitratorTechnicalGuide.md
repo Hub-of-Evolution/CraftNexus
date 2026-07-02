@@ -76,6 +76,33 @@ stellar contract invoke \
   --resolution 1
 ```
 
+## Dispute Resolution Deadline
+
+Disputes are not open indefinitely. Each dispute has a maximum duration configured by the platform, with a default of 30 days. If the arbitrator does not resolve the dispute before that window expires, the contract can automatically settle the dispute using the configured expired-dispute policy.
+
+### Deadline behavior
+
+- The dispute deadline is measured from the timestamp recorded when the dispute was initiated.
+- The contract compares that timestamp against the current ledger time using the platform's `max_dispute_duration` setting.
+- If the deadline has not yet passed, calling `resolve_expired_dispute` returns `Error::DisputeExpired`.
+- Once the deadline has elapsed, `resolve_expired_dispute` can be invoked to finalize the escrow according to the configured fee policy.
+
+### CLI example
+
+```bash
+stellar contract invoke \
+  --id <CONTRACT_ID> \
+  --source <ADMIN_ACCOUNT> \
+  --network testnet \
+  -- \
+  resolve_expired_dispute \
+  --order_id 42
+```
+
+### What if the arbitrator does not respond?
+
+If an arbitrator stalls past the deadline, the platform admin can still trigger the expired-dispute resolution path to prevent the escrow from remaining in a disputed state indefinitely.
+
 ## Technical Edge Cases
 
 ### Transaction Atomicity
