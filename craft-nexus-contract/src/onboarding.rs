@@ -2622,7 +2622,7 @@ impl OnboardingContract {
     ///
     /// # Preconditions
     /// - Contract must be initialized.
-    /// - Caller must be `platform_admin`.
+    /// - Caller must be `platform_admin` (admin-only restriction).
     ///
     /// # Storage Side-Effects
     /// - **Read/Write** [`DataKey::Config`] — thresholds updated, TTL extended.
