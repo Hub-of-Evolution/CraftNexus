@@ -1,0 +1,8 @@
+{
+  "struct": "UserOnboardedEvent",
+  "fields": [
+    {"name": "user", "type": "Address"},
+    {"name": "username", "type": "String"},
+    {"name": "role", "type": "UserRole"}
+  ]
+}
