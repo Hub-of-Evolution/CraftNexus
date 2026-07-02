@@ -2953,6 +2953,44 @@ fn test_get_escrow_count_increments() {
 }
 
 #[test]
+fn test_get_escrow_count_tracks_100_global_indices() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    for order_id in 1u32..=100 {
+        client.create_escrow(&buyer, &seller, &token_id, &100, &order_id, &Some(3600));
+    }
+
+    assert_eq!(client.get_escrow_count(), 100);
+
+    let count_key = DataKey::EscrowCount;
+    let stored_count: u32 = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&count_key).unwrap_or(0u32)
+    });
+    assert_eq!(stored_count, 100);
+
+    for index in 0u32..100 {
+        let index_key = DataKey::GlobalEscrowIdIndexed(index);
+        let stored_id: u32 = env.as_contract(&client.address, || {
+            env.storage().persistent().get(&index_key).unwrap()
+        });
+        assert_eq!(stored_id, index + 1);
+    }
+
+    let first_page = client.get_all_escrow_ids_iterative(&0, &20);
+    assert_eq!(first_page.len(), 20);
+    assert_eq!(first_page.get(0), Some(1u32));
+    assert_eq!(first_page.get(19), Some(20u32));
+
+    let last_page = client.get_all_escrow_ids_iterative(&4, &20);
+    assert_eq!(last_page.len(), 20);
+    assert_eq!(last_page.get(0), Some(81u32));
+    assert_eq!(last_page.get(19), Some(100u32));
+}
+
+#[test]
 fn test_get_all_escrow_ids_iterative_empty() {
     let env = Env::default();
     env.mock_all_auths();
@@ -3062,6 +3100,160 @@ fn test_get_escrow_count_batch_creation() {
 
     let ids = client.get_all_escrow_ids_iterative(&0, &10);
     assert_eq!(ids.len(), 3);
+}
+
+#[test]
+fn test_legacy_all_escrow_ids_migrates_on_get_escrow_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let legacy_key = DataKey::AllEscrowIds;
+    let count_key = DataKey::EscrowCount;
+    let mut legacy_ids = soroban_sdk::Vec::new(&env);
+    for order_id in [11u32, 22, 33, 44] {
+        legacy_ids.push_back(order_id);
+    }
+
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&legacy_key, &legacy_ids);
+        env.storage().persistent().set(&count_key, &1u32);
+    });
+
+    assert_eq!(client.get_escrow_count(), 4);
+
+    let stored_count: u32 = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&count_key).unwrap()
+    });
+    assert_eq!(stored_count, 4);
+
+    let has_legacy = env.as_contract(&client.address, || env.storage().persistent().has(&legacy_key));
+    assert!(!has_legacy);
+
+    for (index, expected_id) in [11u32, 22, 33, 44].into_iter().enumerate() {
+        let index_key = DataKey::GlobalEscrowIdIndexed(index as u32);
+        let stored_id: u32 = env.as_contract(&client.address, || {
+            env.storage().persistent().get(&index_key).unwrap()
+        });
+        assert_eq!(stored_id, expected_id);
+    }
+}
+
+#[test]
+fn test_legacy_all_escrow_ids_migrates_on_iterative_read() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let legacy_key = DataKey::AllEscrowIds;
+    let count_key = DataKey::EscrowCount;
+    let mut legacy_ids = soroban_sdk::Vec::new(&env);
+    for order_id in 1u32..=5 {
+        legacy_ids.push_back(order_id * 10);
+    }
+
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&legacy_key, &legacy_ids);
+        env.storage().persistent().remove(&count_key);
+    });
+
+    let page = client.get_all_escrow_ids_iterative(&0, &10);
+    assert_eq!(page.len(), 5);
+    assert_eq!(page.get(0), Some(10u32));
+    assert_eq!(page.get(4), Some(50u32));
+
+    let stored_count: u32 = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&count_key).unwrap()
+    });
+    assert_eq!(stored_count, 5);
+
+    let has_legacy = env.as_contract(&client.address, || env.storage().persistent().has(&legacy_key));
+    assert!(!has_legacy);
+}
+
+#[test]
+fn test_legacy_all_escrow_ids_migration_is_idempotent_after_first_read() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let legacy_key = DataKey::AllEscrowIds;
+    let count_key = DataKey::EscrowCount;
+    let mut legacy_ids = soroban_sdk::Vec::new(&env);
+    for order_id in [5u32, 15, 25] {
+        legacy_ids.push_back(order_id);
+    }
+
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&legacy_key, &legacy_ids);
+        env.storage().persistent().remove(&count_key);
+    });
+
+    let first_page = client.get_all_escrow_ids_iterative(&0, &10);
+    let second_page = client.get_all_escrow_ids_iterative(&0, &10);
+    assert_eq!(first_page, second_page);
+    assert_eq!(client.get_escrow_count(), 3);
+
+    let has_legacy = env.as_contract(&client.address, || env.storage().persistent().has(&legacy_key));
+    assert!(!has_legacy);
+
+    for (index, expected_id) in [5u32, 15, 25].into_iter().enumerate() {
+        let index_key = DataKey::GlobalEscrowIdIndexed(index as u32);
+        let stored_id: u32 = env.as_contract(&client.address, || {
+            env.storage().persistent().get(&index_key).unwrap()
+        });
+        assert_eq!(stored_id, expected_id);
+    }
+}
+
+#[test]
+fn test_legacy_all_escrow_ids_migration_preserves_existing_indexed_entries() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let legacy_key = DataKey::AllEscrowIds;
+    let count_key = DataKey::EscrowCount;
+    let existing_index_key = DataKey::GlobalEscrowIdIndexed(0);
+    let missing_index_key = DataKey::GlobalEscrowIdIndexed(1);
+    let tail_index_key = DataKey::GlobalEscrowIdIndexed(2);
+    let mut legacy_ids = soroban_sdk::Vec::new(&env);
+    for order_id in [10u32, 20, 30] {
+        legacy_ids.push_back(order_id);
+    }
+
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&legacy_key, &legacy_ids);
+        env.storage().persistent().set(&existing_index_key, &999u32);
+        env.storage().persistent().set(&count_key, &1u32);
+    });
+
+    let page = client.get_all_escrow_ids_iterative(&0, &10);
+    assert_eq!(page.len(), 3);
+    assert_eq!(page.get(0), Some(999u32));
+    assert_eq!(page.get(1), Some(20u32));
+    assert_eq!(page.get(2), Some(30u32));
+
+    let stored_count: u32 = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&count_key).unwrap()
+    });
+    assert_eq!(stored_count, 3);
+
+    let first_id: u32 = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&existing_index_key).unwrap()
+    });
+    let second_id: u32 = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&missing_index_key).unwrap()
+    });
+    let third_id: u32 = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&tail_index_key).unwrap()
+    });
+    assert_eq!(first_id, 999u32);
+    assert_eq!(second_id, 20u32);
+    assert_eq!(third_id, 30u32);
+
+    let has_legacy = env.as_contract(&client.address, || env.storage().persistent().has(&legacy_key));
+    assert!(!has_legacy);
 }
 
 #[test]
