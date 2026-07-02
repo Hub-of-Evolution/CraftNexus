@@ -3215,6 +3215,47 @@ fn test_propose_partial_refund_already_exists() {
 }
 
 #[test]
+fn test_validate_ipfs_cid_v0_and_v1_accepts_valid_cids() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &100_000_000);
+
+    let cid_v0 = String::from_str(
+        &env,
+        "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9",
+    );
+    let cid_v1 = String::from_str(
+        &env,
+        "bafybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4",
+    );
+
+    let escrow_v0 = client.create_escrow_with_metadata(
+        &buyer,
+        &seller,
+        &token_id,
+        &1000,
+        &1,
+        &Some(3600),
+        &Some(cid_v0.clone()),
+        &None,
+    );
+    let escrow_v1 = client.create_escrow_with_metadata(
+        &buyer,
+        &seller,
+        &token_id,
+        &1000,
+        &2,
+        &Some(3600),
+        &Some(cid_v1.clone()),
+        &None,
+    );
+
+    assert_eq!(escrow_v0.ipfs_hash, Some(cid_v0));
+    assert_eq!(escrow_v1.ipfs_hash, Some(cid_v1));
+}
+
+#[test]
 fn test_validate_ipfs_cid_v1_stricter() {
     let env = Env::default();
     env.mock_all_auths();

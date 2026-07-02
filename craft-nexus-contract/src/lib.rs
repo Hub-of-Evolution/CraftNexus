@@ -161,6 +161,48 @@ pub fn is_retryable(error: Error) -> bool {
 const ESCROW: Symbol = symbol_short!("ESCROW");
 const PLATFORM_FEE: Symbol = symbol_short!("PLAT_FEE");
 const PLATFORM_WALLET: Symbol = symbol_short!("PLAT_WAL");
+
+const BASE58_BTC_CHARSET: [bool; 256] = {
+    let mut chars = [false; 256];
+
+    let mut i = b'1' as usize;
+    while i <= b'9' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'A' as usize;
+    while i <= b'H' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'J' as usize;
+    while i <= b'N' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'P' as usize;
+    while i <= b'Z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'a' as usize;
+    while i <= b'k' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'm' as usize;
+    while i <= b'z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    chars
+};
 const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
 const ADMIN: Symbol = symbol_short!("ADMIN");
 
@@ -1163,34 +1205,10 @@ impl CraftNexusContract {
         cid.copy_into_slice(&mut buf[0..len]);
         let cid_bytes = &buf[0..len];
 
-        // CIDv0: exactly 46 chars, starts with "Qm", Base58btc alphabet.
-        //
-        // Issue #521 — the Base58btc alphabet explicitly EXCLUDES
-        // visually-confusable characters: `0` (zero), `O` (capital o),
-        // `I` (capital i), and `l` (lowercase L). The ranges below are
-        // the canonical Base58btc set:
-        //   1..=9               (no leading 0)
-        //   A..=H, J..=N, P..=Z (no I, no O)
-        //   a..=k, m..=z        (no l)
-        // A CIDv0 hash is always 32 bytes of multihash digest →
-        // 46 Base58btc characters. Off-chain indexers that need to
-        // resolve a CIDv0 reference should pin it via an IPFS gateway
-        // such as `https://ipfs.io/ipfs/<CID>` or by talking to a
-        // dedicated cluster (Pinata, web3.storage).
         let is_v0 = len == 46
             && cid_bytes[0] == b'Q'
             && cid_bytes[1] == b'm'
-            && cid_bytes.iter().all(|b| {
-                matches!(
-                    *b,
-                    b'1'..=b'9'
-                        | b'A'..=b'H'
-                        | b'J'..=b'N'
-                        | b'P'..=b'Z'
-                        | b'a'..=b'k'
-                        | b'm'..=b'z'
-                )
-            });
+            && cid_bytes.iter().all(|b| Self::is_base58_btc_char(*b));
 
         if is_v0 {
             return true;
@@ -1207,12 +1225,7 @@ impl CraftNexusContract {
         match prefix {
             // base32lower (most common CIDv1 encoding)
             b'b' => {
-                // Stricter length check for typical CIDv1 base32 (sha256/dag-pb is 59 chars)
-                if len < 50 || len > 100 {
-                    return false;
-                }
-                // Logic check: CIDv1 base32 ALWAYS starts with 'ba'
-                if cid_bytes[1] != b'a' {
+                if len < 50 || len > 100 || cid_bytes[1] != b'a' {
                     return false;
                 }
                 payload
@@ -1221,12 +1234,7 @@ impl CraftNexusContract {
             }
             // base16lower (hex)
             b'f' => {
-                // CIDv1 base16 typically ~73 chars
-                if len < 60 || len > 120 {
-                    return false;
-                }
-                // Logic check: CIDv1 base16 ALWAYS starts with 'f01'
-                if cid_bytes[1] != b'0' || cid_bytes[2] != b'1' {
+                if len < 60 || len > 120 || cid_bytes[1] != b'0' || cid_bytes[2] != b'1' {
                     return false;
                 }
                 payload
@@ -1235,24 +1243,17 @@ impl CraftNexusContract {
             }
             // base58btc
             b'z' => {
-                // CIDv1 base58 typically ~50 chars
                 if len < 40 || len > 100 {
                     return false;
                 }
-                payload.iter().all(|b| {
-                    matches!(
-                        *b,
-                        b'1'..=b'9'
-                            | b'A'..=b'H'
-                            | b'J'..=b'N'
-                            | b'P'..=b'Z'
-                            | b'a'..=b'k'
-                            | b'm'..=b'z'
-                    )
-                })
+                payload.iter().all(|b| Self::is_base58_btc_char(*b))
             }
             _ => false,
         }
+    }
+
+    fn is_base58_btc_char(byte: u8) -> bool {
+        BASE58_BTC_CHARSET[byte as usize]
     }
 
     /// Validate an optional IPFS CID string, panicking with `InvalidIpfsHash` if present but invalid.

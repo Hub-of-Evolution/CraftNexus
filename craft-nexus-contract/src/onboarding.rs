@@ -96,6 +96,48 @@ const READ_TTL_THRESHOLD: u32 = 1_000;
 const TTL_EXTENSION: u32 = 518_400;
 const CURRENT_USER_PROFILE_VERSION: u32 = 4;
 
+const BASE58_BTC_CHARSET: [bool; 256] = {
+    let mut chars = [false; 256];
+
+    let mut i = b'1' as usize;
+    while i <= b'9' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'A' as usize;
+    while i <= b'H' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'J' as usize;
+    while i <= b'N' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'P' as usize;
+    while i <= b'Z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'a' as usize;
+    while i <= b'k' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'm' as usize;
+    while i <= b'z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    chars
+};
+
 /// Cooldown period for username changes to prevent squatting and rapid identity rotation.
 /// 30 days in seconds.
 const USERNAME_CHANGE_COOLDOWN: u64 = 30 * 24 * 60 * 60;
@@ -869,6 +911,10 @@ fn utf8_char_len(first_byte: u8) -> usize {
 /// - CIDv1 base32lower (prefix 'b'): lowercase a-z + 2-7
 /// - CIDv1 base16lower (prefix 'f'): lowercase hex 0-9 + a-f
 /// - CIDv1 base58btc  (prefix 'z'): Base58 alphabet
+fn is_base58_btc_char(byte: u8) -> bool {
+    BASE58_BTC_CHARSET[byte as usize]
+}
+
 fn validate_ipfs_cid(cid: &String) -> bool {
     let len = cid.len() as usize;
     if len == 0 || len > 128 {
@@ -883,17 +929,7 @@ fn validate_ipfs_cid(cid: &String) -> bool {
     let is_v0 = len == 46
         && cid_bytes[0] == b'Q'
         && cid_bytes[1] == b'm'
-        && cid_bytes.iter().all(|b| {
-            matches!(
-                *b,
-                b'1'..=b'9'
-                    | b'A'..=b'H'
-                    | b'J'..=b'N'
-                    | b'P'..=b'Z'
-                    | b'a'..=b'k'
-                    | b'm'..=b'z'
-            )
-        });
+        && cid_bytes.iter().all(|b| is_base58_btc_char(*b));
 
     if is_v0 {
         return true;
@@ -944,17 +980,7 @@ fn validate_ipfs_cid(cid: &String) -> bool {
             if len < 40 || len > 100 {
                 return false;
             }
-            payload.iter().all(|b| {
-                matches!(
-                    *b,
-                    b'1'..=b'9'
-                        | b'A'..=b'H'
-                        | b'J'..=b'N'
-                        | b'P'..=b'Z'
-                        | b'a'..=b'k'
-                        | b'm'..=b'z'
-                )
-            })
+            payload.iter().all(|b| is_base58_btc_char(*b))
         }
         _ => false,
     }
