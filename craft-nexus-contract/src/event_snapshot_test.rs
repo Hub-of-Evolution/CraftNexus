@@ -2,12 +2,12 @@
 
 use core::mem::offset_of;
 
+use crate::onboarding::UserOnboardedEvent;
 use crate::{
     ArtisanFeeTierUpdatedEvent, ConfigUpdatedEvent, EscrowEvent, EscrowResolvedEvent,
     MetadataVerifiedEvent, PlatformPausedEvent, PlatformUnpausedEvent, RecurringEscrowEvent,
     ReputationUpdateEvent, TokensStakedEvent, TokensUnstakedEvent, UpgradeProposalEvent,
 };
-use crate::onboarding::UserOnboardedEvent;
 
 /// Verifies each expected field exists on the struct. If a field is renamed or
 /// removed, the corresponding `offset_of!` line fails to compile.
@@ -19,17 +19,34 @@ macro_rules! check_fields {
 
 #[test]
 fn snapshot_escrow_event() {
-    check_fields!(EscrowEvent, [escrow_id, action, buyer, seller, amount, token, timestamp]);
+    check_fields!(
+        EscrowEvent,
+        [escrow_id, action, buyer, seller, amount, token, timestamp]
+    );
 }
 
 #[test]
 fn snapshot_escrow_resolved_event() {
-    check_fields!(EscrowResolvedEvent, [escrow_id, buyer, seller, arbitrator, amount, token, timestamp]);
+    check_fields!(
+        EscrowResolvedEvent,
+        [escrow_id, buyer, seller, arbitrator, amount, token, timestamp]
+    );
 }
 
 #[test]
 fn snapshot_reputation_update_event() {
-    check_fields!(ReputationUpdateEvent, [address, successful_delta, disputed_delta, metrics_sales_delta, metrics_amount, token, timestamp]);
+    check_fields!(
+        ReputationUpdateEvent,
+        [
+            address,
+            successful_delta,
+            disputed_delta,
+            metrics_sales_delta,
+            metrics_amount,
+            token,
+            timestamp
+        ]
+    );
 }
 
 #[test]
@@ -69,12 +86,18 @@ fn snapshot_platform_unpaused_event() {
 
 #[test]
 fn snapshot_recurring_escrow_event() {
-    check_fields!(RecurringEscrowEvent, [id, action, buyer, artisan, amount, timestamp]);
+    check_fields!(
+        RecurringEscrowEvent,
+        [id, action, buyer, artisan, amount, timestamp]
+    );
 }
 
 #[test]
 fn snapshot_upgrade_proposal_event() {
-    check_fields!(UpgradeProposalEvent, [action, wasm_hash, admin, timestamp, upgrade_at]);
+    check_fields!(
+        UpgradeProposalEvent,
+        [action, wasm_hash, admin, timestamp, upgrade_at]
+    );
 }
 
 #[test]
