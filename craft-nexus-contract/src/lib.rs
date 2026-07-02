@@ -2658,7 +2658,6 @@ impl CraftNexusContract {
         let window = release_window.unwrap_or(604800u32);
 
         // Validate release window bounds
-        let config = Self::get_platform_config_internal(&env);
         let min_window = config.min_release_window;
         let max_window = Self::get_max_release_window(&env);
 
