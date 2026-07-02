@@ -84,7 +84,7 @@ fn test_recurring_escrow_lifecycle() {
 
     // 1. Create Recurring Escrow (2 cycles, frequency 3600)
     let rec_escrow =
-        escrow.create_recurring_escrow(&buyer, &artisan, &token_id, &total_amount, &3600, &2);
+        escrow.create_recurring_escrow(&buyer, &artisan, &token_id, &total_amount, 3600, 2).unwrap();
     assert_eq!(rec_escrow.total_amount, total_amount);
     assert!(rec_escrow.is_active);
     assert!(escrow.has_active_escrows(&buyer));

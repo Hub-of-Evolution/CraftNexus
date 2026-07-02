@@ -100,7 +100,7 @@ fn test_create_escrow_success() {
     // Verify event
     let events = env.events().all();
     assert!(!events.is_empty(), "No events emitted");
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(last_event.0, client.address);
     // Topics: ["escrow_created", escrow_id]
     assert_eq!(
@@ -263,7 +263,7 @@ fn test_dispute_escrow_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -597,7 +597,7 @@ fn test_update_platform_fee() {
     assert_eq!(client.get_platform_fee(), 800);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
     assert_eq!(
         config_event.field_name,
@@ -726,7 +726,7 @@ fn test_set_artisan_fee_tier_emits_dedicated_event() {
     assert_eq!(client.get_effective_fee_bps(&seller), 750);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -1361,7 +1361,7 @@ fn test_set_min_escrow_amount_emits_config_event() {
     client.set_min_escrow_amount(&token_id, &1_00000);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
 
     assert_eq!(
@@ -1969,7 +1969,7 @@ fn test_extend_release_window_success() {
 
     // Verify event
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.1,
         vec![
@@ -2180,6 +2180,28 @@ fn test_set_onboarding_contract() {
     let fake_onboarding = Address::generate(&env);
     // Should not panic
     client.set_onboarding_contract(&fake_onboarding);
+}
+
+/// Duplicate set_onboarding_contract with the same address performs only one
+/// storage write — the second call is a no-op (Issue #527 / #642).
+#[test]
+fn test_set_onboarding_contract_same_address_skips_storage_write() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let new_onboarding = Address::generate(&env);
+    let events_before = env.events().all().len();
+
+    client.set_onboarding_contract(&new_onboarding);
+    let events_after_first = env.events().all().len();
+    assert_eq!(events_after_first, events_before + 1);
+
+    client.set_onboarding_contract(&new_onboarding);
+    let events_after_second = env.events().all().len();
+    assert_eq!(events_after_second, events_after_first);
+
+    assert_eq!(client.get_onboarding_contract(), new_onboarding);
 }
 
 /// When no onboarding contract is set, release_funds completes without error.
@@ -2554,7 +2576,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
     assert!(is_valid);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.unwrap().1,
         vec![
@@ -2579,7 +2601,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&true);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.unwrap().1,
         vec![
@@ -2596,7 +2618,7 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&false);
 
     let events = env.events().all();
-    let last_event = events.last();
+    let last_event = events.last().unwrap();
     assert_eq!(
         last_event.unwrap().1,
         vec![
@@ -3282,4 +3304,201 @@ fn test_get_escrows_by_seller_requires_auth() {
     let auths = env.auths();
     assert_eq!(auths.len(), 1);
     assert_eq!(auths.get(0).unwrap().0, seller);
+}
+
+// ===== Issue #656: funding_deadline / cancel_unfunded_escrow / auto_cancel_unfunded =====
+
+/// Helper: create an unfunded escrow and return the escrow struct.
+fn create_unfunded(
+    client: &CraftNexusContractClient,
+    buyer: &Address,
+    seller: &Address,
+    token: &Address,
+) -> super::Escrow {
+    client.create_unfunded_escrow(
+        &1u32,
+        buyer,
+        seller,
+        token,
+        &1_000_000i128,
+        &3600u32, // 1-hour release window
+        &None,
+        &None,
+    )
+}
+
+/// The funding_deadline field should equal created_at + UNFUNDED_CANCEL_TIMEOUT (24 h).
+#[test]
+fn test_funding_deadline_set_on_create() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    let escrow = create_unfunded(&client, &buyer, &seller, &token_id);
+
+    assert!(!escrow.funded);
+    let deadline = escrow.funding_deadline.expect("funding_deadline must be set");
+    // created_at is stored as u32 (truncated ledger timestamp); deadline is created_at + 86400
+    assert_eq!(deadline, escrow.created_at as u64 + 24 * 60 * 60);
+}
+
+/// Buyer may cancel an unfunded escrow voluntarily before the deadline.
+#[test]
+fn test_buyer_can_cancel_before_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    create_unfunded(&client, &buyer, &seller, &token_id);
+
+    // Time is still within the 24-hour window; buyer cancels voluntarily.
+    let result = client.cancel_unfunded_escrow(&1u32, &buyer);
+    assert_eq!(result, ());
+}
+
+/// Non-buyer caller is rejected before the deadline.
+#[test]
+#[should_panic]
+fn test_seller_cannot_cancel_before_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    create_unfunded(&client, &buyer, &seller, &token_id);
+
+    // Seller tries to cancel before deadline — must panic with Unauthorized.
+    client.cancel_unfunded_escrow(&1u32, &seller);
+}
+
+/// After the deadline the seller can cancel the unfunded escrow.
+#[test]
+fn test_seller_can_cancel_after_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    create_unfunded(&client, &buyer, &seller, &token_id);
+
+    // Advance ledger past the 24-hour funding deadline.
+    env.ledger().with_mut(|li| {
+        li.timestamp += 24 * 60 * 60 + 1;
+    });
+
+    let result = client.cancel_unfunded_escrow(&1u32, &seller);
+    assert_eq!(result, ());
+}
+
+/// After the deadline the platform admin can cancel the unfunded escrow.
+#[test]
+fn test_admin_can_cancel_after_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, admin) = setup_test(&env, true);
+
+    create_unfunded(&client, &buyer, &seller, &token_id);
+
+    // Advance ledger past the 24-hour funding deadline.
+    env.ledger().with_mut(|li| {
+        li.timestamp += 24 * 60 * 60 + 1;
+    });
+
+    let result = client.cancel_unfunded_escrow(&1u32, &admin);
+    assert_eq!(result, ());
+}
+
+/// A funded escrow cannot be cancelled via cancel_unfunded_escrow.
+#[test]
+#[should_panic]
+fn test_cancel_funded_escrow_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1_000_000);
+    // create_escrow funds immediately
+    client.create_escrow(&buyer, &seller, &token_id, &1_000_000i128, &1u32, &None);
+
+    // Must panic: the escrow is funded
+    client.cancel_unfunded_escrow(&1u32, &buyer);
+}
+
+/// auto_cancel_unfunded skips escrows before deadline, cancels those past it,
+/// and returns the correct count.
+#[test]
+fn test_auto_cancel_unfunded_batch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, admin) = setup_test(&env, true);
+
+    // Create 3 unfunded escrows at the current timestamp.
+    for id in 1u32..=3 {
+        client.create_unfunded_escrow(
+            &id,
+            &buyer,
+            &seller,
+            &token_id,
+            &1_000_000i128,
+            &3600u32,
+            &None,
+            &None,
+        );
+    }
+
+    // Advance past the deadline so all 3 are eligible.
+    env.ledger().with_mut(|li| {
+        li.timestamp += 24 * 60 * 60 + 1;
+    });
+
+    let cancelled = client.auto_cancel_unfunded(
+        &admin,
+        &soroban_sdk::vec![&env, 1u32, 2u32, 3u32],
+    );
+    assert_eq!(cancelled, 3);
+}
+
+/// auto_cancel_unfunded skips escrows that have not yet expired.
+#[test]
+fn test_auto_cancel_unfunded_skips_fresh_escrows() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, admin) = setup_test(&env, true);
+
+    client.create_unfunded_escrow(
+        &1u32,
+        &buyer,
+        &seller,
+        &token_id,
+        &1_000_000i128,
+        &3600u32,
+        &None,
+        &None,
+    );
+
+    // Do NOT advance time — escrow is still within the deadline window.
+    let cancelled = client.auto_cancel_unfunded(
+        &admin,
+        &soroban_sdk::vec![&env, 1u32],
+    );
+    assert_eq!(cancelled, 0);
+}
+
+/// auto_cancel_unfunded is rejected for non-admin callers.
+#[test]
+#[should_panic]
+fn test_auto_cancel_unfunded_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    create_unfunded(&client, &buyer, &seller, &token_id);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += 24 * 60 * 60 + 1;
+    });
+
+    // Buyer is not admin — must panic.
+    client.auto_cancel_unfunded(
+        &buyer,
+        &soroban_sdk::vec![&env, 1u32],
+    );
 }

@@ -3,7 +3,7 @@
 use super::*;
 use soroban_sdk::{
     testutils::Address as _,
-    token, Address, Env,
+    token, Address, Env, Map,
 };
 use soroban_sdk::testutils::Ledger;
 
@@ -275,7 +275,7 @@ fn test_batch_create_with_indexed_storage() {
     let mut order_ids = soroban_sdk::Vec::new(&env);
     for i in 0..10 {
         let order_id = i + 1;
-        let escrow = client.create_escrow(&buyer, &seller, &token, &1000, &order_id, &Some(604800));
+        let _escrow = client.create_escrow(&buyer, &seller, &token, &1000, &order_id, &Some(604800));
         order_ids.push_back(order_id);
     }
     assert_eq!(order_ids.len(), 10);
@@ -389,11 +389,11 @@ fn test_whitelisted_tokens_individual_storage() {
 
 #[test]
 fn test_whitelisted_tokens_scalability() {
-    let (env, client, _, _, _, admin, _, _) = setup_test();
+    let (env, client, _, _, _, _admin, _, _) = setup_test();
 
     // Create many tokens to test scalability
     let mut tokens = soroban_sdk::Vec::new(&env);
-    for i in 0..100 {
+    for _i in 0..100 {
         let token = Address::generate(&env);
         tokens.push_back(token.clone());
         client.whitelist_token(&token);
@@ -484,6 +484,80 @@ fn test_whitelisted_tokens_migration() {
 }
 
 #[test]
+fn test_whitelist_migration_50_tokens() {
+    let (env, client, _, _, _, _admin, _, _) = setup_test();
+
+    let num_tokens = 55;
+    let mut tokens = soroban_sdk::Vec::new(&env);
+
+    let legacy_key = DataKey::WhitelistedTokens;
+    let mut legacy_map = Map::new(&env);
+    for i in 0..num_tokens {
+        let token = Address::generate(&env);
+        tokens.push_back(token.clone());
+        legacy_map.set(token, true);
+    }
+    let false_token = Address::generate(&env);
+    legacy_map.set(false_token, false);
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&legacy_key, &legacy_map);
+    });
+
+    let migrated_count = client.migrate_whitelist_storage();
+    assert_eq!(migrated_count, num_tokens);
+
+    let count = client.get_whitelisted_token_count();
+    assert_eq!(count, num_tokens);
+
+    for i in 0..tokens.len() {
+        if let Some(token) = tokens.get(i) {
+            assert!(client.is_token_whitelisted(&token), "token {} not whitelisted", i);
+        }
+    }
+    assert!(!client.is_token_whitelisted(&false_token));
+
+    let has_legacy = env.as_contract(&client.address, || {
+        env.storage().persistent().has(&legacy_key)
+    });
+    assert!(!has_legacy);
+}
+
+#[test]
+fn test_whitelist_scalability_beyond_1800() {
+    let (env, client, _, _, _, _admin, _, _) = setup_test();
+
+    let num_tokens = 2001;
+    let mut tokens = soroban_sdk::Vec::new(&env);
+
+    let legacy_key = DataKey::WhitelistedTokens;
+    let mut legacy_map = Map::new(&env);
+    for i in 0..num_tokens {
+        let token = Address::generate(&env);
+        tokens.push_back(token.clone());
+        legacy_map.set(token, true);
+    }
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&legacy_key, &legacy_map);
+    });
+
+    let migrated_count = client.migrate_whitelist_storage();
+    assert_eq!(migrated_count, num_tokens);
+
+    let count = client.get_whitelisted_token_count();
+    assert_eq!(count, num_tokens);
+
+    assert!(client.is_token_whitelisted(&tokens.get_unchecked(0)));
+    assert!(client.is_token_whitelisted(&tokens.get_unchecked(num_tokens / 2)));
+    assert!(client.is_token_whitelisted(&tokens.get_unchecked(num_tokens - 1)));
+}
+
+#[test]
 fn test_artisan_stake_queue_bounded_storage() {
     let (env, client, _, artisan, token, _, _, _) = setup_test();
 
@@ -526,7 +600,7 @@ fn test_artisan_stake_queue_pruning() {
     token_asset.mint(&artisan, &100_000_000);
 
     // Add deposits up to the pruning threshold
-    for i in 1..=STAKE_QUEUE_PRUNE_THRESHOLD {
+    for _i in 1..=STAKE_QUEUE_PRUNE_THRESHOLD {
         client.stake_tokens(&artisan, &token, &1000);
     }
 
@@ -541,9 +615,20 @@ fn test_artisan_stake_queue_pruning() {
     // Add one more deposit - this should trigger pruning
     client.stake_tokens(&artisan, &token, &1000);
 
-    // Count should be less than the threshold + 1 due to pruning
+    // Count should collapse to the single new deposit because all earlier entries matured and were pruned.
     let count_after_pruning = client.get_artisan_stake_queue_count(&artisan);
-    assert!(count_after_pruning <= STAKE_QUEUE_PRUNE_THRESHOLD);
+    assert_eq!(count_after_pruning, 1);
+
+    let stored_deposit: Option<StakeDeposit> = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 0))
+    });
+    let deposit = stored_deposit.expect("pruned queue should retain the latest deposit in storage");
+    assert_eq!(deposit.amount, 1000);
+
+    let missing_deposit: Option<StakeDeposit> = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 1))
+    });
+    assert!(missing_deposit.is_none(), "only the latest deposit should remain after pruning");
 }
 
 #[test]
