@@ -1,0 +1,8 @@
+{
+  "struct": "ConfigUpdatedEvent",
+  "fields": [
+    {"name": "field_name", "type": "Symbol"},
+    {"name": "old_value", "type": "ConfigValue"},
+    {"name": "new_value", "type": "ConfigValue"}
+  ]
+}

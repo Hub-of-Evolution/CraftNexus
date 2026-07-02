@@ -1,0 +1,11 @@
+{
+  "struct": "RecurringEscrowEvent",
+  "fields": [
+    {"name": "id", "type": "u64"},
+    {"name": "action", "type": "RecurringEscrowAction"},
+    {"name": "buyer", "type": "Address"},
+    {"name": "artisan", "type": "Address"},
+    {"name": "amount", "type": "i128"},
+    {"name": "timestamp", "type": "u64"}
+  ]
+}
