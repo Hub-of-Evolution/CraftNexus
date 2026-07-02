@@ -20,6 +20,8 @@ Stellar Smart Contracts (Soroban) for the CraftNexus marketplace platform.
 - [Arbitrator Role](#arbitrator-role)
 - [Contract Addresses](#contract-addresses)
 - [Security Considerations](#security-considerations)
+- [Security Patterns](#security-patterns)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -622,7 +624,10 @@ Onboarding events publish with one topic symbol and payload `Address`:
 
 ## Error Codes
 
-Escrow contract errors (`src/lib.rs`, `Error` enum):
+Errors are grouped by category for off-chain triage. Use `is_retryable(error)` in
+`src/lib.rs` to check if an error may succeed on retry.
+
+### Auth / Access (1–9) — rollback immediately
 
 | Code | Variant | Meaning |
 |------|---------|---------|
@@ -635,10 +640,59 @@ Escrow contract errors (`src/lib.rs`, `Error` enum):
 | `7` | `ReleaseWindowTooLong` | Reserved for release-window policy checks |
 | `8` | `NotInDispute` | Escrow expected to be disputed but was not |
 | `9` | `AlreadyOnboarded` | Reserved for onboarding collision handling |
+
+### State / Transition (10–19) — retry after state change
+
+| Code | Variant | Meaning |
+|------|---------|---------|
 | `10` | `InvalidFee` | Platform fee setting is invalid |
 | `11` | `SameBuyerSeller` | Buyer and seller addresses are identical |
 | `12` | `PlatformNotInitialized` | Platform config/admin not initialized |
 | `13` | `ReleaseWindowNotElapsed` | Auto-release attempted before release window end |
+| `14` | `BatchOperationFailed` | Deprecated: use `BatchLimitExceeded` |
+| `15` | `ContractPaused` | Contract is paused |
+| `16` | `DisputeExpired` | Dispute resolution deadline not yet expired |
+| `17` | `InsufficientStake` | Artisan stake below minimum |
+| `18` | `StakeCooldownActive` | Stake cooldown period still active |
+| `19` | `InvalidRefundAmount` | Refund amount invalid (zero, negative, or exceeds escrow) |
+
+### Config / Resource (20–29) — operator must act
+
+| Code | Variant | Meaning |
+|------|---------|---------|
+| `20` | `ProposalNotFound` | Partial refund proposal not found |
+| `21` | `ProposalAlreadyExists` | Proposal already exists for this order |
+| `22` | `ReentryDetected` | Re-entrancy detected |
+| `23` | `ReleaseWindowTooShort` | Release window is zero or negative |
+| `24` | `StakeTokenMismatch` | Staked funds only withdrawable in original staking token |
+| `25` | `InvalidAdminAddress` | Invalid admin address provided |
+| `26` | `CorruptedPlatformConfig` | Platform configuration storage corrupted |
+| `27` | `StakeQueueFull` | Stake history queue at capacity |
+| `28` | `AdminRecoveryFailed` | Admin recovery failed due to time lock or invalid conditions |
+| `29` | `BatchLimitExceeded` | Batch operation limit exceeded |
+
+### Operational / Gates (30–39) — retry after cooldown
+
+| Code | Variant | Meaning |
+|------|---------|---------|
+| `30` | `DeprecatedFunction` | Deprecated function called (no-op) |
+| `31` | `NoPendingAdmin` | No pending admin transfer |
+| `32` | `NoUpgradeProposed` | No WASM upgrade proposed |
+| `33` | `UpgradeCooldownActive` | WASM upgrade cooldown active |
+| `34` | `UpgradeProposalExists` | WASM upgrade proposal already exists |
+| `35` | `InvalidUpgradeHash` | Invalid WASM upgrade hash |
+| `36` | `RecurringEscrowNotFound` | Recurring escrow not found |
+| `37` | `CycleNotReady` | Escrow cycle not ready for release |
+| `38` | `RecurringEscrowIdExhausted` | Recurring escrow ID counter exhausted |
+| `39` | `OnboardingContractNotSet` | Onboarding contract address not configured |
+
+### Validation (40–42) — fix caller input
+
+| Code | Variant | Meaning |
+|------|---------|---------|
+| `40` | `InvalidMetadataHash` | Provided metadata hash is invalid |
+| `41` | `InvalidIpfsHash` | Provided IPFS hash is invalid |
+| `42` | `NotAnUpgradeSigner` | Caller is not an authorized upgrade signer |
 
 Onboarding contract currently reverts with explicit panic messages (for example `Username too short`, `Username already taken`, `User not found`).
 
@@ -894,15 +948,94 @@ for (const evt of ledgerEvents) {
 - **Onboarding Contract**: `[DEPLOY_AND_UPDATE]`
 - **Escrow Contract**: `[DEPLOY_AND_UPDATE]`
 
+### Address Synchronization
+
+Contract addresses in this file and in `stellar.toml` are automatically verified to stay in sync via CI. When updating a contract address:
+
+1. Update the address in **both** `README.md` and `stellar.toml`
+2. Push your changes
+3. The CI workflow (`.github/workflows/contract-address-check.yml`) will verify they match
+4. If they don't match, the CI check will fail and show which file is missing the address
+
+To run the check locally before pushing:
+```bash
+bash scripts/check-contract-addresses.sh
+```
+
+See `scripts/check-contract-addresses.sh` for implementation details.
+
 ---
 
 ## Security Considerations
+
+- Admin recovery: A minimum 7-day time-lock is enforced for admin recovery flows. The contract records the cooldown used when initiating recovery and rejects attempts if the recorded delay is missing or below the 7-day floor to prevent direct-storage bypasses.
 
 1. **Admin and Arbitrator Key Management**: `admin` and `arbitrator` can change critical state. Store these keys in HSM or custody infrastructure.
 2. **Strict Auth Expectations**: `buyer.require_auth()`, `admin.require_auth()`, and arbitrator authorization gates are core safety controls. Never bypass these in wrappers.
 3. **Minimum Amount Policy**: Configure `DataKey::MinEscrowAmount(token)` for each accepted token to avoid dust escrow spam.
 4. **Metadata Validation**: `ipfs_hash` is CID-validated and `metadata_hash` must be 32 bytes. Mirror these checks client-side for better UX.
 5. **Size-Gated Builds in CI**: Keep `./scripts/build.sh` in CI to prevent oversized WASM artifacts from shipping.
+
+---
+
+## Security Patterns
+
+### Checks-Effects-Interactions (CEI) Pattern
+
+All public state-mutating functions in CraftNexus that perform token transfers **must** follow the CEI pattern. This is mandatory and enforced during code review.
+
+#### What is CEI?
+
+CEI (Checks-Effects-Interactions) is a Soroban security pattern that prevents reentrancy and state corruption by enforcing a strict ordering within functions:
+
+1. **Checks** — Validate all inputs and preconditions (auth, balances, state)
+2. **Effects** — Update contract state (storage writes)
+3. **Interactions** — Call external contracts (token transfers, cross-contract calls)
+
+Token transfers and cross-contract calls must always come **last**.
+
+#### ❌ Non-compliant (vulnerable)
+
+```rust
+pub fn release_funds(env: Env, recipient: Address, amount: i128) {
+    recipient.require_auth();
+    // ❌ WRONG: Token transfer BEFORE state update
+    token_client.transfer(&env.current_contract_address(), &recipient, &amount);
+    // ❌ State updated after external call — vulnerable to reentrancy
+    env.storage().persistent().set(&DataKey::Balance, &(balance - amount));
+}
+```
+
+#### ✅ CEI-compliant (correct)
+
+```rust
+pub fn release_funds(env: Env, recipient: Address, amount: i128) {
+    // CHECKS: validate auth and preconditions
+    recipient.require_auth();
+    let balance: i128 = env.storage().persistent().get(&DataKey::Balance).unwrap_or(0);
+    if balance < amount {
+        panic_with_error!(&env, Error::InsufficientFunds);
+    }
+
+    // EFFECTS: update state before any external call
+    env.storage().persistent().set(&DataKey::Balance, &(balance - amount));
+
+    // INTERACTIONS: token transfer last
+    token_client.transfer(&env.current_contract_address(), &recipient, &amount);
+}
+```
+
+#### Scope
+
+CEI ordering is required for any function that:
+- Calls `token_client.transfer()` or `token_client.transfer_from()`
+- Makes cross-contract calls via a client
+- Emits events alongside state mutations (events should follow effects)
+
+#### References
+
+- [Soroban Security Best Practices](https://developers.stellar.org/docs/smart-contracts/security)
+- See [SCALABILITY_IMPROVEMENTS.md](SCALABILITY_IMPROVEMENTS.md) for additional CEI context in this codebase
 
 ---
 
