@@ -100,6 +100,8 @@ fn test_create_escrow_success() {
     // Verify event
     let events = env.events().all();
     assert!(!events.is_empty(), "No events emitted");
+    let last_event = events.last().unwrap();
+    assert_eq!(last_event.0, client.address);
     let last_event = events.last();
     assert_eq!(last_event.unwrap().0, client.address);
     // Topics: ["escrow_created", escrow_id]
@@ -622,6 +624,8 @@ fn test_update_platform_fee() {
     assert_eq!(client.get_platform_fee(), 800);
 
     let events = env.events().all();
+    let last_event = events.last().unwrap();
+    let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
     let last_event = events.last();
     let config_event: ConfigUpdatedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(
@@ -1439,6 +1443,8 @@ fn test_set_min_escrow_amount_emits_config_event() {
     client.set_min_escrow_amount(&token_id, &1_00000);
 
     let events = env.events().all();
+    let last_event = events.last().unwrap();
+    let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
     let last_event = events.last();
     let config_event: ConfigUpdatedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
 

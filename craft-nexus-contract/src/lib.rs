@@ -232,7 +232,7 @@ const ABSOLUTE_MAX_RELEASE_WINDOW: u32 = 365 * 24 * 60 * 60;
 /// Maximum platform fee in basis points (10000 = 100%)
 const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
 const MAX_TOTAL_RELEASE_WINDOW: u32 = 2592000; // 30 days
-const CURRENT_ESCROW_VERSION: u32 = 3;
+const CURRENT_ESCROW_VERSION: u32 = 4;
 /// Maximum number of escrows per batch operation (Issue #111)
 // Conservative batch size to avoid exceeding instruction/read-write limits
 // observed on Soroban testnets. Reduced from 100 to 20 (Issue #198).
@@ -291,18 +291,6 @@ pub enum DataKey {
     PlatformConfig,
     /// Custom fee tier for an artisan (basis points)
     ArtisanFeeTier(Address),
-    /// DEPRECATED legacy referral reward percentage in basis points.
-    ///
-    /// Referral payout logic was never shipped, so this value does **not**
-    /// influence any fee, payout, or reward path in the active contract. It
-    /// is retained only as a read-only historical key so a future migration
-    /// can inspect what older deployments stored.
-    ///
-    /// New code MUST NOT read or write this key. The only public accessors
-    /// (`set_referral_reward_bps` / `get_referral_reward_bps`) are kept for
-    /// ABI compatibility and are documented as legacy. See
-    /// `docs/deprecated-storage.md`.
-    ReferralRewardBps,
     /// Staked token amount and asset for an artisan
     ArtisanStake(Address),
     /// DEPRECATED single-cooldown timestamp for an artisan.
@@ -5230,33 +5218,6 @@ impl CraftNexusContract {
             let config = Self::get_platform_config_internal(&env);
             config.platform_fee_bps
         }
-    }
-
-    // ── Referral Rewards (#105, DEPRECATED — see Issue #234) ────────
-
-    /// DEPRECATED. Setting a referral reward has no effect on payouts.
-    ///
-    /// Referral logic was never implemented; this entry point is kept only
-    /// to preserve the published ABI. Calling it now panics with
-    /// `Error::DeprecatedFunction` so no new state is written to the
-    /// legacy `DataKey::ReferralRewardBps` slot. See
-    /// `docs/deprecated-storage.md` for the migration policy.
-    pub fn set_referral_reward_bps(env: Env, _bps: u32) {
-        let admin = Self::get_admin(&env)
-            .unwrap_or_else(|_| env.panic_with_error(crate::Error::Unauthorized));
-        admin.require_auth();
-        env.panic_with_error(crate::Error::DeprecatedFunction);
-    }
-
-    /// DEPRECATED. Always returns `0`.
-    ///
-    /// Older deployments may still have a value at
-    /// `DataKey::ReferralRewardBps`, but the figure is unused by every
-    /// payout path in this contract. Returning a constant `0` removes any
-    /// ambiguity for clients that still call this and prevents accidental
-    /// reliance on stale data. See `docs/deprecated-storage.md`.
-    pub fn get_referral_reward_bps(_env: Env) -> u32 {
-        0
     }
 
     /// Admin-only cleanup for the deprecated `StakeCooldownEnd` slot.
