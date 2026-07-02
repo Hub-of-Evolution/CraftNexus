@@ -2951,23 +2951,13 @@ impl OnboardingContract {
             env.storage().persistent().set(&profile_key, &profile);
             Self::extend_persistent(env, &profile_key);
 
-            // Append auto-verify entry to history
-            let hist_key = DataKey::VerificationHistory(address.clone());
-            let mut history: Vec<VerificationEntry> = env
-                .storage()
-                .persistent()
-                .get(&hist_key)
-                .unwrap_or(Vec::new(env));
-            history.push_back(VerificationEntry {
-                timestamp: env.ledger().timestamp(),
-                action: Symbol::new(env, "auto_verified"),
-                by: None,
-            });
-            if history.len() > 10 {
-                history.remove(0);
-            }
-            env.storage().persistent().set(&hist_key, &history);
-            Self::extend_persistent(env, &hist_key);
+            // Append auto-verify entry to the indexed history buffer.
+            Self::append_verification_history(
+                env,
+                address,
+                VerificationActionCode::AutoVerified,
+                None,
+            );
 
             env.events()
                 .publish((Symbol::new(env, "UserVerified"),), address);
@@ -3571,23 +3561,13 @@ impl OnboardingContract {
         );
         Self::extend_persistent(&env, &DataKey::LastUsernameChange(user.clone()));
 
-        // Add history entry for revocation
-        let hist_key = DataKey::VerificationHistory(user.clone());
-        let mut history: Vec<VerificationEntry> = env
-            .storage()
-            .persistent()
-            .get(&hist_key)
-            .unwrap_or(Vec::new(&env));
-        history.push_back(VerificationEntry {
-            timestamp: env.ledger().timestamp(),
-            action: Symbol::new(&env, "username_revoked"),
-            by: Some(user.clone()),
-        });
-        if history.len() > 10 {
-            history.remove(0);
-        }
-        env.storage().persistent().set(&hist_key, &history);
-        Self::extend_persistent(&env, &hist_key);
+        // Add history entry for revocation using the indexed circular buffer.
+        Self::append_verification_history(
+            &env,
+            &user,
+            VerificationActionCode::UsernameChangedRevoked,
+            Some(user.clone()),
+        );
 
         // Emit event
         env.events()

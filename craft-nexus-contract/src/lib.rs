@@ -1634,6 +1634,22 @@ impl CraftNexusContract {
         Self::extend_persistent(env, &key);
     }
 
+    fn normalize_amount_to_7_decimals(env: &Env, token: &Address, amount: i128) -> i128 {
+        let token_client = token::Client::new(env, token);
+        let token_decimals = token_client.decimals();
+        let base_decimals: u32 = 7;
+
+        if token_decimals < base_decimals {
+            let diff = base_decimals - token_decimals;
+            amount.saturating_mul(10i128.pow(diff))
+        } else if token_decimals > base_decimals {
+            let diff = token_decimals - base_decimals;
+            amount.saturating_div(10i128.pow(diff))
+        } else {
+            amount
+        }
+    }
+
     /// Extend the TTL of a persistent storage entry using standardized values.
     fn extend_persistent(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
         env.storage()
@@ -2659,7 +2675,13 @@ impl CraftNexusContract {
                 .storage()
                 .persistent()
                 .get(&DataKey::ArtisanStake(seller.clone()))
-                .map(|stake: ArtisanStakeData| stake.amount)
+                .map(|stake: ArtisanStakeData| {
+                    if stake.token == token {
+                        Self::normalize_amount_to_7_decimals(&env, &token, stake.amount)
+                    } else {
+                        0
+                    }
+                })
                 .unwrap_or(0);
             if artisan_stake < config.min_stake_required {
                 env.panic_with_error(crate::Error::InsufficientStake);
