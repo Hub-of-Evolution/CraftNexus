@@ -3,6 +3,7 @@
 use crate::{CraftNexusContract, CraftNexusContractClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
+    token, Address, Env,
     token, Address, Env, Vec,
 };
 use soroban_sdk::vec;
