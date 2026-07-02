@@ -10,4 +10,3 @@
 - [ ] All token transfers and cross-contract calls follow CEI ordering (Checks → Effects → Interactions). See README Security Patterns section.
 - [ ] Snapshot files unchanged or updated intentionally
 - [ ] PR description references the relevant issue number
-

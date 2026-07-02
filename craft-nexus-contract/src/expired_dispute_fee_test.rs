@@ -1,9 +1,6 @@
 #![cfg(test)]
 
-use crate::{
-    CraftNexusContract, CraftNexusContractClient, EscrowStatus,
-    ExpiredDisputeFeePolicy,
-};
+use crate::{CraftNexusContract, CraftNexusContractClient, EscrowStatus, ExpiredDisputeFeePolicy};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     token, Address, Env,
@@ -78,7 +75,14 @@ fn create_and_dispute_escrow(
     amount: i128,
     order_id: u32,
 ) {
-    client.create_escrow(&buyer.clone(), &seller.clone(), &token.clone(), &amount, &order_id, &Some(604800));
+    client.create_escrow(
+        &buyer.clone(),
+        &seller.clone(),
+        &token.clone(),
+        &amount,
+        &order_id,
+        &Some(604800),
+    );
     client.dispute_escrow(
         &order_id,
         &soroban_sdk::Symbol::new(&client.env, "Test_dispute"),
