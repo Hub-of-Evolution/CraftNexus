@@ -1,6 +1,28 @@
 use super::*;
 use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, String, Symbol};
 
+// Default auto-verify thresholds matching OnboardingConfig defaults
+const AUTO_VERIFY_ESCROW_THRESHOLD: u32 = 5;
+const AUTO_VERIFY_VOLUME_THRESHOLD: i128 = 10_000_000_000;
+
+/// Convert a Soroban `String` to a `Bytes` value (UTF-8 representation).
+fn string_to_bytes(env: &Env, s: &String) -> Bytes {
+    let len = s.len() as usize;
+    let mut buf = [0u8; 128];
+    s.copy_into_slice(&mut buf[..len]);
+    Bytes::from_slice(env, &buf[..len])
+}
+
+/// Register a `DecimalTestToken` contract with `decimals` decimal places
+/// and return its contract address (used for volume normalization tests).
+fn register_decimal_test_token(env: &Env, decimals: u32) -> Address {
+    let admin = Address::generate(env);
+    let contract_id = env.register_contract(None, super::decimal_test_token::DecimalTestToken);
+    let client = super::decimal_test_token::DecimalTestTokenClient::new(env, &contract_id);
+    client.initialize(&admin, &decimals);
+    contract_id
+}
+
 fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     let contract_id = env.register_contract(None, OnboardingContract);
     let client = OnboardingContractClient::new(env, &contract_id);
@@ -769,7 +791,7 @@ fn test_process_verification_request_unauthorized() {
 
     env.as_contract(&client.address, || {
         env.storage().persistent().set(&DataKey::Config, &config);
-        let profile = StoredUserProfile {
+        let profile = UserProfile {
             version: CURRENT_USER_PROFILE_VERSION,
             address: user.clone(),
             role: UserRole::Artisan,
@@ -778,6 +800,7 @@ fn test_process_verification_request_unauthorized() {
             is_verified: false,
             successful_trades: 0,
             disputed_trades: 0,
+            portfolio_cid: None,
             status: ProfileStatus::Active,
         };
         env.storage()
@@ -980,7 +1003,7 @@ fn test_get_user_migrates_legacy_profile() {
     assert_eq!(migrated.username, Symbol::new(&env, "legacy_user"));
     assert_eq!(migrated.portfolio_cid, Some(expected.clone()));
 
-    let stored: StoredUserProfile = env.as_contract(&client.address, || {
+    let stored: UserProfile = env.as_contract(&client.address, || {
         env.storage()
             .persistent()
             .get(&DataKey::UserProfile(user))
@@ -1284,7 +1307,7 @@ fn test_bump_user_profile_ttl_unauthorized() {
 
     env.as_contract(&client.address, || {
         env.storage().persistent().set(&DataKey::Config, &config);
-        let profile = StoredUserProfile {
+        let profile = UserProfile {
             version: CURRENT_USER_PROFILE_VERSION,
             address: user.clone(),
             role: UserRole::Buyer,
@@ -1293,6 +1316,7 @@ fn test_bump_user_profile_ttl_unauthorized() {
             is_verified: false,
             successful_trades: 0,
             disputed_trades: 0,
+            portfolio_cid: None,
             status: ProfileStatus::Active,
         };
         env.storage()
@@ -1430,7 +1454,7 @@ fn test_onboard_user_stores_flat_profile_without_portfolio_key() {
 
     client.onboard_user(&user, &username, &UserRole::Artisan);
 
-    let stored: StoredUserProfile = env.as_contract(&client.address, || {
+    let stored: UserProfile = env.as_contract(&client.address, || {
         env.storage()
             .persistent()
             .get(&DataKey::UserProfile(user.clone()))
@@ -1504,7 +1528,7 @@ fn test_update_portfolio_uses_separate_storage_key() {
     let expected = string_to_bytes(&env, &portfolio_cid);
     client.update_portfolio(&user, &Some(portfolio_cid));
 
-    let stored: StoredUserProfile = env.as_contract(&client.address, || {
+    let stored: UserProfile = env.as_contract(&client.address, || {
         env.storage()
             .persistent()
             .get(&DataKey::UserProfile(user.clone()))
@@ -1691,7 +1715,7 @@ fn test_migrate_user_profile_moves_embedded_portfolio_to_separate_key() {
     assert_eq!(migrated.version, CURRENT_USER_PROFILE_VERSION);
     assert_eq!(migrated.portfolio_cid, Some(expected.clone()));
 
-    let stored: StoredUserProfile = env.as_contract(&client.address, || {
+    let stored: UserProfile = env.as_contract(&client.address, || {
         env.storage()
             .persistent()
             .get(&DataKey::UserProfile(user.clone()))
@@ -2356,5 +2380,4 @@ fn test_set_verification_thresholds_unauthorized_rejected() {
     let env = Env::default();
     let (client, _) = setup_test(&env);
     client.set_verification_thresholds(&10u32, &5_000_000_000i128);
-}
 }
