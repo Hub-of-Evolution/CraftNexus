@@ -327,7 +327,7 @@ fn test_cancel_recurring_escrow_cei_pattern() {
 
     // Create recurring escrow
     let escrow_obj =
-        client.create_recurring_escrow(&buyer, &artisan, &token.address(), &10000, &1000, &86400);
+        client.create_recurring_escrow(&buyer, &artisan, &token.address(), &1000, &1000, &86400);
     let id = escrow_obj.id;
 
     // Cancel recurring escrow

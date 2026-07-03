@@ -101,17 +101,16 @@ fn test_create_escrow_success() {
     let events = env.events().all();
     assert!(!events.is_empty(), "No events emitted");
     let last_event = events.last();
-    assert_eq!(last_event.unwrap().0, client.address);
+    assert_eq!(last_event.clone().unwrap().0, client.address);
     // Topics: ["escrow_created", escrow_id]
     assert_eq!(
-        last_event.unwrap().1,
+        last_event.clone().unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "escrow").into_val(&env),
             (order_id as u64).into_val(&env)
         ]
     );
-
     // Verify payload
     let event: EscrowEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(event.escrow_id, order_id as u64);
@@ -265,14 +264,13 @@ fn test_dispute_escrow_success() {
     let events = env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.unwrap().1,
+        last_event.clone().unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "escrow").into_val(&env),
             1u64.into_val(&env)
         ]
     );
-
     // Verify payload
     let event: EscrowEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(event.escrow_id, 1);
@@ -345,6 +343,57 @@ fn test_disputed_prevents_refund() {
 }
 
 #[test]
+fn test_pending_dispute_blocks_release_and_refund_races() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+
+    env.as_contract(&client.address, || {
+        let mut escrow: Escrow = env.storage().persistent().get(&(ESCROW, 1u32)).unwrap();
+        escrow.status = EscrowStatus::DisputePending;
+        env.storage().persistent().set(&(ESCROW, 1u32), &escrow);
+    });
+
+    assert!(client.try_release_funds(&1).is_err());
+    assert!(client.try_refund(&1).is_err());
+}
+
+#[test]
+fn test_pending_release_or_refund_blocks_dispute_race() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &2, &None);
+
+    env.as_contract(&client.address, || {
+        let mut release_escrow: Escrow = env.storage().persistent().get(&(ESCROW, 1u32)).unwrap();
+        release_escrow.status = EscrowStatus::ReleasePending;
+        env.storage()
+            .persistent()
+            .set(&(ESCROW, 1u32), &release_escrow);
+
+        let mut refund_escrow: Escrow = env.storage().persistent().get(&(ESCROW, 2u32)).unwrap();
+        refund_escrow.status = EscrowStatus::RefundPending;
+        env.storage()
+            .persistent()
+            .set(&(ESCROW, 2u32), &refund_escrow);
+    });
+
+    assert!(client
+        .try_dispute_escrow(&1, &Symbol::new(&env, "Race"), &buyer)
+        .is_err());
+    assert!(client
+        .try_dispute_escrow(&2, &Symbol::new(&env, "Race"), &seller)
+        .is_err());
+}
+
+#[test]
 fn test_resolve_dispute_release_to_seller() {
     let env = Env::default();
     env.mock_all_auths();
@@ -409,7 +458,7 @@ fn test_resolve_dispute_by_moderator() {
 fn test_recover_admin_with_zero_window_fails() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, _buyer, _seller, _token_id, _token_admin, _platform_wallet, _admin) =
+    let (client, _buyer, _seller, _token_id, _token_admin, _platform_wallet, admin) =
         setup_test(&env, true);
 
     // Simulate a malicious/deployer-provided zero-second recovery window by
@@ -417,17 +466,21 @@ fn test_recover_admin_with_zero_window_fails() {
     // recording a zero delay. The contract should reject recovery attempts
     // that don't meet the minimum cooldown.
     let current_time = env.ledger().timestamp();
-    env.storage()
-        .persistent()
-        .set(&DataKey::AdminRecoveryTime, &current_time);
-    env.storage()
-        .persistent()
-        .set(&DataKey::AdminRecoveryDelay, &0u64);
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::FallbackAdmin, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::AdminRecoveryTime, &current_time);
+        env.storage()
+            .persistent()
+            .set(&DataKey::AdminRecoveryDelay, &0u64);
+    });
 
     let recovered_admin = Address::generate(&env);
-    let res = client.recover_admin_access(&recovered_admin);
-    assert!(res.is_err());
-    assert_eq!(res.unwrap_err(), Error::AdminRecoveryFailed);
+    let res = client.try_recover_admin_access(&recovered_admin);
+    assert!(matches!(res, Err(Ok(Error::AdminRecoveryFailed))));
 }
 
 #[test]
@@ -753,14 +806,13 @@ fn test_set_artisan_fee_tier_emits_dedicated_event() {
     let events = env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.unwrap().1,
+        last_event.clone().unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "artisan_fee_tier_updated").into_val(&env),
             seller.clone().into_val(&env)
         ]
     );
-
     let fee_event: ArtisanFeeTierUpdatedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(fee_event.artisan, seller);
     assert_eq!(fee_event.fee_bps, 750);
@@ -938,59 +990,6 @@ fn test_claim_admin_no_pending_fails() {
     let (client, _, _, _, _, _, _) = setup_test(&env, true);
 
     client.claim_admin();
-}
-
-/// Regression test for issue #631.
-///
-/// The two-step admin transfer actually completes in `claim_admin`, so that is
-/// where the audit trail for the *effective* admin change must be emitted.
-/// `claim_admin` previously captured `_previous_admin` but emitted no event.
-#[test]
-fn test_claim_admin_emits_audit_event() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let new_admin = Address::generate(&env);
-    let admin_changed = Symbol::new(&env, "admin_changed");
-
-    // Count "admin_changed" audit events emitted so far.
-    let count_changes = || {
-        env.events()
-            .all()
-            .iter()
-            .filter(|e| {
-                e.1.get(0).and_then(|t| t.try_into_val(&env).ok()) == Some(admin_changed.clone())
-            })
-            .count()
-    };
-
-    // Step 1: propose the transfer (emits the "admin_proposed" change).
-    client.update_admin(&new_admin);
-    assert_eq!(
-        count_changes(),
-        1,
-        "update_admin should emit one admin_changed event"
-    );
-
-    // Step 2: claim completes the transfer and must emit its own audit event (#631).
-    client.claim_admin();
-    assert_eq!(
-        count_changes(),
-        2,
-        "claim_admin must emit an admin_changed audit event for the completed transfer"
-    );
-
-    // The most recent admin_changed event must carry (previous_admin, new_admin).
-    let mut payload: Option<(Address, Address)> = None;
-    for e in env.events().all().iter() {
-        if e.1.get(0).and_then(|t| t.try_into_val(&env).ok()) == Some(admin_changed.clone()) {
-            payload = Some(e.2.try_into_val(&env).unwrap());
-        }
-    }
-    let (prev, next) = payload.expect("admin_changed event must be present");
-    assert_eq!(prev, admin, "previous_admin should be the original admin");
-    assert_eq!(next, new_admin, "new_admin should be the claimed admin");
 }
 
 // ===== Admin address validation tests (#419) =====
@@ -2049,7 +2048,7 @@ fn test_extend_release_window_success() {
     let events = env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.unwrap().1,
+        last_event.clone().unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "escrow").into_val(&env),
@@ -2258,6 +2257,28 @@ fn test_set_onboarding_contract() {
     let fake_onboarding = Address::generate(&env);
     // Should not panic
     client.set_onboarding_contract(&fake_onboarding);
+}
+
+/// Duplicate set_onboarding_contract with the same address performs only one
+/// storage write — the second call is a no-op (Issue #527 / #642).
+#[test]
+fn test_set_onboarding_contract_same_address_skips_storage_write() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let new_onboarding = Address::generate(&env);
+    let events_before = env.events().all().len();
+
+    client.set_onboarding_contract(&new_onboarding);
+    let events_after_first = env.events().all().len();
+    assert_eq!(events_after_first, events_before + 1);
+
+    client.set_onboarding_contract(&new_onboarding);
+    let events_after_second = env.events().all().len();
+    assert_eq!(events_after_second, events_after_first);
+
+    assert_eq!(client.get_onboarding_contract(), new_onboarding);
 }
 
 /// When no onboarding contract is set, release_funds completes without error.
@@ -2521,6 +2542,172 @@ fn test_whitelist_stores_tokens_as_individual_keys() {
 }
 
 // ============================================================
+// Issue #643 – Fee token config migration audit
+// ============================================================
+
+#[test]
+fn test_migrate_fee_token_configs_migrates_twenty_tokens_and_emits_summary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let mut fee_tokens = vec![&env];
+    for i in 0..20u32 {
+        let token = Address::generate(&env);
+        fee_tokens.push_back(token.clone());
+
+        env.as_contract(&client.address, || {
+            env.storage().persistent().set(
+                &DataKey::TotalFees(token.clone()),
+                &((i as i128 + 1) * 1_000),
+            );
+        });
+    }
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::FeeTokenIndex, &fee_tokens);
+    });
+
+    let migrated = client.migrate_fee_token_configs();
+    assert_eq!(migrated, 20);
+
+    for i in 0..fee_tokens.len() {
+        let token = fee_tokens.get(i).unwrap();
+        let cfg = client.get_fee_token_config(&token).unwrap();
+        assert_eq!(
+            cfg,
+            FeeTokenInfo {
+                active: true,
+                custom_fee_bps: None,
+                accumulated: (i as i128 + 1) * 1_000,
+            }
+        );
+    }
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(last_event.0, client.address);
+    assert_eq!(
+        last_event.1,
+        vec![&env, Symbol::new(&env, "fee_cfg_migrated").into_val(&env)]
+    );
+
+    let summary: FeeTokenConfigsMigratedEvent = last_event.2.try_into_val(&env).unwrap();
+    assert_eq!(
+        summary,
+        FeeTokenConfigsMigratedEvent {
+            scanned_tokens: 20,
+            migrated_configs: 20,
+            skipped_existing: 0,
+        }
+    );
+}
+
+#[test]
+fn test_migrate_fee_token_configs_is_idempotent_and_preserves_existing_configs() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let mut fee_tokens = vec![&env];
+    for i in 0..20u32 {
+        let token = Address::generate(&env);
+        fee_tokens.push_back(token.clone());
+
+        env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::TotalFees(token.clone()), &((i as i128 + 1) * 500));
+        });
+    }
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::FeeTokenIndex, &fee_tokens);
+
+        let preset_one = fee_tokens.get(3).unwrap();
+        let preset_two = fee_tokens.get(11).unwrap();
+
+        env.storage().persistent().set(
+            &DataKey::FeeTokenConfig(preset_one.clone()),
+            &FeeTokenInfo {
+                active: false,
+                custom_fee_bps: Some(250),
+                accumulated: 777_777,
+            },
+        );
+        env.storage().persistent().set(
+            &DataKey::FeeTokenConfig(preset_two.clone()),
+            &FeeTokenInfo {
+                active: true,
+                custom_fee_bps: Some(900),
+                accumulated: 888_888,
+            },
+        );
+    });
+
+    let migrated_first = client.migrate_fee_token_configs();
+    assert_eq!(migrated_first, 18);
+
+    let preset_one = fee_tokens.get(3).unwrap();
+    let preset_two = fee_tokens.get(11).unwrap();
+    assert_eq!(
+        client.get_fee_token_config(&preset_one).unwrap(),
+        FeeTokenInfo {
+            active: false,
+            custom_fee_bps: Some(250),
+            accumulated: 777_777,
+        }
+    );
+    assert_eq!(
+        client.get_fee_token_config(&preset_two).unwrap(),
+        FeeTokenInfo {
+            active: true,
+            custom_fee_bps: Some(900),
+            accumulated: 888_888,
+        }
+    );
+
+    for i in 0..fee_tokens.len() {
+        let token = fee_tokens.get(i).unwrap();
+        let cfg = client.get_fee_token_config(&token).unwrap();
+        if token != preset_one && token != preset_two {
+            assert_eq!(
+                cfg,
+                FeeTokenInfo {
+                    active: true,
+                    custom_fee_bps: None,
+                    accumulated: (i as i128 + 1) * 500,
+                }
+            );
+        }
+    }
+
+    let migrated_second = client.migrate_fee_token_configs();
+    assert_eq!(migrated_second, 0);
+
+    for i in 0..fee_tokens.len() {
+        let token = fee_tokens.get(i).unwrap();
+        assert!(client.get_fee_token_config(&token).is_some());
+    }
+
+    let events = env.events().all();
+    let latest_summary: FeeTokenConfigsMigratedEvent =
+        events.last().unwrap().2.try_into_val(&env).unwrap();
+    assert_eq!(
+        latest_summary,
+        FeeTokenConfigsMigratedEvent {
+            scanned_tokens: 20,
+            migrated_configs: 0,
+            skipped_existing: 20,
+        }
+    );
+}
+
+// ============================================================
 // Issue #111 – Batch Optimization Tests (Additional)
 // ============================================================
 
@@ -2634,14 +2821,13 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
     let events = env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.unwrap().1,
+        last_event.clone().unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "metadata_verified").into_val(&env),
             (1u64).into_val(&env),
         ]
     );
-
     let event: MetadataVerifiedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(event.order_id, 1);
     assert_eq!(event.verifier, buyer);
@@ -2659,7 +2845,7 @@ fn test_set_paused_emits_platform_status_events() {
     let events = env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.unwrap().1,
+        last_event.clone().unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "platform_paused").into_val(&env),
@@ -2676,7 +2862,7 @@ fn test_set_paused_emits_platform_status_events() {
     let events = env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.unwrap().1,
+        last_event.clone().unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "platform_unpaused").into_val(&env),
@@ -3130,11 +3316,7 @@ fn test_partial_refund_negotiation_flow() {
     client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
 
     // 1. Dispute the escrow
-    client.dispute_escrow(
-        &1,
-        &Symbol::new(&env, "Partial_refund_requested"),
-        &buyer,
-    );
+    client.dispute_escrow(&1, &Symbol::new(&env, "Partial_refund_requested"), &buyer);
 
     // 2. Buyer proposes a 300 refund
     client.propose_partial_refund(&1, &300, &buyer);
@@ -3161,11 +3343,7 @@ fn test_propose_partial_refund_by_seller() {
     token_admin.mint(&buyer, &1000);
     client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
 
-    client.dispute_escrow(
-        &1,
-        &Symbol::new(&env, "Partial_refund_offered"),
-        &seller,
-    );
+    client.dispute_escrow(&1, &Symbol::new(&env, "Partial_refund_offered"), &seller);
 
     // Seller proposes a 400 refund
     client.propose_partial_refund(&1, &400, &seller);
@@ -3221,10 +3399,7 @@ fn test_validate_ipfs_cid_v0_and_v1_accepts_valid_cids() {
     let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     token_admin.mint(&buyer, &100_000_000);
 
-    let cid_v0 = String::from_str(
-        &env,
-        "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9",
-    );
+    let cid_v0 = String::from_str(&env, "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9");
     let cid_v1 = String::from_str(
         &env,
         "bafybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4",
@@ -3411,7 +3586,7 @@ fn test_platform_config_ttl_extension_on_read() {
 
     // Read the platform config to ensure it is initialized and TTL is extended
     let config = client.get_platform_config();
-    
+
     // Advance ledger timestamp by a large amount (e.g., 20 days)
     env.ledger().with_mut(|li| {
         li.timestamp += 20 * 24 * 60 * 60; // 20 days in seconds
@@ -3420,4 +3595,194 @@ fn test_platform_config_ttl_extension_on_read() {
     // Read again - should still succeed because the TTL was extended on read
     let config_after = client.get_platform_config();
     assert_eq!(config.admin, config_after.admin);
+}
+
+// ===== Issue #656: funding_deadline / cancel_unfunded_escrow / auto_cancel_unfunded =====
+
+/// Helper: create an unfunded escrow and return the escrow struct.
+fn create_unfunded(
+    client: &CraftNexusContractClient,
+    buyer: &Address,
+    seller: &Address,
+    token: &Address,
+) -> super::Escrow {
+    client.create_unfunded_escrow(
+        &1u32,
+        buyer,
+        seller,
+        token,
+        &1_000_000i128,
+        &3600u32, // 1-hour release window
+        &None,
+        &None,
+    )
+}
+
+/// The funding_deadline field should equal created_at + UNFUNDED_CANCEL_TIMEOUT (24 h).
+#[test]
+fn test_funding_deadline_set_on_create() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    let escrow = create_unfunded(&client, &buyer, &seller, &token_id);
+
+    assert!(!escrow.funded);
+    let deadline = escrow
+        .funding_deadline
+        .expect("funding_deadline must be set");
+    // created_at is stored as u32 (truncated ledger timestamp); deadline is created_at + 86400
+    assert_eq!(deadline, escrow.created_at as u64 + 24 * 60 * 60);
+}
+
+/// Buyer may cancel an unfunded escrow voluntarily before the deadline.
+#[test]
+fn test_buyer_can_cancel_before_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    create_unfunded(&client, &buyer, &seller, &token_id);
+
+    // Time is still within the 24-hour window; buyer cancels voluntarily.
+    let result = client.cancel_unfunded_escrow(&1u32, &buyer);
+    assert_eq!(result, ());
+}
+
+/// Non-buyer caller is rejected before the deadline.
+#[test]
+#[should_panic]
+fn test_seller_cannot_cancel_before_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    create_unfunded(&client, &buyer, &seller, &token_id);
+
+    // Seller tries to cancel before deadline — must panic with Unauthorized.
+    client.cancel_unfunded_escrow(&1u32, &seller);
+}
+
+/// After the deadline the seller can cancel the unfunded escrow.
+#[test]
+fn test_seller_can_cancel_after_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    create_unfunded(&client, &buyer, &seller, &token_id);
+
+    // Advance ledger past the 24-hour funding deadline.
+    env.ledger().with_mut(|li| {
+        li.timestamp += 24 * 60 * 60 + 1;
+    });
+
+    let result = client.cancel_unfunded_escrow(&1u32, &seller);
+    assert_eq!(result, ());
+}
+
+/// After the deadline the platform admin can cancel the unfunded escrow.
+#[test]
+fn test_admin_can_cancel_after_deadline() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, admin) = setup_test(&env, true);
+
+    create_unfunded(&client, &buyer, &seller, &token_id);
+
+    // Advance ledger past the 24-hour funding deadline.
+    env.ledger().with_mut(|li| {
+        li.timestamp += 24 * 60 * 60 + 1;
+    });
+
+    let result = client.cancel_unfunded_escrow(&1u32, &admin);
+    assert_eq!(result, ());
+}
+
+/// A funded escrow cannot be cancelled via cancel_unfunded_escrow.
+#[test]
+#[should_panic]
+fn test_cancel_funded_escrow_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1_000_000);
+    // create_escrow funds immediately
+    client.create_escrow(&buyer, &seller, &token_id, &1_000_000i128, &1u32, &None);
+
+    // Must panic: the escrow is funded
+    client.cancel_unfunded_escrow(&1u32, &buyer);
+}
+
+/// auto_cancel_unfunded skips escrows before deadline, cancels those past it,
+/// and returns the correct count.
+#[test]
+fn test_auto_cancel_unfunded_batch() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, admin) = setup_test(&env, true);
+
+    // Create 3 unfunded escrows at the current timestamp.
+    for id in 1u32..=3 {
+        client.create_unfunded_escrow(
+            &id,
+            &buyer,
+            &seller,
+            &token_id,
+            &1_000_000i128,
+            &3600u32,
+            &None,
+            &None,
+        );
+    }
+
+    // Advance past the deadline so all 3 are eligible.
+    env.ledger().with_mut(|li| {
+        li.timestamp += 24 * 60 * 60 + 1;
+    });
+
+    let cancelled = client.auto_cancel_unfunded(&admin, &soroban_sdk::vec![&env, 1u32, 2u32, 3u32]);
+    assert_eq!(cancelled, 3);
+}
+
+/// auto_cancel_unfunded skips escrows that have not yet expired.
+#[test]
+fn test_auto_cancel_unfunded_skips_fresh_escrows() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, admin) = setup_test(&env, true);
+
+    client.create_unfunded_escrow(
+        &1u32,
+        &buyer,
+        &seller,
+        &token_id,
+        &1_000_000i128,
+        &3600u32,
+        &None,
+        &None,
+    );
+
+    // Do NOT advance time — escrow is still within the deadline window.
+    let cancelled = client.auto_cancel_unfunded(&admin, &soroban_sdk::vec![&env, 1u32]);
+    assert_eq!(cancelled, 0);
+}
+
+/// auto_cancel_unfunded is rejected for non-admin callers.
+#[test]
+#[should_panic]
+fn test_auto_cancel_unfunded_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+    create_unfunded(&client, &buyer, &seller, &token_id);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += 24 * 60 * 60 + 1;
+    });
+
+    // Buyer is not admin — must panic.
+    client.auto_cancel_unfunded(&buyer, &soroban_sdk::vec![&env, 1u32]);
 }

@@ -1386,7 +1386,7 @@
               }
             ],
             "data": {
-              "string": "caught panic '' from contract function 'Symbol(obj#383)'"
+              "string": "caught panic '' from contract function 'Symbol(obj#387)'"
             }
           }
         }
