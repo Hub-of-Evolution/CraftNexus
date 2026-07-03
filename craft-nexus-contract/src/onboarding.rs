@@ -1880,12 +1880,12 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
 
         // [SECURITY] Endpoint #93: Only verified platform roles may approve new user
         // registrations. The platform admin must co-sign every onboarding transaction
         // to prevent unauthorized state transitions.
         config.platform_admin.require_auth();
+        Self::extend_persistent(&env, &DataKey::Config);
 
         // Normalize the username (lowercase + trim whitespace)
         let normalized = normalize_username(&env, &username);
@@ -2373,11 +2373,11 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
 
         // [SECURITY] Endpoint #85: Strict authorization check
         // Only admin can update roles; require_auth() verifies the caller's digital signature
         config.platform_admin.require_auth();
+        Self::extend_persistent(&env, &DataKey::Config);
 
         // [SECURITY] Validate new role assignment; prevent unauthorized role escalation
         match new_role {
@@ -2617,10 +2617,10 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
 
         // Only admin can verify users
         config.platform_admin.require_auth();
+        Self::extend_persistent(&env, &DataKey::Config);
 
         // Get existing profile
         let mut profile = Self::get_user_profile(&env, user.clone());
@@ -2940,13 +2940,13 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
 
-        // Only the registered escrow contract (or admin if none set) may call this.
         match config.escrow_contract {
             Some(ref escrow_addr) => escrow_addr.require_auth(),
             None => config.platform_admin.require_auth(),
         }
+        Self::extend_persistent(&env, &DataKey::Config);
+        Self::extend_persistent(&env, &DataKey::Config);
 
         let key = DataKey::UserMetrics(address.clone());
         let mut metrics = Self::read_user_metrics(&env, &address);
