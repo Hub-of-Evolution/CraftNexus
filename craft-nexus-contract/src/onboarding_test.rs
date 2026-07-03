@@ -1798,6 +1798,25 @@ fn test_update_active_contracts_tracks_state() {
     assert!(!client.has_active_contracts(&user));
 }
 
+#[test]
+#[should_panic]
+fn test_update_active_contracts_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    // Set an escrow contract so authorization is gated by the registered address.
+    let escrow_id = env.register_contract(None, crate::CraftNexusContract);
+    client.set_escrow_contract(&escrow_id);
+
+    // Clear mocked auths so the next call has no authorization.
+    env.set_auths(&[]);
+
+    client.update_active_contracts(&user, &1);
+}
+
 // ============================================================
 // Feature #47 – precise active-contract count for escrow/reputation flows
 // ============================================================

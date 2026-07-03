@@ -171,6 +171,9 @@ pub enum DataKey {
     Config,
     /// Activity metrics per user (escrow count and volume for auto-verification) (#63)
     UserMetrics(Address),
+    /// Active contract counter per user (Issue #39)
+    /// Tracks the number of active escrows/agreements for an address.
+    ActiveContractCount(Address),
     /// Pending manual verification request marker keyed by user (#138)
     VerificationRequest(Address),
     /// Queue head pointer for manual verification requests (#138)
