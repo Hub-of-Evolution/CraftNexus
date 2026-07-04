@@ -44,7 +44,7 @@ OPTIMIZED_WASM="${OPTIMIZED_WASM:-${WASM_ARTIFACT%.wasm}-optimized.wasm}"
 
 if command -v wasm-opt >/dev/null 2>&1; then
     echo "Running wasm-opt -Oz optimisation..."
-    wasm-opt -Oz --output "${OPTIMIZED_WASM}" "${WASM_ARTIFACT}"
+    wasm-opt -Oz --enable-bulk-memory --enable-sign-ext --output "${OPTIMIZED_WASM}" "${WASM_ARTIFACT}"
     OPTIMIZED_SIZE_BYTES="$(wc -c < "${OPTIMIZED_WASM}" | tr -d '[:space:]')"
     REDUCTION=$(( (WASM_SIZE_BYTES - OPTIMIZED_SIZE_BYTES) * 100 / WASM_SIZE_BYTES ))
     echo "Unoptimised size: ${WASM_SIZE_BYTES} bytes"

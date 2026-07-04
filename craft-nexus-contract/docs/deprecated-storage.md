@@ -1,66 +1,15 @@
 # Deprecated storage and bounded growth
 
-This note covers four storage-hygiene tracks landed together. Each refers
+This note covers three storage-hygiene tracks landed together. Each refers
 back to a specific issue and the exact `DataKey` it touches, so a future
 maintainer can decide whether the legacy compatibility shim is still
 worth carrying.
 
-## `DataKey::ReferralRewardBps` — Issue #234
-
-* Status: **deprecated, retained for ABI compatibility only**.
-* What it stored: a `u32` basis-points figure that an admin could set via
-  `set_referral_reward_bps`.
-* Why it was kept: referral payout logic was scoped but never shipped.
-  The slot was preserved in case clients had already serialized the call.
-
-### Active behaviour
-
-* `set_referral_reward_bps` now panics with
-  `Error::DeprecatedFunction` after admin auth. No new value can be
-  written to the slot; existing entries from older deployments are
-  inert.
-* `get_referral_reward_bps` always returns `0`. It does not read the
-  legacy slot, so callers cannot accidentally rely on stale state.
-* No payout, fee, or reward path in the contract reads
-  `DataKey::ReferralRewardBps`. Grep is the source of truth — if a new
-  PR adds a read, it must clear the deprecation in this doc first.
-
-### Migration path
-
-If a future feature wants to revive referrals it must introduce a fresh
-`DataKey` variant. Re-using `ReferralRewardBps` is forbidden because we
-cannot distinguish "value left over from a 2024 deployment" from
-"intentional new value".
-
 ## `DataKey::StakeCooldownEnd(Address)` — Issue #235
 
-* Status: **deprecated, written for legacy clients but never read by
-  active logic**.
+* Status: **completed and removed**.
 * What it stored: a single `u64` cooldown timestamp per artisan.
-* Why it was kept: older off-chain readers polled this key directly to
-  show "stake unlocks at …" without understanding the queue layout.
-
-### Active behaviour
-
-* Active staking uses [`DataKey::ArtisanStakeQueue`]. `unstake_tokens`
-  never reads the single timestamp; matured deposits are decided per
-  queue entry.
-* `stake_tokens` and `unstake_tokens` continue to mirror the maximum
-  `cooldown_end` from the queue into this key so legacy readers still
-  see a conservative value. Both call sites are now annotated with
-  "DEPRECATED storage write" comments referencing this issue.
-* When a queue empties, `unstake_tokens` removes the deprecated key
-  alongside the queue and the stake record.
-* Operators can call `purge_stake_cooldown_end(artisan)` (admin-only)
-  to clear a stale entry without disturbing the queue. The function
-  returns `true` when an entry was removed and `false` otherwise.
-
-### Migration path
-
-When the off-chain readers that depend on this single timestamp are
-retired, drop both the mirror writes in `stake_tokens`/`unstake_tokens`
-and the `DataKey::StakeCooldownEnd` variant in the same release. Until
-then, the key must remain a *write-only* mirror.
+* Why it was removed: older off-chain readers were updated to read `DataKey::ArtisanStakeQueue` instead. The legacy mirror writes in `stake_tokens` and `unstake_tokens` have been eliminated to save storage costs.
 
 ## `DataKey::NextRecurringEscrowId` — Issue #233
 

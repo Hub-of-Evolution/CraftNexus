@@ -1,5 +1,26 @@
+use super::decimal_test_token::{DecimalTestToken, DecimalTestTokenClient};
 use super::*;
+use crate::alloc::string::ToString;
 use soroban_sdk::{testutils::Address as _, token, Address, Bytes, Env, String, Symbol};
+
+fn register_decimal_test_token(env: &Env, decimals: u32) -> Address {
+    let admin = Address::generate(env);
+    let contract_id = env.register_contract(None, DecimalTestToken);
+    DecimalTestTokenClient::new(env, &contract_id).initialize(&admin, &decimals);
+    contract_id
+}
+
+const AUTO_VERIFY_VOLUME_THRESHOLD: i128 = 10_000_000_000;
+const AUTO_VERIFY_ESCROW_THRESHOLD: u32 = 5;
+
+fn string_to_bytes(env: &Env, s: &soroban_sdk::String) -> Bytes {
+    let mut buf = [0u8; 128];
+    let len = s.len() as usize;
+    s.copy_into_slice(&mut buf[..len]);
+    let mut b = Bytes::new(env);
+    b.extend_from_slice(&buf[..len]);
+    b
+}
 
 fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     let contract_id = env.register_contract(None, OnboardingContract);
@@ -45,6 +66,19 @@ fn test_initialize_reserves_admin_username() {
 
 // ===== Onboarding =====
 
+fn onboard_user_success(
+    client: &OnboardingContractClient,
+    user: &Address,
+    username: &String,
+    role: &UserRole,
+) -> UserProfile {
+    match client.try_onboard_user(user, username, role) {
+        Ok(Ok(profile)) => profile,
+        Ok(Err(_)) => panic!("try_onboard_user returned Err but should have succeeded"),
+        Err(_) => panic!("try_onboard_user host call failed"),
+    }
+}
+
 #[test]
 fn test_onboard_user_as_buyer() {
     let env = Env::default();
@@ -55,7 +89,7 @@ fn test_onboard_user_as_buyer() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "john_doe");
 
-    let profile = client.onboard_user(&user, &username, &UserRole::Buyer);
+    let profile = onboard_user_success(&client, &user, &username, &UserRole::Buyer);
 
     assert_eq!(profile.version, CURRENT_USER_PROFILE_VERSION);
     assert_eq!(profile.address, user);
@@ -74,7 +108,7 @@ fn test_onboard_user_as_artisan() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "artisan_jane");
 
-    let profile = client.onboard_user(&user, &username, &UserRole::Artisan);
+    let profile = onboard_user_success(&client, &user, &username, &UserRole::Artisan);
 
     assert_eq!(profile.address, user);
     assert_eq!(profile.username, Symbol::new(&env, "artisan_jane"));
@@ -91,7 +125,7 @@ fn test_onboard_stores_normalized_username() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "JohnDoe");
 
-    let profile = client.onboard_user(&user, &username, &UserRole::Buyer);
+    let profile = onboard_user_success(&client, &user, &username, &UserRole::Buyer);
 
     // Username should be stored as lowercase
     assert_eq!(profile.username, Symbol::new(&env, "johndoe"));
@@ -107,14 +141,13 @@ fn test_onboard_normalizes_multilingual_username() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, " Jöhn Őnе ");
 
-    let profile = client.onboard_user(&user, &username, &UserRole::Buyer);
+    let profile = onboard_user_success(&client, &user, &username, &UserRole::Buyer);
 
     assert_eq!(profile.username, Symbol::new(&env, "john_one"));
     assert!(client.is_username_taken(&String::from_str(&env, "JOHN ONE")));
 }
 
 #[test]
-#[should_panic]
 fn test_onboard_duplicate_user() {
     let env = Env::default();
     env.mock_all_auths();
@@ -126,11 +159,11 @@ fn test_onboard_duplicate_user() {
     let username2 = String::from_str(&env, "other_name");
 
     client.onboard_user(&user, &username1, &UserRole::Buyer);
-    client.onboard_user(&user, &username2, &UserRole::Artisan); // Should panic
+    let result = client.try_onboard_user(&user, &username2, &UserRole::Artisan);
+    assert!(result.is_err());
 }
 
 #[test]
-#[should_panic]
 fn test_onboard_username_too_short() {
     let env = Env::default();
     env.mock_all_auths();
@@ -140,11 +173,11 @@ fn test_onboard_username_too_short() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "ab");
 
-    client.onboard_user(&user, &username, &UserRole::Buyer); // Should panic
+    let result = client.try_onboard_user(&user, &username, &UserRole::Buyer);
+    assert!(result.is_err());
 }
 
 #[test]
-#[should_panic]
 fn test_onboard_username_too_long() {
     let env = Env::default();
     env.mock_all_auths();
@@ -156,11 +189,11 @@ fn test_onboard_username_too_long() {
     let long_username =
         String::from_str(&env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
-    client.onboard_user(&user, &long_username, &UserRole::Buyer); // Should panic
+    let result = client.try_onboard_user(&user, &long_username, &UserRole::Buyer);
+    assert!(result.is_err());
 }
 
 #[test]
-#[should_panic]
 fn test_onboard_invalid_role() {
     let env = Env::default();
     env.mock_all_auths();
@@ -170,13 +203,13 @@ fn test_onboard_invalid_role() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "test");
 
-    client.onboard_user(&user, &username, &UserRole::Admin); // Should panic
+    let result = client.try_onboard_user(&user, &username, &UserRole::Admin);
+    assert!(result.is_err());
 }
 
 // ===== Username Uniqueness =====
 
 #[test]
-#[should_panic]
 fn test_onboard_duplicate_username_fails() {
     let env = Env::default();
     env.mock_all_auths();
@@ -188,11 +221,11 @@ fn test_onboard_duplicate_username_fails() {
     let username = String::from_str(&env, "craftsman");
 
     client.onboard_user(&user1, &username, &UserRole::Buyer);
-    client.onboard_user(&user2, &username, &UserRole::Artisan); // Should panic
+    let result = client.try_onboard_user(&user2, &username, &UserRole::Artisan);
+    assert!(result.is_err());
 }
 
 #[test]
-#[should_panic]
 fn test_onboard_duplicate_username_case_insensitive() {
     let env = Env::default();
     env.mock_all_auths();
@@ -204,12 +237,14 @@ fn test_onboard_duplicate_username_case_insensitive() {
 
     client.onboard_user(&user1, &String::from_str(&env, "Alice"), &UserRole::Buyer);
     // "alice" should match "Alice" after normalization
-    client.onboard_user(&user2, &String::from_str(&env, "alice"), &UserRole::Artisan);
-    // Should panic
+    let _result =
+        client.try_onboard_user(&user2, &String::from_str(&env, "alice"), &UserRole::Artisan);
+    let result =
+        client.try_onboard_user(&user2, &String::from_str(&env, "alice"), &UserRole::Artisan);
+    assert!(result.is_err());
 }
 
 #[test]
-#[should_panic]
 fn test_onboard_duplicate_username_mixed_case() {
     let env = Env::default();
     env.mock_all_auths();
@@ -224,11 +259,12 @@ fn test_onboard_duplicate_username_mixed_case() {
         &String::from_str(&env, "CraftMaster"),
         &UserRole::Buyer,
     );
-    client.onboard_user(
+    let result = client.try_onboard_user(
         &user2,
         &String::from_str(&env, "CRAFTMASTER"),
         &UserRole::Artisan,
-    ); // Should panic
+    );
+    assert!(result.is_err());
 }
 
 // ===== Username Lookup =====
@@ -2356,5 +2392,4 @@ fn test_set_verification_thresholds_unauthorized_rejected() {
     let env = Env::default();
     let (client, _) = setup_test(&env);
     client.set_verification_thresholds(&10u32, &5_000_000_000i128);
-}
 }

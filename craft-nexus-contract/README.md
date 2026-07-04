@@ -151,6 +151,9 @@ stellar contract invoke \
 Register a new user on the CraftNexus platform.
 
 **Description:** Creates a new user profile with the specified role (Buyer or Artisan).
+On validation failure, the function emits an `OnboardCallFailed` event with the
+error discriminant *before* panicking. Off-chain indexers can subscribe to this
+topic to distinguish a user-request rejection from a host panic or network error.
 
 **Parameters:**
 - `user (address)` – User's wallet address
@@ -162,13 +165,37 @@ Register a new user on the CraftNexus platform.
 - Checks username length requirements (3-50 characters)
 - Ensures user is not already onboarded
 - Creates user profile with specified role
-- Emits `UserOnboarded` event
+- Emits `UserOnboarded` event on success
+- Emits `OnboardCallFailed` event on validation failure before reverting
+
+**Events:**
+| Topic | Direction | Payload |
+|-------|-----------|---------|
+| `UserOnboarded` | Success | `UserOnboardedEvent { user, username, role }` |
+| `OnboardCallFailed` | Validation failure | `OnboardCallFailedEvent { user, reason: u32, timestamp }` |
 
 **Reverts if:**
 - User already onboarded
 - Username too short (< 3 characters)
 - Username too long (> 50 characters)
 - Invalid role specified (not Buyer or Artisan)
+
+**Error handling with `try_onboard_user`:**
+Clients that prefer graceful error handling (instead of catching a revert) can
+call the Soroban auto-generated `try_onboard_user` method which wraps the call
+in `try_call` and returns the error code as `Result`:
+
+```
+stellar contract invoke \
+  --id <ONBOARDING_CONTRACT_ID> \
+  --source <USER_SECRET> \
+  --network testnet \
+  -- \
+  try_onboard_user \
+  --user GXXXX...XXXX \
+  --username "duplicate_name" \
+  --role 1
+```
 
 **Example CLI interaction:**
 ```bash

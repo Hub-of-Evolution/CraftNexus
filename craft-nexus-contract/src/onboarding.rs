@@ -30,7 +30,6 @@
 // | [`OnboardingContract::get_verification_history`] | `Vec<VerificationEntry>` | Compact entries decoded to human-readable actions. |
 // | [`OnboardingContract::get_verification_queue`] | `Vec<Address>` | Pending manual-verification requests in FIFO order. |
 // | [`OnboardingContract::get_config`] | [`OnboardingConfig`] | Global contract configuration. |
-use crate::alloc::string::ToString;
 //
 // ## Event stream
 //
@@ -81,16 +80,13 @@ use crate::alloc::string::ToString;
 // on first read (internal `try_get_user_profile`); integrators never observe an
 // out-of-date shape through the read API.
 
-use crate::alloc::string::ToString;
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
-    Symbol, IntoVal, TryFromVal, Val, Vec,
-};
-
 extern crate alloc;
-use crate::alloc::string::ToString;
 
 use alloc::string::ToString;
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
+    Symbol, TryFromVal, Val, Vec,
+};
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
 const TTL_THRESHOLD: u32 = 10_000;
@@ -203,13 +199,6 @@ pub enum DataKey {
     UsernameChangeFeeWallet,
     /// Timestamp of last username change per user - Issue #114
     LastUsernameChange(Address),
-    /// Count of currently-active contracts for a user, maintained by the
-    /// configured escrow contract (Issue #533).
-    ///
-    /// This key lets onboarding flows validate "active contract" constraints
-    /// (e.g. preventing deactivation) without needing a cross-contract call
-    /// back into the escrow contract on every check.
-    ActiveContractCount(Address),
 }
 
 /// User roles in the CraftNexus platform.
@@ -402,6 +391,29 @@ pub struct UserOnboardedEvent {
     pub username: String,
     /// Role the user selected during onboarding
     pub role: UserRole,
+}
+
+/// Event emitted when [`onboard_user`] fails due to a validation error.
+///
+/// Topic: `("OnboardCallFailed",)` — emitted before panicking,
+/// so off-chain indexers can distinguish validation failures from
+/// host panics / network errors without parsing host error codes.
+///
+/// # Note
+/// `reason` is stored as a `u32` (the raw error discriminant) because
+/// `contracterror` types cannot be used as fields of `contracttype`
+/// structs. Off-chain consumers should match on the numeric value
+/// against the [`Error`] enum discriminants.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct OnboardCallFailedEvent {
+    /// The address that attempted to onboard
+    pub user: Address,
+    /// The error discriminant that caused the failure (see [`Error`])
+    pub reason: u32,
+    /// Ledger timestamp when the failure occurred
+    pub timestamp: u64,
 }
 
 #[contracttype]
@@ -1438,12 +1450,6 @@ impl OnboardingContract {
             status: profile.status,
         }
     }
-    fn try_get_user_profile(env: &Env, user: Address) -> Option<UserProfile> {
-        let key = DataKey::UserProfile(user.clone());
-        let stored: Val = env.storage().persistent().get(&key)?;
-        let map = Map::<Symbol, Val>::try_from_val(env, &stored).expect("");
-        let version_key = Symbol::new(env, "version");
-
     fn read_portfolio_cid(env: &Env, user: &Address) -> Option<Bytes> {
         let key = DataKey::UserPortfolio(user.clone());
         let portfolio = env.storage().persistent().get(&key);
@@ -1460,22 +1466,11 @@ impl OnboardingContract {
                 env.storage().persistent().set(&key, &cid);
                 Self::extend_persistent(env, &key);
             }
-            Self::extend_persistent(env, &key);
-            return Some(profile);
+            None => {
+                env.storage().persistent().remove(&key);
+            }
         }
-
-        let legacy =
-            LegacyUserProfile::try_from_val(env, &stored).expect("User profile storage corrupted");
-
-        // Migrate Option<String> to Option<Bytes>
-        let optimized_cid = legacy.portfolio_cid.map(|cid_str| {
-            let mut cid_bytes = Bytes::new(env);
-            let len = cid_str.len() as usize;
-            let mut buf = [0u8; 128]; // Max CID length
-            cid_str.copy_into_slice(&mut buf[..len]);
-            cid_bytes.extend_from_slice(&buf[..len]);
-            cid_bytes
-        });
+    }
 
     fn persist_stored_user_profile(env: &Env, user: &Address, profile: &StoredUserProfile) {
         let key = DataKey::UserProfile(user.clone());
@@ -1862,6 +1857,37 @@ impl OnboardingContract {
     /// assert_eq!(profile.username, String::from_str(&env, "alice"));
     /// assert!(!profile.is_verified);
     /// ```
+    /// Emit an [`OnboardCallFailedEvent`] before panicking with the given error.
+    fn emit_onboard_failed_and_panic(env: &Env, user: &Address, reason: Error) -> ! {
+        env.events().publish(
+            (Symbol::new(env, "OnboardCallFailed"),),
+            OnboardCallFailedEvent {
+                user: user.clone(),
+                reason: reason as u32,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        env.panic_with_error(reason)
+    }
+
+    /// Onboard a new user, emitting an [`OnboardCallFailedEvent`] and
+    /// panicking with a proper error code on validation failure.
+    ///
+    /// Callers that prefer to handle errors gracefully (without panicking)
+    /// should invoke the auto-generated `try_onboard_user` client method,
+    /// which wraps this function in the host's `try_call` and returns the
+    /// error code as `Err(soroban_sdk::Error)`.
+    ///
+    /// # Security
+    /// * `user.require_auth()` — the registering user signs.
+    /// * `config.platform_admin.require_auth()` — the platform co-signs.
+    ///
+    /// # Errors (panic)
+    /// * [`Error::NotInitialized`] — `initialize` has not been called.
+    /// * [`Error::InvalidRole`] — `role` is not `Buyer` or `Artisan`.
+    /// * [`Error::AlreadyOnboarded`] — the address already has a profile.
+    /// * [`Error::UsernameTaken`] — the normalized username is in use.
+    /// * [`Error::UsernameTooShort`] / [`Error::UsernameTooLong`].
     pub fn onboard_user(env: Env, user: Address, username: String, role: UserRole) -> UserProfile {
         // [SECURITY] Endpoint #93: The registering user must prove ownership of the
         // supplied address. Unauthorized invocation without a valid user signature is
@@ -1869,17 +1895,19 @@ impl OnboardingContract {
         user.require_auth();
 
         // Validate role is valid (only Buyer or Artisan for self-onboarding)
-        assert!(
-            role == UserRole::Buyer || role == UserRole::Artisan,
-            "Invalid role: can only onboard as Buyer or Artisan"
-        );
+        if role != UserRole::Buyer && role != UserRole::Artisan {
+            Self::emit_onboard_failed_and_panic(&env, &user, Error::InvalidRole);
+        }
 
         // Get configuration
         let config: OnboardingConfig = env
             .storage()
             .persistent()
             .get(&DataKey::Config)
-            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+            .unwrap_or_else(|| {
+                Self::emit_onboard_failed_and_panic(&env, &user, Error::NotInitialized)
+            });
+        Self::extend_persistent(&env, &DataKey::Config);
 
         // [SECURITY] Endpoint #93: Only verified platform roles may approve new user
         // registrations. The platform admin must co-sign every onboarding transaction
@@ -1896,14 +1924,13 @@ impl OnboardingContract {
         normalized.copy_into_slice(&mut user_buf[..username_len]);
         let s = core::str::from_utf8(&user_buf[..username_len]).unwrap();
         let optimized_username = Symbol::new(&env, s);
-        assert!(
-            username_len >= config.min_username_length as usize,
-            "Username too short"
-        );
-        assert!(
-            username_len <= config.max_username_length as usize,
-            "Username too long"
-        );
+
+        if (username_len as u32) < config.min_username_length {
+            Self::emit_onboard_failed_and_panic(&env, &user, Error::UsernameTooShort);
+        }
+        if (username_len as u32) > config.max_username_length {
+            Self::emit_onboard_failed_and_panic(&env, &user, Error::UsernameTooLong);
+        }
 
         // Check if user already onboarded (#92).
         //
@@ -1926,25 +1953,25 @@ impl OnboardingContract {
         //     preferred way to check onboarding status; avoid probing this storage
         //     key directly, as TTL expiry can make `has` return `false` for users
         //     who have not interacted with the contract recently.
-        //   - `onboard_user` panics (no return value) on a duplicate call, so
-        //     client code should guard with a `get_user` probe or catch the error
-        //     via `try_invoke_contract` before calling this function.
+        //   - `onboard_user` panics on a duplicate call, so client code should
+        //     guard with a `get_user` probe or catch the error via the auto-generated
+        //     `try_onboard_user` client method.
         //   - Profile shape is versioned via `CURRENT_USER_PROFILE_VERSION`; any
         //     schema change requires a migration via `migrate_user_profile`.
         let existing = Self::try_get_stored_user_profile(&env, user.clone());
         if existing.is_some() {
             Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
+            Self::emit_onboard_failed_and_panic(&env, &user, Error::AlreadyOnboarded);
         }
 
-        assert!(existing.is_none(), "User already onboarded");
-
         // Check username uniqueness
-        assert!(
-            !env.storage()
-                .persistent()
-                .has(&DataKey::Username(normalized.clone())),
-            "Username already taken"
-        );
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Username(normalized.clone()))
+        {
+            Self::emit_onboard_failed_and_panic(&env, &user, Error::UsernameTaken);
+        }
 
         // Create user profile with normalized username
         let profile = UserProfile {
@@ -3522,13 +3549,6 @@ impl OnboardingContract {
         address.require_auth();
         match Self::try_get_user_profile(&env, address) {
             Some(profile) => (profile.successful_trades, profile.disputed_trades),
-        let key = DataKey::UserProfile(address.clone());
-        match env.storage().persistent().get::<DataKey, UserProfile>(&key) {
-            Some(profile) => {
-                // Issue #423/#435: extend TTL on read to prevent storage expiry
-                Self::extend_persistent(&env, &key);
-                (profile.successful_trades, profile.disputed_trades)
-            }
             None => (0, 0),
         }
     }

@@ -385,12 +385,6 @@
                     },
                     {
                       "key": {
-                        "symbol": "portfolio_cid"
-                      },
-                      "val": "void"
-                    },
-                    {
-                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
@@ -434,7 +428,7 @@
                         "symbol": "version"
                       },
                       "val": {
-                        "u32": 4
+                        "u32": 5
                       }
                     }
                   ]
@@ -509,12 +503,6 @@
                     },
                     {
                       "key": {
-                        "symbol": "portfolio_cid"
-                      },
-                      "val": "void"
-                    },
-                    {
-                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
@@ -558,7 +546,7 @@
                         "symbol": "version"
                       },
                       "val": {
-                        "u32": 4
+                        "u32": 5
                       }
                     }
                   ]
@@ -667,7 +655,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "VerificationHistory"
+                  "symbol": "VerificationHistoryCount"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -687,7 +675,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "VerificationHistory"
+                      "symbol": "VerificationHistoryCount"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -696,32 +684,79 @@
                 },
                 "durability": "persistent",
                 "val": {
+                  "u32": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "VerificationHistoryIndexed"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "u32": 0
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
                   "vec": [
                     {
-                      "map": [
-                        {
-                          "key": {
-                            "symbol": "action"
-                          },
-                          "val": {
-                            "symbol": "auto_verified"
-                          }
-                        },
-                        {
-                          "key": {
-                            "symbol": "by"
-                          },
-                          "val": "void"
-                        },
-                        {
-                          "key": {
-                            "symbol": "timestamp"
-                          },
-                          "val": {
-                            "u64": 0
-                          }
-                        }
-                      ]
+                      "symbol": "VerificationHistoryIndexed"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                    },
+                    {
+                      "u32": 0
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "action"
+                      },
+                      "val": {
+                        "u32": 3
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "by"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
+                        "symbol": "timestamp"
+                      },
+                      "val": {
+                        "u64": 0
+                      }
                     }
                   ]
                 }
@@ -1315,7 +1350,7 @@
                     "symbol": "version"
                   },
                   "val": {
-                    "u32": 4
+                    "u32": 5
                   }
                 }
               ]
@@ -1477,11 +1512,39 @@
           "v0": {
             "topics": [
               {
-                "symbol": "UserVerified"
+                "symbol": "AutoVerifiedEvent"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
               }
             ],
             "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+              "map": [
+                {
+                  "key": {
+                    "symbol": "escrow_count"
+                  },
+                  "val": {
+                    "u32": 5
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "user"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "volume"
+                  },
+                  "val": {
+                    "u64": 10000000000
+                  }
+                }
+              ]
             }
           }
         }

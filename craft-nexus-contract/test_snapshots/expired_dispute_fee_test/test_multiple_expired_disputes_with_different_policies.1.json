@@ -942,6 +942,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "funding_deadline"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
@@ -997,7 +1003,7 @@
                         "symbol": "version"
                       },
                       "val": {
-                        "u32": 3
+                        "u32": 4
                       }
                     }
                   ]
@@ -1105,6 +1111,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "funding_deadline"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
@@ -1160,7 +1172,7 @@
                         "symbol": "version"
                       },
                       "val": {
-                        "u32": 3
+                        "u32": 4
                       }
                     }
                   ]
@@ -1268,6 +1280,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "funding_deadline"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
@@ -1323,7 +1341,7 @@
                         "symbol": "version"
                       },
                       "val": {
-                        "u32": 3
+                        "u32": 4
                       }
                     }
                   ]
@@ -3803,6 +3821,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "funding_deadline"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "id"
                   },
                   "val": {
@@ -3858,7 +3882,7 @@
                     "symbol": "version"
                   },
                   "val": {
-                    "u32": 3
+                    "u32": 4
                   }
                 }
               ]
@@ -4672,6 +4696,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "funding_deadline"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "id"
                   },
                   "val": {
@@ -4727,7 +4757,7 @@
                     "symbol": "version"
                   },
                   "val": {
-                    "u32": 3
+                    "u32": 4
                   }
                 }
               ]
@@ -5541,6 +5571,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "funding_deadline"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "id"
                   },
                   "val": {
@@ -5596,7 +5632,7 @@
                     "symbol": "version"
                   },
                   "val": {
-                    "u32": 3
+                    "u32": 4
                   }
                 }
               ]

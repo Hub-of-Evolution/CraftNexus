@@ -1475,7 +1475,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Username already taken' from contract function 'Symbol(obj#271)'"
+                  "string": "caught panic 'Username already taken' from contract function 'Symbol(obj#275)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"

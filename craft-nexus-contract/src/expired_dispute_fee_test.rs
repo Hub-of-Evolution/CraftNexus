@@ -46,13 +46,13 @@ fn setup_test() -> (
 
     // Initialize the escrow contract
     let onboarding_contract_clone = onboarding_contract.clone();
-client.initialize(
-    &platform_wallet,
-    &admin,
-    &arbitrator,
-    &500,
-    &Some(onboarding_contract_clone),
-);
+    client.initialize(
+        &platform_wallet,
+        &admin,
+        &arbitrator,
+        &500,
+        &Some(onboarding_contract_clone),
+    );
 
     (
         env,

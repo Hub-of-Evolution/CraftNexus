@@ -1015,7 +1015,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Invalid portfolio CID format' from contract function 'Symbol(obj#181)'"
+                  "string": "caught panic 'Invalid portfolio CID format' from contract function 'Symbol(obj#183)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
