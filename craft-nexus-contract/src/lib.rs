@@ -458,6 +458,21 @@ pub struct RecurringEscrowEvent {
     pub timestamp: u64,
 }
 
+/// Lifecycle status of an escrow order.
+///
+/// # Live variants
+/// - `Active` — funded (or created) and open for release / refund / dispute
+/// - `Released` — funds sent to the seller
+/// - `Refunded` — funds returned to the buyer
+/// - `Disputed` — dispute opened; awaiting arbitrator resolution
+/// - `Resolved` — dispute resolved (release or refund completed)
+/// - `ReleasePending` / `RefundPending` / `DisputePending` — in-flight
+///   CEI transitions claimed while an external call is outstanding
+///
+/// # Removed legacy variants (issue #706)
+/// `Draft` and `UnderReview` were deprecated in contract version 1.2 and are
+/// **not** part of this enum. Do not reintroduce them — they caused confusion
+/// with the live lifecycle and are unused by every transition path.
 #[contracttype]
 #[derive(Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]

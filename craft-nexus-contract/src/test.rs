@@ -4649,3 +4649,46 @@ fn test_fund_audit_pagination_and_immutability() {
     assert_eq!(page_oob.len(), 0);
 }
 
+// ============================================================
+// Issue #706 – legacy EscrowStatus variants removed
+// ============================================================
+
+/// Regression lock: `EscrowStatus` only exposes the live lifecycle discriminants.
+/// Legacy `Draft` / `UnderReview` must not reappear (they were removed in v1.2).
+#[test]
+fn test_escrow_status_has_no_legacy_draft_or_under_review_variants() {
+    // Discriminants for the supported surface — keep in sync with `EscrowStatus`.
+    let live: [(EscrowStatus, u32); 8] = [
+        (EscrowStatus::Active, 0),
+        (EscrowStatus::Released, 1),
+        (EscrowStatus::Refunded, 2),
+        (EscrowStatus::Disputed, 3),
+        (EscrowStatus::Resolved, 4),
+        (EscrowStatus::ReleasePending, 5),
+        (EscrowStatus::RefundPending, 6),
+        (EscrowStatus::DisputePending, 7),
+    ];
+
+    for (status, expected) in live {
+        assert_eq!(
+            status as u32, expected,
+            "EscrowStatus discriminant drift — update docs/tests if intentional"
+        );
+    }
+
+    // Exhaustive match over every live variant. Adding Draft/UnderReview back
+    // would fail to compile here until this arm list is updated deliberately.
+    for (status, _) in live {
+        match status {
+            EscrowStatus::Active
+            | EscrowStatus::Released
+            | EscrowStatus::Refunded
+            | EscrowStatus::Disputed
+            | EscrowStatus::Resolved
+            | EscrowStatus::ReleasePending
+            | EscrowStatus::RefundPending
+            | EscrowStatus::DisputePending => {}
+        }
+    }
+}
+
