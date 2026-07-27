@@ -1,0 +1,8 @@
+# Issue-pushing Python scripts
+create_issues.py
+create_issues_v2.py
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class

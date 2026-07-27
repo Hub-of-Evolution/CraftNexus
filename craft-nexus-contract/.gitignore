@@ -1,7 +1,8 @@
 # Rust build artifacts
 /target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is tracked so SDK upgrades stay reproducible (#720)
+# Cargo.lock
 
 # WASM output
 *.wasm

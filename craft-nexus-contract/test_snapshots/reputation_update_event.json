@@ -1,0 +1,12 @@
+{
+  "struct": "ReputationUpdateEvent",
+  "fields": [
+    {"name": "address", "type": "Address"},
+    {"name": "successful_delta", "type": "u32"},
+    {"name": "disputed_delta", "type": "u32"},
+    {"name": "metrics_sales_delta", "type": "u32"},
+    {"name": "metrics_amount", "type": "i128"},
+    {"name": "token", "type": "Address"},
+    {"name": "timestamp", "type": "u64"}
+  ]
+}

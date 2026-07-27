@@ -129,13 +129,57 @@ fn test_cancel_recurring_escrow() {
         escrow.create_recurring_escrow(&buyer, &artisan, &token_id, &total_amount, &3600, &2);
 
     // Cancel immediately
-    escrow.cancel_recurring_escrow(&rec_escrow.id);
+    escrow.cancel_recurring_escrow(&rec_escrow.id, &buyer);
 
     let token_client = token::Client::new(&env, &token_id);
     assert_eq!(token_client.balance(&buyer), 1000);
     assert_eq!(token_client.balance(&escrow.address), 0);
 
     assert!(!escrow.has_active_escrows(&buyer));
+}
+
+#[test]
+fn test_cancel_recurring_escrow_release_to_artisan_policy() {
+    let env = Env::default();
+    let (escrow, _, buyer, artisan, token_id, token_admin, platform_wallet, _) =
+        setup_enhanced_test(&env);
+
+    let total_amount: i128 = 1000;
+    token_admin.mint(&buyer, &total_amount);
+
+    let mut rec_escrow =
+        escrow.create_recurring_escrow(&buyer, &artisan, &token_id, &total_amount, &3600, &2);
+
+    // Manually update the policy for this test
+    rec_escrow.cancellation_policy = RecurringCancellationPolicy::ReleaseToArtisan;
+    env.as_contract(&escrow.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::RecurringEscrow(rec_escrow.id), &rec_escrow);
+    });
+
+    // Cancel immediately
+    escrow.cancel_recurring_escrow(&rec_escrow.id, &buyer);
+
+    let token_client = token::Client::new(&env, &token_id);
+    // Artisan gets remaining amount minus fee (1000 - 50 = 950)
+    assert_eq!(token_client.balance(&artisan), 950);
+    // Platform gets fee
+    assert_eq!(token_client.balance(&platform_wallet), 50);
+    // Buyer gets nothing back
+    assert_eq!(token_client.balance(&buyer), 0);
+    assert_eq!(token_client.balance(&escrow.address), 0);
+
+    assert!(!escrow.has_active_escrows(&buyer));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_cancel_recurring_escrow_inactive_fails() {
+    let env = Env::default();
+    let (escrow, _, buyer, _, _, _, _, _) = setup_enhanced_test(&env);
+    // Attempt to cancel an inactive/non-existent escrow
+    escrow.cancel_recurring_escrow(&999, &buyer);
 }
 
 #[test]
@@ -228,4 +272,21 @@ fn test_reactivate_profile_username_taken_fails() {
 
     // Now reactivation must fail — username is taken
     onboarding.reactivate_profile(&buyer);
+}
+
+#[test]
+#[should_panic]
+fn test_reactivate_profile_after_username_claimed_by_another() {
+    let env = Env::default();
+    let (_, onboarding, user_a, _, _, _, _, _) = setup_enhanced_test(&env);
+
+    // Deactivate user A — their username "buyer" is released
+    onboarding.deactivate_profile(&user_a);
+
+    // User B claims the now-released username
+    let user_b = Address::generate(&env);
+    onboarding.onboard_user(&user_b, &String::from_str(&env, "buyer"), &UserRole::Buyer);
+
+    // User A attempts reactivation — must panic because username is taken
+    onboarding.reactivate_profile(&user_a);
 }

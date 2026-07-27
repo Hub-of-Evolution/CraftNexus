@@ -1,6 +1,6 @@
 [package]
 name = "craft-nexus-contract"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -11,10 +11,13 @@ name = "craft_nexus_contract"
 testutils = ["soroban-sdk/testutils"]
 
 [dependencies]
-soroban-sdk = { version = "21.0.0" }
+soroban-sdk = { version = "21.7.7" }
+wee_alloc = "0.4.5"
+# Pin to avoid Cargo resolving ed25519-dalek 3.x (incompatible with soroban-env-host 21.2.1's rand).
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["rand_core"] }
 
 [dev-dependencies]
-soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+soroban-sdk = { version = "21.7.7", features = ["testutils"] }
 
 [profile.release]
 opt-level = "z"

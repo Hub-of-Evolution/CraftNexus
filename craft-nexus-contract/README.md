@@ -20,6 +20,8 @@ Stellar Smart Contracts (Soroban) for the CraftNexus marketplace platform.
 - [Arbitrator Role](#arbitrator-role)
 - [Contract Addresses](#contract-addresses)
 - [Security Considerations](#security-considerations)
+- [Security Patterns](#security-patterns)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -54,22 +56,22 @@ The onboarding contract solves several key problems within CraftNexus:
 #### System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    CraftNexus Platform                      │
-├─────────────────────────────────────────────────────────────┤
-│                                                               │
-│  ┌──────────────┐    ┌──────────────────┐    ┌───────────┐  │
-│  │    User      │───▶│ Onboarding       │───▶│  Role     │  │
-│  │  (Wallet)    │    │   Contract       │    │ Assignment│  │
-│  └──────────────┘    └──────────────────┘    └───────────┘  │
-│                              │                     │          │
-│                              ▼                     ▼          │
-│                      ┌──────────────────┐    ┌───────────┐    │
-│                      │  User Profile    │◀───│  Escrow   │    │
-│                      │  Storage         │    │  Contract │    │
-│                      └──────────────────┘    └───────────┘    │
-│                                                               │
-└─────────────────────────────────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚                    CraftNexus Platform                      â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚                                                               â”‚
+â”‚  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”    â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”    â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”‚
+â”‚  â”‚    User      â”‚â”€â”€â”€â–¶â”‚ Onboarding       â”‚â”€â”€â”€â–¶â”‚  Role     â”‚  â”‚
+â”‚  â”‚  (Wallet)    â”‚    â”‚   Contract       â”‚    â”‚ Assignmentâ”‚  â”‚
+â”‚  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜    â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜    â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â”‚
+â”‚                              â”‚                     â”‚          â”‚
+â”‚                              â–¼                     â–¼          â”‚
+â”‚                      â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”    â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”    â”‚
+â”‚                      â”‚  User Profile    â”‚â—€â”€â”€â”€â”‚  Escrow   â”‚    â”‚
+â”‚                      â”‚  Storage         â”‚    â”‚  Contract â”‚    â”‚
+â”‚                      â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜    â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜    â”‚
+â”‚                                                               â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 #### User Roles
@@ -121,7 +123,7 @@ Initialize the onboarding contract with an administrator.
 **Description:** Sets up the contract configuration and assigns the platform admin.
 
 **Parameters:**
-- `admin (address)` – Wallet address of the platform administrator
+- `admin (address)` â€“ Wallet address of the platform administrator
 
 **Behavior:**
 - Stores contract configuration
@@ -149,24 +151,51 @@ stellar contract invoke \
 Register a new user on the CraftNexus platform.
 
 **Description:** Creates a new user profile with the specified role (Buyer or Artisan).
+On validation failure, the function emits an `OnboardCallFailed` event with the
+error discriminant *before* panicking. Off-chain indexers can subscribe to this
+topic to distinguish a user-request rejection from a host panic or network error.
 
 **Parameters:**
-- `user (address)` – User's wallet address
-- `username (string)` – Desired username (3-50 characters)
-- `role (u32)` – Desired role (1 = Buyer, 2 = Artisan)
+- `user (address)` â€“ User's wallet address
+- `username (string)` â€“ Desired username (3-50 characters)
+- `role (u32)` â€“ Desired role (1 = Buyer, 2 = Artisan)
 
 **Behavior:**
 - Validates user authentication
 - Checks username length requirements (3-50 characters)
 - Ensures user is not already onboarded
 - Creates user profile with specified role
-- Emits `UserOnboarded` event
+- Emits `UserOnboarded` event on success
+- Emits `OnboardCallFailed` event on validation failure before reverting
+
+**Events:**
+| Topic | Direction | Payload |
+|-------|-----------|---------|
+| `UserOnboarded` | Success | `UserOnboardedEvent { user, username, role }` |
+| `OnboardCallFailed` | Validation failure | `OnboardCallFailedEvent { user, reason: u32, timestamp }` |
 
 **Reverts if:**
 - User already onboarded
 - Username too short (< 3 characters)
 - Username too long (> 50 characters)
 - Invalid role specified (not Buyer or Artisan)
+
+**Error handling with `try_onboard_user`:**
+Clients that prefer graceful error handling (instead of catching a revert) can
+call the Soroban auto-generated `try_onboard_user` method which wraps the call
+in `try_call` and returns the error code as `Result`:
+
+```
+stellar contract invoke \
+  --id <ONBOARDING_CONTRACT_ID> \
+  --source <USER_SECRET> \
+  --network testnet \
+  -- \
+  try_onboard_user \
+  --user GXXXX...XXXX \
+  --username "duplicate_name" \
+  --role 1
+```
 
 **Example CLI interaction:**
 ```bash
@@ -218,7 +247,7 @@ Retrieve user profile information.
 **Description:** Fetches the complete user profile for a given address.
 
 **Parameters:**
-- `user (address)` – User's wallet address
+- `user (address)` â€“ User's wallet address
 
 **Returns:**
 - `UserProfile` struct containing:
@@ -251,7 +280,7 @@ Get user's current role.
 **Description:** Returns the role assigned to a user without fetching the full profile.
 
 **Parameters:**
-- `user (address)` – User's wallet address
+- `user (address)` â€“ User's wallet address
 
 **Returns:**
 - `u32` - Role value (0=None, 1=Buyer, 2=Artisan, 3=Admin)
@@ -275,7 +304,7 @@ Check if user has completed onboarding.
 **Description:** Quick check to determine if a wallet address has registered on the platform.
 
 **Parameters:**
-- `user (address)` – User's wallet address
+- `user (address)` â€“ User's wallet address
 
 **Returns:**
 - `bool` - true if user is onboarded, false otherwise
@@ -299,8 +328,8 @@ Update user's role (Admin only).
 **Description:** Allows the platform administrator to change a user's role.
 
 **Parameters:**
-- `user (address)` – User's wallet address to update
-- `new_role (u32)` – New role to assign (0=None, 1=Buyer, 2=Artisan, 3=Admin)
+- `user (address)` â€“ User's wallet address to update
+- `new_role (u32)` â€“ New role to assign (0=None, 1=Buyer, 2=Artisan, 3=Admin)
 
 **Behavior:**
 - Validates caller is the platform admin
@@ -332,7 +361,7 @@ Verify a user (Admin only).
 **Description:** Allows the platform administrator to verify a user, granting them additional trust.
 
 **Parameters:**
-- `user (address)` – User's wallet address to verify
+- `user (address)` â€“ User's wallet address to verify
 
 **Behavior:**
 - Validates caller is the platform admin
@@ -363,8 +392,8 @@ Check if user has a specific role.
 **Description:** Efficiently check if a user has a particular role.
 
 **Parameters:**
-- `user (address)` – User's wallet address
-- `role (u32)` – Role to check
+- `user (address)` â€“ User's wallet address
+- `role (u32)` â€“ Role to check
 
 **Returns:**
 - `bool` - true if user has the specified role
@@ -387,7 +416,7 @@ Return the precise number of active escrow contracts tracked for a user (Feature
 **Description:** Complements `has_active_contracts` (which only returns a boolean) by exposing the exact concurrency level maintained in `DataKey::ActiveContractCount(user)`. Off-chain indexers and reputation/risk dashboards use this to weight users by concurrent workload without replaying every escrow event or making a cross-contract call. Returns `0` when no active contracts are tracked.
 
 **Parameters:**
-- `user (address)` – User's wallet address
+- `user (address)` â€“ User's wallet address
 
 **Returns:**
 - `u32` - number of currently-active contracts (`0` when none)
@@ -411,7 +440,7 @@ Force-clear a stale or abandoned manual verification request (admin only, Issue 
 **Description:** Privileged queue-maintenance endpoint that removes a user's pending verification request and advances the verification queue head, without approving or rejecting it. Gated behind `platform_admin.require_auth()` so unauthorized callers cannot evict legitimate users from the queue. For an audited approve/reject decision, use `process_verification_request` instead.
 
 **Parameters:**
-- `user (address)` – Address whose pending verification request should be cleared
+- `user (address)` â€“ Address whose pending verification request should be cleared
 
 **Returns:**
 - `bool` - `true` if a pending request existed and was cleared; `false` if there was nothing to clear (idempotent no-op)
@@ -591,38 +620,89 @@ Notes:
 | `DataKey::UserProfile(Address)` | Persistent | `UserProfile { address, role, username, registered_at, is_verified }` |
 | `DataKey::Username(String)` | Persistent | `Address` owner of normalized username |
 | `DataKey::Config` | Persistent | `OnboardingConfig { require_username, min_username_length, max_username_length, platform_admin }` |
+| `DataKey::VerificationHistoryCount(Address)` | Persistent | `u32` logical length of the active verification-history buffer |
+| `DataKey::VerificationHistoryIndexed(Address, u32)` | Persistent | `CompactVerificationEntry` stored in a bounded circular buffer of up to 10 slots |
+
+#### Verification History Circular-Buffer Pattern
+
+Verification history is stored as a bounded ring buffer, not as an unbounded vector. Developers should treat the count key as the source of truth:
+
+1. Read `DataKey::VerificationHistoryCount(user)` first. It stores the current logical length `count` in the range `0..=10`.
+2. When appending a new entry:
+   - if `count < 10`, write the entry to slot `count` and increment the count.
+   - if `count == 10`, shift existing slots `1..=9` down to `0..=8`, write the new entry to slot `9`, and keep the count at `10`.
+3. When reading history, iterate over slots `0..count-1` and read `DataKey::VerificationHistoryIndexed(user, slot)`.
+
+Do not infer slot numbers from timestamps or write directly to an arbitrary slot after the buffer is full. That would overwrite the historical record or leave gaps in the logical order.
 
 ---
 
 ## Event Reference
 
-### Escrow Events (Indexer-Facing)
+This section lists the structured events emitted by the on-chain contracts. Indexers should subscribe
+to the topic tuples shown below; every event row lists the topic tuple, the payload shape, and the
+primary emitting function.
 
-Escrow events publish with topics `(event_symbol, order_id)` and typed event bodies:
+### Escrow / Stake Events
 
-| Event Symbol | Data Struct |
-|-------------|-------------|
-| `escrow_created` | `EscrowCreatedEvent { escrow_id, buyer, seller, amount, token, release_window, ipfs_hash, metadata_hash }` |
-| `funds_released` | `FundsReleasedEvent { escrow_id, amount }` |
-| `funds_refunded` | `FundsRefundedEvent { escrow_id, amount }` |
-| `escrow_disputed` | `EscrowDisputedEvent { escrow_id, dispute_reason }` |
-| `escrow_resolved` | `EscrowResolvedEvent { escrow_id, resolution }` |
+| Topic tuple (filter) | Payload type | Emitted by |
+|----------------------|--------------|------------|
+| `(symbol "escrow", u64 escrow_id)` | `EscrowEvent { escrow_id, action, buyer, seller, amount, token, timestamp }` | `emit_escrow_created`, `create_escrow`, `batch_create` |
+| `(symbol "escrow_resolved", u64 escrow_id)` | `EscrowResolvedEvent { escrow_id, buyer, seller, arbitrator, amount, token, timestamp }` | `emit_escrow_resolved_event`, `resolve_escrow` |
+| `(symbol "recurring_escrow", u64 id)` | `RecurringEscrowEvent { id, action, buyer, artisan, amount, timestamp }` | `create_recurring_escrow`, `release_next_cycle`, `cancel_recurring_escrow` |
+| `(symbol "metadata_verified", u64 order_id)` | `MetadataVerifiedEvent { order_id, verifier, timestamp }` | `emit_metadata_verified`, `verify_metadata` |
+| `(symbol "stake_reputation_update", Address)` | `ReputationUpdateEvent { address, successful_delta, disputed_delta, metrics_sales_delta, metrics_amount, token, timestamp }` | `emit_reputation_update` |
+| `(symbol "tokens_staked", Address)` | `TokensStakedEvent { artisan, token, amount }` | staking functions |
+| `(symbol "tokens_unstaked", Address)` | `TokensUnstakedEvent { artisan, token, amount }` | unstake functions |
+| `(symbol "stake_operation", [u8])` | tuple `(artisan: Address, new_stake: i128)` | stake history helpers |
+| `(symbol "stake_history_warning", "queue_full")` | `String` (warning message) | stake history maintenance |
 
-### Onboarding Events
+### Admin / Configuration Events
 
-Onboarding events publish with one topic symbol and payload `Address`:
+| Topic tuple (filter) | Payload type | Emitted by |
+|----------------------|--------------|------------|
+| `(symbol "admin_changed", bytes)` | `(previous_admin: Address, new_admin: Address)` | `emit_admin_changed`, `update_admin` |
+| `(symbol "admin_config_updated", symbol field_name)` | `ConfigUpdatedEvent { field_name: Symbol, old_value: ConfigValue, new_value: ConfigValue }` | `emit_config_updated`, config setters |
+| `(symbol "admin_fee_tier_updated", Address artisan)` | `ArtisanFeeTierUpdatedEvent { artisan, fee_bps }` | `emit_artisan_fee_tier_updated` |
+| `(symbol "admin_platform_paused", Address)` | `PlatformPausedEvent { initiator, timestamp }` | `emit_platform_paused` |
+| `(symbol "admin_platform_unpaused", Address)` | `PlatformUnpausedEvent { initiator, timestamp }` | `emit_platform_unpaused` |
+| `(symbol "admin_config_recovered", bool)` | `String` (recovery notice) | config recovery path |
 
-| Event Symbol | Data |
-|-------------|------|
-| `UserOnboarded` | onboarded user address |
-| `RoleUpdated` | updated user address |
-| `UserVerified` | verified user address |
+### Upgrade / Migration Events
+
+| Topic tuple (filter) | Payload type | Emitted by |
+|----------------------|--------------|------------|
+| `(symbol "wasm_upgrade", Symbol action)` | `UpgradeProposalEvent { action, wasm_hash, admin, timestamp, upgrade_at }` | `emit_upgrade_event`, upgrade proposal APIs |
+| `(symbol "fee_cfg_migrated",)` | `FeeTokenConfigsMigratedEvent { scanned_tokens, migrated_configs, skipped_existing }` | migration utilities |
+
+### Onboarding Contract Events
+
+| Topic tuple (filter) | Payload type | Emitted by |
+|----------------------|--------------|------------|
+| `(symbol "UserOnboarded",)` | `UserOnboardedEvent { user: Address, username: String, role: UserRole }` | `onboard_user` |
+| `(symbol "OnboardCallFailed",)` | `OnboardCallFailedEvent { user: Address, reason: u32, timestamp: u64 }` | `emit_onboard_failed_and_panic` |
+| `(symbol "RoleUpdated",)` | tuple `(user: Address, old_role: UserRole, new_role: UserRole)` | `update_user_role` |
+| `(symbol "ProfileDeactivated", Address)` | tuple `(user: Address, role: UserRole)` | `deactivate_profile` |
+| `(symbol "ProfileReactivated", Address)` | tuple `(user: Address, role: UserRole)` | `reactivate_profile` |
+| `(symbol "UserVerified",)` | `Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
+| `(symbol "UsernameChanged",)` | `Address` | `change_username` |
+| `(symbol "UsernameChangedRevoked",)` | audit symbol for revoked username changes | username-change flow |
+| `(symbol "PortfolioUpdated",)` | `Address` | `update_portfolio` |
+| `(symbol "AutoVerifiedEvent", Address)` | `AutoVerifiedEvent { user, escrow_count, volume }` | `try_auto_verify` |
+
+Notes:
+- Topic tuples are the canonical filter keys for indexers. Many events include user or order identifiers in the topic tuple so consumers can cheaply subscribe to a single-user or single-order stream without decoding event payloads.
+- All numeric monetary fields are emitted as raw integers (I128) to preserve precision; formatting should be applied off-chain.
+- This reference is derived directly from the contract source; whenever you change event payloads, update this table to keep indexers in sync.
 
 ---
 
 ## Error Codes
 
-Escrow contract errors (`src/lib.rs`, `Error` enum):
+Errors are grouped by category for off-chain triage. Use `is_retryable(error)` in
+`src/lib.rs` to check if an error may succeed on retry.
+
+### Auth / Access (1â€“9) â€” rollback immediately
 
 | Code | Variant | Meaning |
 |------|---------|---------|
@@ -635,10 +715,59 @@ Escrow contract errors (`src/lib.rs`, `Error` enum):
 | `7` | `ReleaseWindowTooLong` | Reserved for release-window policy checks |
 | `8` | `NotInDispute` | Escrow expected to be disputed but was not |
 | `9` | `AlreadyOnboarded` | Reserved for onboarding collision handling |
+
+### State / Transition (10â€“19) â€” retry after state change
+
+| Code | Variant | Meaning |
+|------|---------|---------|
 | `10` | `InvalidFee` | Platform fee setting is invalid |
 | `11` | `SameBuyerSeller` | Buyer and seller addresses are identical |
 | `12` | `PlatformNotInitialized` | Platform config/admin not initialized |
 | `13` | `ReleaseWindowNotElapsed` | Auto-release attempted before release window end |
+| `14` | `BatchOperationFailed` | Deprecated: use `BatchLimitExceeded` |
+| `15` | `ContractPaused` | Contract is paused |
+| `16` | `DisputeExpired` | Dispute resolution deadline not yet expired |
+| `17` | `InsufficientStake` | Artisan stake below minimum |
+| `18` | `StakeCooldownActive` | Stake cooldown period still active |
+| `19` | `InvalidRefundAmount` | Refund amount invalid (zero, negative, or exceeds escrow) |
+
+### Config / Resource (20â€“29) â€” operator must act
+
+| Code | Variant | Meaning |
+|------|---------|---------|
+| `20` | `ProposalNotFound` | Partial refund proposal not found |
+| `21` | `ProposalAlreadyExists` | Proposal already exists for this order |
+| `22` | `ReentryDetected` | Re-entrancy detected |
+| `23` | `ReleaseWindowTooShort` | Release window is zero or negative |
+| `24` | `StakeTokenMismatch` | Staked funds only withdrawable in original staking token |
+| `25` | `InvalidAdminAddress` | Invalid admin address provided |
+| `26` | `CorruptedPlatformConfig` | Platform configuration storage corrupted |
+| `27` | `StakeQueueFull` | Stake history queue at capacity |
+| `28` | `AdminRecoveryFailed` | Admin recovery failed due to time lock or invalid conditions |
+| `29` | `BatchLimitExceeded` | Batch operation limit exceeded |
+
+### Operational / Gates (30â€“39) â€” retry after cooldown
+
+| Code | Variant | Meaning |
+|------|---------|---------|
+| `30` | `DeprecatedFunction` | Deprecated function called (no-op) |
+| `31` | `NoPendingAdmin` | No pending admin transfer |
+| `32` | `NoUpgradeProposed` | No WASM upgrade proposed |
+| `33` | `UpgradeCooldownActive` | WASM upgrade cooldown active |
+| `34` | `UpgradeProposalExists` | WASM upgrade proposal already exists |
+| `35` | `InvalidUpgradeHash` | Invalid WASM upgrade hash |
+| `36` | `RecurringEscrowNotFound` | Recurring escrow not found |
+| `37` | `CycleNotReady` | Escrow cycle not ready for release |
+| `38` | `RecurringEscrowIdExhausted` | Recurring escrow ID counter exhausted |
+| `39` | `OnboardingContractNotSet` | Onboarding contract address not configured |
+
+### Validation (40â€“42) â€” fix caller input
+
+| Code | Variant | Meaning |
+|------|---------|---------|
+| `40` | `InvalidMetadataHash` | Provided metadata hash is invalid |
+| `41` | `InvalidIpfsHash` | Provided IPFS hash is invalid |
+| `42` | `NotAnUpgradeSigner` | Caller is not an authorized upgrade signer |
 
 Onboarding contract currently reverts with explicit panic messages (for example `Username too short`, `Username already taken`, `User not found`).
 
@@ -715,18 +844,22 @@ Primary artifact:
 ### Required Secrets
 
 To deploy contracts, you will need:
-- **Source Account Secret Key**: The private key of the account that will deploy and pay for the contract. Keep this secret!
+- **Source Account Secret Key**: The private key or identity of the account that will deploy and pay for the contract. Keep this secret!
+- **Environment Configuration**: Refer to `.env.example` in this directory to set optional overrides (`STELLAR_SECRET_KEY`, `NETWORK_PASSPHRASE`, `RPC_URL`).
 
 ### Automated Deployment (Recommended)
 
-A deployment script is provided in this repository:
+A deployment script with environment variable validation and dry-run support is provided:
 
 ```bash
-./scripts/deploy.sh [testnet|mainnet] <YOUR_IDENTITY_NAME>
+./scripts/deploy.sh [testnet|mainnet] <YOUR_IDENTITY_NAME> [--dry-run]
 ```
 
-Example:
+Examples:
 ```bash
+# Validate environment and configuration without deploying (dry-run)
+./scripts/deploy.sh testnet alice --dry-run
+
 # Deploy to testnet using identity 'alice'
 ./scripts/deploy.sh testnet alice
 
@@ -735,10 +868,12 @@ Example:
 ```
 
 The script will:
-1. Run `./scripts/build.sh` with optimization, size check, and tests
-2. Configure the selected network if needed
-3. Deploy `craft_nexus_contract.wasm`
-4. Output the deployed contract ID
+1. Validate required environment variables (`STELLAR_SECRET_KEY`/`<SOURCE_ACCOUNT>`, `NETWORK_PASSPHRASE`, `RPC_URL`)
+2. Run `./scripts/build.sh` with optimization, size check, and tests
+3. Configure the selected network if needed
+4. Deploy `craft_nexus_contract.wasm` on-chain
+5. Output the deployed contract ID
+
 
 ### Manual Deployment
 
@@ -867,12 +1002,9 @@ for (const evt of ledgerEvents) {
   const eventName = evt.topic[0].toString();
   const orderId = evt.topic[1]?.toString();
 
-  if (eventName === "escrow_created") {
+  if (eventName === "escrow") {
     const data = parseEscrowCreatedEvent(evt.value);
     saveEscrowCreated(orderId, data.buyer, data.seller, data.amount, data.token);
-  } else if (eventName === "escrow_disputed") {
-    const data = parseEscrowDisputedEvent(evt.value);
-    saveEscrowDispute(orderId, data.dispute_reason);
   } else if (eventName === "escrow_resolved") {
     const data = parseEscrowResolvedEvent(evt.value);
     saveEscrowResolution(orderId, data.resolution);
@@ -894,15 +1026,94 @@ for (const evt of ledgerEvents) {
 - **Onboarding Contract**: `[DEPLOY_AND_UPDATE]`
 - **Escrow Contract**: `[DEPLOY_AND_UPDATE]`
 
+### Address Synchronization
+
+Contract addresses in this file and in `stellar.toml` are automatically verified to stay in sync via CI. When updating a contract address:
+
+1. Update the address in **both** `README.md` and `stellar.toml`
+2. Push your changes
+3. The CI workflow (`.github/workflows/contract-address-check.yml`) will verify they match
+4. If they don't match, the CI check will fail and show which file is missing the address
+
+To run the check locally before pushing:
+```bash
+bash scripts/check-contract-addresses.sh
+```
+
+See `scripts/check-contract-addresses.sh` for implementation details.
+
 ---
 
 ## Security Considerations
+
+- Admin recovery: A minimum 7-day time-lock is enforced for admin recovery flows. The contract records the cooldown used when initiating recovery and rejects attempts if the recorded delay is missing or below the 7-day floor to prevent direct-storage bypasses.
 
 1. **Admin and Arbitrator Key Management**: `admin` and `arbitrator` can change critical state. Store these keys in HSM or custody infrastructure.
 2. **Strict Auth Expectations**: `buyer.require_auth()`, `admin.require_auth()`, and arbitrator authorization gates are core safety controls. Never bypass these in wrappers.
 3. **Minimum Amount Policy**: Configure `DataKey::MinEscrowAmount(token)` for each accepted token to avoid dust escrow spam.
 4. **Metadata Validation**: `ipfs_hash` is CID-validated and `metadata_hash` must be 32 bytes. Mirror these checks client-side for better UX.
 5. **Size-Gated Builds in CI**: Keep `./scripts/build.sh` in CI to prevent oversized WASM artifacts from shipping.
+
+---
+
+## Security Patterns
+
+### Checks-Effects-Interactions (CEI) Pattern
+
+All public state-mutating functions in CraftNexus that perform token transfers **must** follow the CEI pattern. This is mandatory and enforced during code review.
+
+#### What is CEI?
+
+CEI (Checks-Effects-Interactions) is a Soroban security pattern that prevents reentrancy and state corruption by enforcing a strict ordering within functions:
+
+1. **Checks** â€” Validate all inputs and preconditions (auth, balances, state)
+2. **Effects** â€” Update contract state (storage writes)
+3. **Interactions** â€” Call external contracts (token transfers, cross-contract calls)
+
+Token transfers and cross-contract calls must always come **last**.
+
+#### âŒ Non-compliant (vulnerable)
+
+```rust
+pub fn release_funds(env: Env, recipient: Address, amount: i128) {
+    recipient.require_auth();
+    // âŒ WRONG: Token transfer BEFORE state update
+    token_client.transfer(&env.current_contract_address(), &recipient, &amount);
+    // âŒ State updated after external call â€” vulnerable to reentrancy
+    env.storage().persistent().set(&DataKey::Balance, &(balance - amount));
+}
+```
+
+#### âœ… CEI-compliant (correct)
+
+```rust
+pub fn release_funds(env: Env, recipient: Address, amount: i128) {
+    // CHECKS: validate auth and preconditions
+    recipient.require_auth();
+    let balance: i128 = env.storage().persistent().get(&DataKey::Balance).unwrap_or(0);
+    if balance < amount {
+        panic_with_error!(&env, Error::InsufficientFunds);
+    }
+
+    // EFFECTS: update state before any external call
+    env.storage().persistent().set(&DataKey::Balance, &(balance - amount));
+
+    // INTERACTIONS: token transfer last
+    token_client.transfer(&env.current_contract_address(), &recipient, &amount);
+}
+```
+
+#### Scope
+
+CEI ordering is required for any function that:
+- Calls `token_client.transfer()` or `token_client.transfer_from()`
+- Makes cross-contract calls via a client
+- Emits events alongside state mutations (events should follow effects)
+
+#### References
+
+- [Soroban Security Best Practices](https://developers.stellar.org/docs/smart-contracts/security)
+- See [SCALABILITY_IMPROVEMENTS.md](SCALABILITY_IMPROVEMENTS.md) for additional CEI context in this codebase
 
 ---
 
@@ -927,6 +1138,63 @@ for (const evt of ledgerEvents) {
 
 **"Invalid role"**
 - Only Buyer (1) and Artisan (2) roles can be self-assigned
+
+---
+
+## Escrow Query Pagination
+
+### `get_escrows_by_buyer(buyer, page, page_size, reverse)`
+
+Returns a paginated list of escrow IDs for a specific buyer.
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `buyer` | `Address` | The buyer's address (auth required) |
+| `page` | `u32` | Zero-indexed page number |
+| `page_size` | `u32` | Number of results per page (capped at `MAX_BATCH_SIZE = 20`) |
+| `reverse` | `bool` | If `true`, returns results in reverse chronological order |
+
+**Returns:** `Vec<u64>` â€” List of escrow IDs for the requested page. Empty if `page` is out of range.
+
+**Notes:**
+- `page_size` values above `MAX_BATCH_SIZE` (20) are silently capped to prevent memory exhaustion.
+- Uses indexed storage (`BuyerEscrowIndexed`) for O(page_size) reads.
+- Falls back to legacy `BuyerEscrows` vector for backward compatibility.
+
+**Usage pattern (off-chain/frontend):**
+```javascript
+const PAGE_SIZE = 10;
+let page = 0;
+let allEscrows = [];
+while (true) {
+  const ids = await contract.get_escrows_by_buyer(buyer, page, PAGE_SIZE, false);
+  if (ids.length === 0) break;
+  allEscrows.push(...ids);
+  page++;
+}
+```
+
+---
+
+### `get_escrows_by_seller(seller, page, page_size, reverse)`
+
+Returns a paginated list of escrow IDs for a specific seller.
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `seller` | `Address` | The seller's address (auth required) |
+| `page` | `u32` | Zero-indexed page number |
+| `page_size` | `u32` | Number of results per page (capped at `MAX_BATCH_SIZE = 20`) |
+| `reverse` | `bool` | If `true`, returns results in reverse chronological order |
+
+**Returns:** `Vec<u64>` â€” List of escrow IDs for the requested page. Empty if `page` is out of range.
+
+**Notes:**
+- `page_size` values above `MAX_BATCH_SIZE` (20) are silently capped to prevent memory exhaustion.
+- Uses indexed storage (`SellerEscrowIndexed`) for O(page_size) reads.
+- Falls back to legacy `SellerEscrows` vector for backward compatibility.
 
 ---
 

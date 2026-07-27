@@ -3,13 +3,14 @@
 use crate::{CraftNexusContract, CraftNexusContractClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, vec, Address, Env, Vec,
+    token, Address, Env,
 };
 
 const DEFAULT_MIN_RELEASE_WINDOW: u32 = 24 * 60 * 60; // 1 day
 const ONE_HOUR: u32 = 60 * 60;
 const ONE_DAY: u32 = 24 * 60 * 60;
 const SEVEN_DAYS: u32 = 7 * 24 * 60 * 60;
+const MAX_TOTAL_RELEASE_WINDOW: u32 = 30 * 24 * 60 * 60; // 30 days
 
 /// Helper function to setup test environment
 fn setup_test() -> (
@@ -423,4 +424,55 @@ fn test_min_window_prevents_immediate_auto_release() {
     let expected_seller_amount = 1_000_000 - expected_fee;
     assert_eq!(token.balance(&seller), expected_seller_amount);
     assert_eq!(token.balance(&platform_wallet), expected_fee);
+}
+
+#[test]
+#[should_panic]
+fn test_create_escrow_above_max_release_window_fails() {
+    let (_, client, buyer, seller, token_addr, _, _) = setup_test();
+
+    // Default max is 30 days, try to create with 31 days
+    let thirty_one_days = MAX_TOTAL_RELEASE_WINDOW + ONE_DAY;
+    client.create_escrow(
+        &buyer,
+        &seller,
+        &token_addr,
+        &1_000_000,
+        &1,
+        &Some(thirty_one_days),
+    );
+}
+
+#[test]
+fn test_create_escrow_at_max_release_window() {
+    let (_, client, buyer, seller, token_addr, _, _) = setup_test();
+
+    // Create escrow with exactly the max window (30 days)
+    let escrow = client.create_escrow(
+        &buyer,
+        &seller,
+        &token_addr,
+        &1_000_000,
+        &1,
+        &Some(MAX_TOTAL_RELEASE_WINDOW),
+    );
+
+    assert_eq!(escrow.release_window, MAX_TOTAL_RELEASE_WINDOW);
+}
+
+#[test]
+#[should_panic]
+fn test_create_escrow_below_min_release_window_fails() {
+    let (_, client, buyer, seller, token_addr, _, _) = setup_test();
+
+    // Default min is 1 day, try to create with 12 hours
+    let twelve_hours = 12 * ONE_HOUR;
+    client.create_escrow(
+        &buyer,
+        &seller,
+        &token_addr,
+        &1_000_000,
+        &1,
+        &Some(twelve_hours),
+    );
 }

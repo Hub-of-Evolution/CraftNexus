@@ -1,0 +1,12 @@
+{
+  "struct": "EscrowEvent",
+  "fields": [
+    {"name": "escrow_id", "type": "u64"},
+    {"name": "action", "type": "EscrowAction"},
+    {"name": "buyer", "type": "Address"},
+    {"name": "seller", "type": "Address"},
+    {"name": "amount", "type": "i128"},
+    {"name": "token", "type": "Address"},
+    {"name": "timestamp", "type": "u64"}
+  ]
+}

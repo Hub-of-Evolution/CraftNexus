@@ -1,0 +1,7 @@
+{
+  "struct": "ArtisanFeeTierUpdatedEvent",
+  "fields": [
+    {"name": "artisan", "type": "Address"},
+    {"name": "fee_bps", "type": "u32"}
+  ]
+}
