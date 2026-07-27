@@ -843,6 +843,9 @@ pub struct UpgradeRecord {
 pub struct FeeTokenInfo {
     pub active: bool,
     pub custom_fee_bps: Option<u32>,
+    /// Minimum raw-token amount accepted when this token is used as stake.
+    /// A value of zero leaves stake deposits unrestricted.
+    pub min_amount: i128,
     pub accumulated: i128,
 }
 
@@ -1489,6 +1492,29 @@ impl CraftNexusContract {
             .unwrap_or(0); // If not set, allow any positive amount
 
         if amount < min_amount {
+            return Err(Error::AmountBelowMinimum);
+        }
+
+        Ok(())
+    }
+
+    /// Enforce a token-specific minimum on stake deposits. This is deliberately
+    /// separate from `check_min_amount`, whose minimum applies only to escrow
+    /// funding and must not retroactively affect collateral deposits.
+    fn check_stake_min_amount(env: &Env, token: &Address, amount: i128) -> Result<(), Error> {
+        Self::ensure_fee_token_config(env, token);
+        let info: FeeTokenInfo = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeTokenConfig(token.clone()))
+            .unwrap_or(FeeTokenInfo {
+                active: true,
+                custom_fee_bps: None,
+                min_amount: 0,
+                accumulated: 0,
+            });
+
+        if amount < info.min_amount {
             return Err(Error::AmountBelowMinimum);
         }
 
@@ -3268,6 +3294,7 @@ impl CraftNexusContract {
             let info = FeeTokenInfo {
                 active: true,
                 custom_fee_bps: None,
+                min_amount: 0,
                 accumulated: 0,
             };
             env.storage().persistent().set(&cfg_key, &info);
@@ -3290,6 +3317,7 @@ impl CraftNexusContract {
                 .unwrap_or(FeeTokenInfo {
                     active: true,
                     custom_fee_bps: None,
+                    min_amount: 0,
                     accumulated: 0,
                 });
         info.accumulated = info.accumulated.saturating_add(amount);
@@ -3348,12 +3376,14 @@ impl CraftNexusContract {
                 .unwrap_or(FeeTokenInfo {
                     active: true,
                     custom_fee_bps: None,
+                    min_amount: 0,
                     accumulated: 0,
                 });
 
         let info = FeeTokenInfo {
             active,
             custom_fee_bps,
+            min_amount: existing.min_amount,
             accumulated: existing.accumulated,
         };
         env.storage().persistent().set(&cfg_key, &info);
@@ -3386,6 +3416,7 @@ impl CraftNexusContract {
                     let info = FeeTokenInfo {
                         active: true,
                         custom_fee_bps: None,
+                        min_amount: 0,
                         accumulated: env
                             .storage()
                             .persistent()
@@ -5380,6 +5411,9 @@ impl CraftNexusContract {
         if amount <= 0 {
             env.panic_with_error(crate::Error::AmountBelowMinimum);
         }
+        if let Err(e) = Self::check_stake_min_amount(&env, &token, amount) {
+            env.panic_with_error(e);
+        }
 
         // Transfer from artisan to contract
         let token_client = token::Client::new(&env, &token);
@@ -5623,6 +5657,37 @@ impl CraftNexusContract {
             .get::<DataKey, ArtisanStakeData>(&DataKey::ArtisanStake(artisan))
             .map(|stake: ArtisanStakeData| stake.amount)
             .unwrap_or(0)
+    }
+
+    /// Set the minimum raw-token amount accepted for an individual stake token.
+    /// The platform-wide stake minimum is compared in canonical 7-decimal units;
+    /// this setting protects each token's native smallest-unit denomination.
+    pub fn set_fee_token_min_amount(
+        env: Env,
+        token: Address,
+        min_amount: i128,
+    ) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        if min_amount < 0 {
+            return Err(Error::AmountBelowMinimum);
+        }
+
+        Self::ensure_fee_token_config(&env, &token);
+        let cfg_key = DataKey::FeeTokenConfig(token);
+        let mut info: FeeTokenInfo = env.storage().persistent().get(&cfg_key).unwrap_or(
+            FeeTokenInfo {
+                active: true,
+                custom_fee_bps: None,
+                min_amount: 0,
+                accumulated: 0,
+            },
+        );
+        info.min_amount = min_amount;
+        env.storage().persistent().set(&cfg_key, &info);
+        Self::extend_persistent(&env, &cfg_key);
+        Ok(())
     }
 
     /// Admin sets the minimum stake required for artisans to create escrows.

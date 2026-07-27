@@ -3,9 +3,42 @@ extern crate alloc;
 
 use super::*;
 use soroban_sdk::{
+    contract, contractimpl, contracttype,
     testutils::{Address as _, Events, Ledger},
     token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, TryIntoVal,
 };
+
+#[contracttype]
+#[derive(Clone)]
+enum ZeroDecimalTokenKey {
+    Balance(Address),
+}
+
+#[contract]
+struct ZeroDecimalToken;
+
+#[contractimpl]
+impl ZeroDecimalToken {
+    pub fn decimals(_env: Env) -> u32 {
+        0
+    }
+
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let key = ZeroDecimalTokenKey::Balance(to);
+        let balance: i128 = env.storage().instance().get(&key).unwrap_or(0);
+        env.storage().instance().set(&key, &(balance + amount));
+    }
+
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        let from_key = ZeroDecimalTokenKey::Balance(from);
+        let to_key = ZeroDecimalTokenKey::Balance(to);
+        let from_balance: i128 = env.storage().instance().get(&from_key).unwrap_or(0);
+        assert!(from_balance >= amount);
+        let to_balance: i128 = env.storage().instance().get(&to_key).unwrap_or(0);
+        env.storage().instance().set(&from_key, &(from_balance - amount));
+        env.storage().instance().set(&to_key, &(to_balance + amount));
+    }
+}
 
 fn setup_test(
     env: &Env,
@@ -104,7 +137,7 @@ fn test_create_escrow_success() {
     assert_eq!(last_event.0, client.address);
     // Topics: ["escrow_created", escrow_id]
     assert_eq!(
-        last_event.1,
+        last_event.as_ref().unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "escrow").into_val(&env),
@@ -1142,6 +1175,25 @@ fn test_normalize_amount_to_7_decimals_preserves_7_decimal_units() {
 
     let normalized = CraftNexusContract::normalize_amount_to_7_decimals(&env, &token_id, 1_234_567);
     assert_eq!(normalized, 1_234_567);
+}
+
+#[test]
+#[should_panic]
+fn test_zero_decimal_stake_below_canonical_minimum_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, _, _, _, _) = setup_test(&env, true);
+
+    let zero_decimal_token = env.register_contract(None, ZeroDecimalToken);
+    let zero_decimal_client = ZeroDecimalTokenClient::new(&env, &zero_decimal_token);
+    zero_decimal_client.mint(&buyer, &100);
+    zero_decimal_client.mint(&seller, &1);
+
+    // A single 0-decimal unit normalizes to 10_000_000 canonical units.
+    // It must not satisfy a two-token (20_000_000 canonical-unit) requirement.
+    client.set_min_stake_required(&20_000_000);
+    client.stake_tokens(&seller, &zero_decimal_token, &1);
+    client.create_escrow(&buyer, &seller, &zero_decimal_token, &1, &1, &Some(3_600));
 }
 
 #[test]
@@ -2573,7 +2625,7 @@ fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
         ]
     );
 
-    let event: MetadataVerifiedEvent = last_event.2.try_into_val(&env).unwrap();
+    let event: MetadataVerifiedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(event.order_id, 1);
     assert_eq!(event.verifier, buyer);
     assert_eq!(event.timestamp, 1711368000);
@@ -2590,7 +2642,7 @@ fn test_set_paused_emits_platform_status_events() {
     let events = env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        last_event.as_ref().unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "platform_paused").into_val(&env),
@@ -2598,7 +2650,7 @@ fn test_set_paused_emits_platform_status_events() {
         ]
     );
 
-    let paused_event: PlatformPausedEvent = last_event.2.try_into_val(&env).unwrap();
+    let paused_event: PlatformPausedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(paused_event.initiator, admin.clone());
     assert_eq!(paused_event.timestamp, 1711368000);
 
@@ -2607,7 +2659,7 @@ fn test_set_paused_emits_platform_status_events() {
     let events = env.events().all();
     let last_event = events.last().unwrap();
     assert_eq!(
-        last_event.1,
+        last_event.as_ref().unwrap().1,
         vec![
             &env,
             Symbol::new(&env, "platform_unpaused").into_val(&env),
@@ -2615,7 +2667,7 @@ fn test_set_paused_emits_platform_status_events() {
         ]
     );
 
-    let unpaused_event: PlatformUnpausedEvent = last_event.2.try_into_val(&env).unwrap();
+    let unpaused_event: PlatformUnpausedEvent = last_event.unwrap().2.try_into_val(&env).unwrap();
     assert_eq!(unpaused_event.initiator, admin);
     assert_eq!(unpaused_event.timestamp, 1711368000);
 }
