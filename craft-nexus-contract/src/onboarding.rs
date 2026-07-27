@@ -155,6 +155,9 @@ pub enum DataKey {
     /// (e.g. preventing deactivation) without needing a cross-contract call
     /// back into the escrow contract on every check.
     ActiveContractCount(Address),
+    /// Physical slot containing the oldest retained verification-history entry.
+    /// Kept separate from the count so appends can overwrite a full buffer in O(1).
+    VerificationHistoryHead(Address),
 }
 
 /// User roles in the CraftNexus platform.
@@ -1188,24 +1191,32 @@ impl OnboardingContract {
             .unwrap_or(Vec::new(env));
 
         let count_key = DataKey::VerificationHistoryCount(user.clone());
+        let head_key = DataKey::VerificationHistoryHead(user.clone());
         let mut count: u32 = 0;
-        for i in 0..history.len() {
-            if let Some(entry) = history.get(i) {
+        let first = if history.len() > MAX_VERIFICATION_HISTORY {
+            history.len() - MAX_VERIFICATION_HISTORY
+        } else {
+            0
+        };
+        for source_index in first..history.len() {
+            if let Some(entry) = history.get(source_index) {
                 let compact = CompactVerificationEntry {
                     timestamp: entry.timestamp,
                     action: Self::parse_verification_action(env, &entry.action),
                     by: entry.by.clone(),
                 };
-                let entry_key = DataKey::VerificationHistoryIndexed(user.clone(), i);
+                let entry_key = DataKey::VerificationHistoryIndexed(user.clone(), count);
                 env.storage().persistent().set(&entry_key, &compact);
                 Self::extend_persistent(env, &entry_key);
-                count = i + 1;
+                count += 1;
             }
         }
 
         if count > 0 {
             env.storage().persistent().set(&count_key, &count);
             Self::extend_persistent(env, &count_key);
+            env.storage().persistent().set(&head_key, &0u32);
+            Self::extend_persistent(env, &head_key);
         }
 
         env.storage().persistent().remove(&legacy_key);
@@ -1217,9 +1228,9 @@ impl OnboardingContract {
     /// actions for audit trails and compliance reporting. Implements circular-buffer semantics
     /// to enforce bounded storage while preserving temporal ordering of recent events.
     ///
-    /// When history reaches MAX_VERIFICATION_HISTORY (10 entries), oldest entries are shifted
-    /// and the newest entry is appended at the tail. This enables long-running contract states
-    /// to support arbitration reviews without unbounded storage growth.
+    /// When history reaches MAX_VERIFICATION_HISTORY (10 entries), the oldest slot is
+    /// overwritten and the head pointer advances. This enables long-running contract states
+    /// to support arbitration reviews without unbounded storage growth or entry shifting.
     ///
     /// # Arguments
     /// * `user` - Address of the user whose history is updated
@@ -1228,13 +1239,13 @@ impl OnboardingContract {
     ///
     /// # Storage Side-Effects
     /// - Reads/writes `DataKey::VerificationHistoryCount(user)` (4 bytes)
-    /// - Reads/writes up to 10 entries of `DataKey::VerificationHistoryIndexed(user, slot)`
+    /// - Reads/writes one `DataKey::VerificationHistoryIndexed(user, slot)` entry
     /// - Each entry is ~24 bytes (timestamp u64 + action u32 + optional address 32 bytes)
     /// - Extends TTL on count and all affected entries to prevent archival
     ///
     /// # Performance (Issue #82)
     /// - Amortized O(1) append for count < MAX_VERIFICATION_HISTORY
-    /// - O(MAX_VERIFICATION_HISTORY) shift cost when buffer is full (rare operation)
+    /// - O(1) append when buffer is full: overwrite the oldest slot and advance the head
     /// - Single TTL bump per entry = ~100 CPU instructions (vs Vec iteration = 1000+)
     ///
     /// # Check-Effect-Interactions
@@ -1250,6 +1261,7 @@ impl OnboardingContract {
         Self::migrate_legacy_verification_history(env, user);
 
         let count_key = DataKey::VerificationHistoryCount(user.clone());
+        let head_key = DataKey::VerificationHistoryHead(user.clone());
         // [PERFORMANCE #94] Extend TTL on read so the count key does not expire while
         // the buffer is still in active use. Without this bump a count entry close to
         // its TTL deadline could be archived on the same ledger as the write that follows,
@@ -1261,25 +1273,14 @@ impl OnboardingContract {
             0
         };
 
-        // [FEATURE #83] Circular-buffer rotation for active contracts:
-        // When history is full, shift older entries down and append new entry at end.
-        // This supports long-lived arbitration scenarios without unbounded growth.
+        let head: u32 = if let Some(h) = env.storage().persistent().get(&head_key) {
+            Self::extend_persistent(env, &head_key);
+            h % MAX_VERIFICATION_HISTORY
+        } else {
+            0
+        };
         let slot = if count >= MAX_VERIFICATION_HISTORY {
-            // Shift entries: move index i down to i-1 for all i in [1, MAX-1]
-            for i in 1..MAX_VERIFICATION_HISTORY {
-                let src_key = DataKey::VerificationHistoryIndexed(user.clone(), i);
-                if let Some(entry) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, CompactVerificationEntry>(&src_key)
-                {
-                    let dst_key = DataKey::VerificationHistoryIndexed(user.clone(), i - 1);
-                    env.storage().persistent().set(&dst_key, &entry);
-                    Self::extend_persistent(env, &dst_key);
-                    env.storage().persistent().remove(&src_key);
-                }
-            }
-            MAX_VERIFICATION_HISTORY - 1
+            head
         } else {
             count
         };
@@ -1300,6 +1301,12 @@ impl OnboardingContract {
         };
         env.storage().persistent().set(&count_key, &new_count);
         Self::extend_persistent(env, &count_key);
+
+        if count >= MAX_VERIFICATION_HISTORY {
+            let new_head = (head + 1) % MAX_VERIFICATION_HISTORY;
+            env.storage().persistent().set(&head_key, &new_head);
+            Self::extend_persistent(env, &head_key);
+        }
     }
 
     fn collect_username_change_fee(env: &Env, user: &Address, config: &OnboardingConfig) {
@@ -3179,13 +3186,29 @@ impl OnboardingContract {
         Self::migrate_legacy_verification_history(&env, &user);
 
         let count_key = DataKey::VerificationHistoryCount(user.clone());
+        let head_key = DataKey::VerificationHistoryHead(user.clone());
         let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
         if env.storage().persistent().has(&count_key) {
             Self::extend_persistent(&env, &count_key);
         }
 
+        let head: u32 = env
+            .storage()
+            .persistent()
+            .get(&head_key)
+            .unwrap_or(0);
+        if env.storage().persistent().has(&head_key) {
+            Self::extend_persistent(&env, &head_key);
+        }
+
         let mut result = Vec::new(&env);
-        for index in 0..count {
+        let entry_count = if count > MAX_VERIFICATION_HISTORY {
+            MAX_VERIFICATION_HISTORY
+        } else {
+            count
+        };
+        for offset in 0..entry_count {
+            let index = (head + offset) % MAX_VERIFICATION_HISTORY;
             let entry_key = DataKey::VerificationHistoryIndexed(user.clone(), index);
             if let Some(compact) = env
                 .storage()

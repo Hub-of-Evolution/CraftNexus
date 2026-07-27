@@ -939,7 +939,8 @@ fn test_verification_history_read_budget_is_bounded() {
 
     assert_eq!(history.len(), MAX_VERIFICATION_HISTORY);
     assert!(env.budget().cpu_instruction_count() < 250_000);
-    assert!(env.budget().ledger_read_count() <= MAX_VERIFICATION_HISTORY as u64 + 3);
+    // One count key, one head key, and one indexed entry per retained action.
+    assert!(env.budget().ledger_read_count() <= MAX_VERIFICATION_HISTORY as u64 + 5);
 }
 
 // ============================================================
