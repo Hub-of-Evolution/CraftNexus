@@ -163,7 +163,96 @@ fn test_onboard_duplicate_user() {
 
     client.onboard_user(&user, &username1, &UserRole::Buyer, &None);
     let result = client.try_onboard_user(&user, &username2, &UserRole::Artisan, &None);
-    assert!(result.is_err());
+    assert_onboard_error(result, Error::OnboardingIdentityConflict);
+}
+
+// ===== Issue #929 — idempotent onboarding and identity reconciliation =====
+
+#[test]
+fn test_onboard_user_idempotent_retry_returns_same_profile() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "retry_user");
+
+    let first = onboard_user_success(&client, &user, &username, &UserRole::Buyer);
+    let second = onboard_user_success(&client, &user, &username, &UserRole::Buyer);
+
+    assert_eq!(second.address, first.address);
+    assert_eq!(second.username, first.username);
+    assert_eq!(second.role, first.role);
+    assert_eq!(second.registered_at, first.registered_at);
+    assert!(client.is_username_taken(&username));
+}
+
+#[test]
+fn test_onboard_user_idempotent_retry_merges_profile_pic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "pic_retry");
+    let pic_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
+    let expected = string_to_bytes(&env, &pic_cid);
+
+    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
+    let merged = client.onboard_user(&user, &username, &UserRole::Artisan, &Some(pic_cid));
+
+    assert_eq!(merged.profile_pic_cid, Some(expected));
+}
+
+#[test]
+fn test_reconcile_user_identity_restores_missing_username_index() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "reconcile_me");
+
+    client.onboard_user(&user, &username, &UserRole::Buyer, &None);
+    let normalized = String::from_str(&env, "reconcile_me");
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Username(normalized.clone()));
+    });
+
+    assert!(!client.is_username_taken(&username));
+
+    let repaired = client.reconcile_user_identity(&user);
+    assert!(repaired);
+    assert!(client.is_username_taken(&username));
+
+    let by_name = client.get_user_by_username(&username);
+    assert_eq!(by_name.address, user);
+}
+
+#[test]
+fn test_onboard_user_retry_repairs_missing_username_index() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "self_heal");
+
+    client.onboard_user(&user, &username, &UserRole::Buyer, &None);
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Username(String::from_str(&env, "self_heal")));
+    });
+
+    assert!(!client.is_username_taken(&username));
+    onboard_user_success(&client, &user, &username, &UserRole::Buyer);
+    assert!(client.is_username_taken(&username));
+    assert_eq!(client.get_user_by_username(&username).address, user);
 }
 
 // ===== Rate limiting for onboard_user retries (#943) =====
@@ -2120,6 +2209,9 @@ fn test_buyer_can_update_profile_pic() {
     assert_eq!(updated.profile_pic_cid, Some(expected));
     assert_eq!(updated.role, UserRole::Buyer);
 }
+
+#[test]
+fn test_migrate_embedded_versioned_profile() {
     let env = Env::default();
     env.mock_all_auths();
 
