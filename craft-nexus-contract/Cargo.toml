@@ -12,6 +12,8 @@ testutils = ["soroban-sdk/testutils"]
 
 [dependencies]
 soroban-sdk = { version = "21.0.0" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
 wee_alloc = "0.4.5"
 
 [dev-dependencies]

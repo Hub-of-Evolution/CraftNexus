@@ -1,89 +1,89 @@
 //! Onboarding Contract
 //!
-// Handles user registration (onboarding), role assignments, username configuration,
-// profile management, and verification processes for buyers and artisans on the CraftNexus platform.
-//
-// # Integration guide
-//
-// This section documents the integration surface that off-chain indexers and
-// client interfaces depend on (Issue #453 / component #52). Three integration
-// channels exist: the **read API** (view functions), the **event stream**, and
-// the **cross-contract interface** shared with the escrow contract.
-//
-// ## Read API for indexers and clients
-//
-// All read functions are side-effect free with respect to *state shape* but
-// refresh the persistent TTL of the entries they touch (via the internal
-// `extend_persistent` helper). Repeatedly reading a profile is
-// therefore safe and additionally keeps the entry from being archived.
-//
-// | Function | Returns | Notes |
-// |----------|---------|-------|
-// | [`OnboardingContract::get_user`] | [`UserProfile`] | Panics with [`Error::UserNotFound`] when absent. |
-// | [`OnboardingContract::get_user_by_username`] | [`UserProfile`] | Looks up by the *normalized* username (lowercased, see `onboard_user`). |
-// | [`OnboardingContract::is_onboarded`] | `bool` | Non-panicking existence check. |
-// | [`OnboardingContract::is_username_taken`] | `bool` | Accepts any casing; normalizes internally. |
-// | [`OnboardingContract::get_user_role`] | [`UserRole`] | Returns [`UserRole::None`] for unknown users. |
-// | [`OnboardingContract::is_verified`] | `bool` | Reflects manual or auto verification. |
-// | [`OnboardingContract::get_user_metrics`] | [`UserMetrics`] | Escrow count / volume used for auto-verification. |
-// | [`OnboardingContract::get_user_reputation`] | `(u32, u32)` | `(successful_trades, disputed_trades)`. |
-// | [`OnboardingContract::get_verification_history`] | `Vec<VerificationEntry>` | Compact entries decoded to human-readable actions. |
-// | [`OnboardingContract::get_verification_queue`] | `Vec<Address>` | Pending manual-verification requests in FIFO order. |
-// | [`OnboardingContract::get_config`] | [`OnboardingConfig`] | Global contract configuration. |
-//
-// ## Event stream
-//
-// Events are the canonical integration signal for indexers; subscribe to these
-// topics rather than polling. Consumers should treat an event as authoritative
-// only after it appears in a closed ledger. Each row lists the topic tuple, the
-// data payload, and the function that emits it.
-//
-// | Topic tuple | Data payload | Emitted by |
-// |-------------|--------------|------------|
-// | `("UserOnboarded",)` | [`UserOnboardedEvent`] `{ user, username, role }` | [`OnboardingContract::onboard_user`] |
-// | `("RoleUpdated",)` | `(user: Address, old_role: UserRole, new_role: UserRole)` | [`OnboardingContract::update_user_role`] |
-// | `("UserVerified",)` | `user: Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
-// | `("ProfileDeactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::deactivate_profile`] |
-// | `("ProfileReactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::reactivate_profile`] |
-// | `("UsernameChanged",)` | `user: Address` | [`OnboardingContract::change_username`] |
-// | `("PortfolioUpdated",)` | `user: Address` | [`OnboardingContract::update_portfolio`] |
-//
-// Notes for consumers:
-// - `ProfileDeactivated` / `ProfileReactivated` carry the user **in the topic
-//   tuple** so indexers can filter the stream per user without decoding the
-//   payload; the payload additionally carries the role captured at the time of
-//   the transition so no follow-up profile read is required.
-// - `UserVerified`, `UsernameChanged`, and `PortfolioUpdated` carry only the
-//   address; fetch the current value via [`OnboardingContract::get_user`] when
-//   the new field value is needed.
-// - `UserOnboarded` is emitted exactly once per address — a second
-//   `onboard_user` call for the same address panics with
-//   [`Error::AlreadyOnboarded`] and emits nothing.
-//
-// ## Cross-contract interface
-//
-// Onboarding both calls and is called by the escrow contract:
-// - **Outbound:** during [`OnboardingContract::deactivate_profile`] the contract
-//   invokes [`EscrowInterface::has_active_escrows`] (via the generated
-//   `EscrowClient`) to block deactivation while escrows are open.
-// - **Inbound:** the escrow contract — the address stored in
-//   [`OnboardingConfig::escrow_contract`] — is the only authorized caller of
-//   [`OnboardingContract::update_reputation`],
-//   [`OnboardingContract::update_user_metrics`], and
-//   [`OnboardingContract::update_active_contracts`]. When `escrow_contract` is
-//   `None`, the `platform_admin` is used as the authorized fallback.
-//
-// ## Profile versioning
-//
-// Stored profiles are versioned by [`CURRENT_USER_PROFILE_VERSION`]. Older
-// entries (including the legacy version-less shape) are migrated transparently
-// on first read (internal `try_get_user_profile`); integrators never observe an
-// out-of-date shape through the read API.
+//! Handles user registration (onboarding), role assignments, username configuration,
+//! profile management, and verification processes for buyers and artisans on the CraftNexus platform.
+//!
+//! # Integration guide
+//!
+//! This section documents the integration surface that off-chain indexers and
+//! client interfaces depend on (Issue #453 / component #52). Three integration
+//! channels exist: the **read API** (view functions), the **event stream**, and
+//! the **cross-contract interface** shared with the escrow contract.
+//!
+//! ## Read API for indexers and clients
+//!
+//! All read functions are side-effect free with respect to *state shape* but
+//! refresh the persistent TTL of the entries they touch (via the internal
+//! `extend_persistent` helper). Repeatedly reading a profile is
+//! therefore safe and additionally keeps the entry from being archived.
+//!
+//! | Function | Returns | Notes |
+//! |----------|---------|-------|
+//! | [`OnboardingContract::get_user`] | [`UserProfile`] | Panics with [`Error::UserNotFound`] when absent. |
+//! | [`OnboardingContract::get_user_by_username`] | [`UserProfile`] | Looks up by the *normalized* username (lowercased, see `onboard_user`). |
+//! | [`OnboardingContract::is_onboarded`] | `bool` | Non-panicking existence check. |
+//! | [`OnboardingContract::is_username_taken`] | `bool` | Accepts any casing; normalizes internally. |
+//! | [`OnboardingContract::get_user_role`] | [`UserRole`] | Returns [`UserRole::None`] for unknown users. |
+//! | [`OnboardingContract::is_verified`] | `bool` | Reflects manual or auto verification. |
+//! | [`OnboardingContract::get_user_metrics`] | [`UserMetrics`] | Escrow count / volume used for auto-verification. |
+//! | [`OnboardingContract::get_user_reputation`] | `(u32, u32)` | `(successful_trades, disputed_trades)`. |
+//! | [`OnboardingContract::get_verification_history`] | `Vec<VerificationEntry>` | Compact entries decoded to human-readable actions. |
+//! | [`OnboardingContract::get_verification_queue`] | `Vec<Address>` | Pending manual-verification requests in FIFO order. |
+//! | [`OnboardingContract::get_config`] | [`OnboardingConfig`] | Global contract configuration. |
+//!
+//! ## Event stream
+//!
+//! Events are the canonical integration signal for indexers; subscribe to these
+//! topics rather than polling. Consumers should treat an event as authoritative
+//! only after it appears in a closed ledger. Each row lists the topic tuple, the
+//! data payload, and the function that emits it.
+//!
+//! | Topic tuple | Data payload | Emitted by |
+//! |-------------|--------------|------------|
+//! | `("UserOnboarded",)` | [`UserOnboardedEvent`] `{ user, username, role }` | [`OnboardingContract::onboard_user`] |
+//! | `("RoleUpdated",)` | `(user: Address, old_role: UserRole, new_role: UserRole)` | [`OnboardingContract::update_user_role`] |
+//! | `("UserVerified",)` | `user: Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
+//! | `("ProfileDeactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::deactivate_profile`] |
+//! | `("ProfileReactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::reactivate_profile`] |
+//! | `("UsernameChanged",)` | `user: Address` | [`OnboardingContract::change_username`] |
+//! | `("PortfolioUpdated",)` | `user: Address` | [`OnboardingContract::update_portfolio`] |
+//!
+//! Notes for consumers:
+//! - `ProfileDeactivated` / `ProfileReactivated` carry the user **in the topic
+//!   tuple** so indexers can filter the stream per user without decoding the
+//!   payload; the payload additionally carries the role captured at the time of
+//!   the transition so no follow-up profile read is required.
+//! - `UserVerified`, `UsernameChanged`, and `PortfolioUpdated` carry only the
+//!   address; fetch the current value via [`OnboardingContract::get_user`] when
+//!   the new field value is needed.
+//! - `UserOnboarded` is emitted exactly once per address — a second
+//!   `onboard_user` call for the same address panics with
+//!   [`Error::AlreadyOnboarded`] and emits nothing.
+//!
+//! ## Cross-contract interface
+//!
+//! Onboarding both calls and is called by the escrow contract:
+//! - **Outbound:** during [`OnboardingContract::deactivate_profile`] the contract
+//!   invokes [`EscrowInterface::has_active_escrows`] (via the generated
+//!   `EscrowClient`) to block deactivation while escrows are open.
+//! - **Inbound:** the escrow contract — the address stored in
+//!   [`OnboardingConfig::escrow_contract`] — is the only authorized caller of
+//!   [`OnboardingContract::update_reputation`],
+//!   [`OnboardingContract::update_user_metrics`], and
+//!   [`OnboardingContract::update_active_contracts`]. When `escrow_contract` is
+//!   `None`, the `platform_admin` is used as the authorized fallback.
+//!
+//! ## Profile versioning
+//!
+//! Stored profiles are versioned by [`CURRENT_USER_PROFILE_VERSION`]. Older
+//! entries (including the legacy version-less shape) are migrated transparently
+//! on first read (internal `try_get_user_profile`); integrators never observe an
+//! out-of-date shape through the read API.
 
 use crate::alloc::string::ToString;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, Env, Map, String,
-    Symbol, IntoVal, TryFromVal, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env,
+    Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
 extern crate alloc;
@@ -661,6 +661,8 @@ pub enum Error {
     CooldownActive = 14,
     /// Attempted to decrement active contract count below zero
     ActiveContractUnderflow = 15,
+    /// The escrow contract is paused — onboarding is temporarily disabled
+    ContractPaused = 16,
 }
 
 /// Cross-contract interface the onboarding contract uses to query the escrow
@@ -683,6 +685,8 @@ pub trait EscrowInterface {
     /// # Parameters
     /// - `user`: address whose active-escrow status is being queried.
     fn has_active_escrows(env: Env, user: Address) -> bool;
+    /// Returns `true` when the escrow contract is paused.
+    fn is_paused(env: Env) -> bool;
 }
 
 /// Normalize a raw username string into its canonical on-chain form.
@@ -1052,11 +1056,7 @@ pub struct OnboardingContract;
 #[contractimpl]
 impl OnboardingContract {
     fn get_queue_pointer(env: &Env, key: &DataKey) -> u64 {
-        let pointer = env.storage().persistent().get(key).unwrap_or(0u64);
-        if env.storage().persistent().has(key) {
-            Self::extend_persistent(env, key);
-        }
-        pointer
+        Self::read_persistent(env, key).unwrap_or(0u64)
     }
 
     fn set_queue_pointer(env: &Env, key: DataKey, value: u64) {
@@ -1120,12 +1120,7 @@ impl OnboardingContract {
     }
 
     fn read_username_fee_token(env: &Env) -> Option<Address> {
-        let key = DataKey::UsernameChangeFeeToken;
-        let token = env.storage().persistent().get(&key);
-        if env.storage().persistent().has(&key) {
-            Self::extend_persistent(env, &key);
-        }
-        token
+        Self::read_persistent(env, &DataKey::UsernameChangeFeeToken)
     }
 
     /// Resolve the wallet that receives username-change fees.
@@ -1133,28 +1128,18 @@ impl OnboardingContract {
     /// Reads `DataKey::UsernameChangeFeeWallet`; when unset, falls back to
     /// `config.platform_admin`. Extends TTL when the key exists.
     fn read_username_fee_wallet(env: &Env, config: &OnboardingConfig) -> Address {
-        let key = DataKey::UsernameChangeFeeWallet;
-        if let Some(wallet) = env.storage().persistent().get(&key) {
-            Self::extend_persistent(env, &key);
-            wallet
-        } else {
-            config.platform_admin.clone()
-        }
+        Self::read_persistent(env, &DataKey::UsernameChangeFeeWallet)
+            .unwrap_or_else(|| config.platform_admin.clone())
     }
 
     /// Load persisted activity metrics for `address`, or zeroed defaults.
     ///
     /// Extends TTL on `DataKey::UserMetrics(address)` when an entry exists.
     fn read_user_metrics(env: &Env, address: &Address) -> UserMetrics {
-        let key = DataKey::UserMetrics(address.clone());
-        let metrics = env.storage().persistent().get(&key).unwrap_or(UserMetrics {
+        Self::read_persistent(env, &DataKey::UserMetrics(address.clone())).unwrap_or(UserMetrics {
             total_escrow_count: 0,
             total_volume: 0,
-        });
-        if env.storage().persistent().has(&key) {
-            Self::extend_persistent(env, &key);
-        }
-        metrics
+        })
     }
 
     /// Map a compact verification action code to its canonical string label.
@@ -1163,9 +1148,9 @@ impl OnboardingContract {
     /// [`VerificationEntry::action`] via [`OnboardingContract::get_verification_history`].
     fn verification_action_to_string(env: &Env, action: VerificationActionCode) -> Symbol {
         match action {
-            VerificationActionCode::Requested => Symbol::new(env, "requested"),
-            VerificationActionCode::Approved => Symbol::new(env, "approved"),
-            VerificationActionCode::Rejected => Symbol::new(env, "rejected"),
+            VerificationActionCode::Requested => symbol_short!("requested"),
+            VerificationActionCode::Approved => symbol_short!("approved"),
+            VerificationActionCode::Rejected => symbol_short!("rejected"),
             VerificationActionCode::AutoVerified => Symbol::new(env, "auto_verified"),
             VerificationActionCode::UsernameChangedRevoked => Symbol::new(env, "username_revoked"),
         }
@@ -1239,11 +1224,11 @@ impl OnboardingContract {
     /// This prevents reentrancy where malicious callers trigger intermediate states
     /// via callbacks on arbitrary token contracts before final balance settlement.
     fn parse_verification_action(env: &Env, action: &Symbol) -> VerificationActionCode {
-        if action == &Symbol::new(env, "requested") {
+        if action == &symbol_short!("requested") {
             VerificationActionCode::Requested
-        } else if action == &Symbol::new(env, "approved") {
+        } else if action == &symbol_short!("approved") {
             VerificationActionCode::Approved
-        } else if action == &Symbol::new(env, "rejected") {
+        } else if action == &symbol_short!("rejected") {
             VerificationActionCode::Rejected
         } else if action == &Symbol::new(env, "auto_verified") {
             VerificationActionCode::AutoVerified
@@ -1293,6 +1278,14 @@ impl OnboardingContract {
     /// [FEATURE #83] Enhanced business flow: Maintains a compact sliding window of verification
     /// actions for audit trails and compliance reporting. Implements circular-buffer semantics
     /// to enforce bounded storage while preserving temporal ordering of recent events.
+    ///
+    /// Developer note: the historical record is stored in indexed slots under
+    /// `DataKey::VerificationHistoryIndexed(user, slot)` and the logical order is defined by
+    /// `DataKey::VerificationHistoryCount(user)`. Readers must iterate from slot `0` through
+    /// `count - 1`; writers must not write to an arbitrary slot based on timestamps or the
+    /// current append count once the buffer is full. When the buffer reaches capacity, older
+    /// entries are shifted down and the new entry is written to the tail slot. This preserves
+    /// the recent history without corrupting earlier entries.
     ///
     /// When history reaches MAX_VERIFICATION_HISTORY (10 entries), oldest entries are shifted
     /// and the newest entry is appended at the tail. This enables long-running contract states
@@ -1451,12 +1444,7 @@ impl OnboardingContract {
         }
     }
     fn read_portfolio_cid(env: &Env, user: &Address) -> Option<Bytes> {
-        let key = DataKey::UserPortfolio(user.clone());
-        let portfolio = env.storage().persistent().get(&key);
-        if env.storage().persistent().has(&key) {
-            Self::extend_persistent(env, &key);
-        }
-        portfolio
+        Self::read_persistent(env, &DataKey::UserPortfolio(user.clone()))
     }
 
     fn write_portfolio_cid(env: &Env, user: &Address, portfolio_cid: Option<Bytes>) {
@@ -1535,7 +1523,7 @@ impl OnboardingContract {
         let key = DataKey::UserProfile(user.clone());
         let stored: Val = env.storage().persistent().get(&key)?;
         let map = Map::<Symbol, Val>::try_from_val(env, &stored).expect("");
-        let version_key = Symbol::new(env, "version");
+        let version_key = symbol_short!("version");
         let portfolio_key = Symbol::new(env, "portfolio_cid");
 
         if !map.contains_key(version_key) {
@@ -1580,6 +1568,24 @@ impl OnboardingContract {
             .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound))
     }
 
+    /// Assert that `user` is onboarded and their profile is currently active.
+    ///
+    /// Panics with [`Error::UserNotFound`] when no profile exists, or with
+    /// [`Error::ProfileDeactivated`] when the profile's status is
+    /// [`ProfileStatus::Deactivated`]. Used by state-mutating endpoints that
+    /// must not operate on deactivated accounts (e.g. `update_user_role`,
+    /// `deactivate_profile`).
+    ///
+    /// # Returns
+    /// The loaded [`UserProfile`] so callers do not have to fetch it again.
+    fn assert_user_onboarded_and_active(env: &Env, user: Address) -> UserProfile {
+        let profile = Self::get_user_profile(env, user);
+        if profile.status == ProfileStatus::Deactivated {
+            env.panic_with_error(Error::ProfileDeactivated);
+        }
+        profile
+    }
+
     /// Extend the TTL of a persistent storage entry using standardized values.
     ///
     /// Soroban charges rent per ledger entry, so persistent state for an
@@ -1603,6 +1609,30 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
+    }
+
+    /// Load a persistent entry and refresh its TTL in a single storage pass
+    /// (Issue #447).
+    ///
+    /// The canonical "read and keep alive" idiom in this contract used to be
+    /// `get(..)` followed by `has(..)` before calling `extend_persistent`. The
+    /// `has` probe is pure overhead: `get` already reports presence through its
+    /// `Option`, so the extra probe charges a second ledger-entry read on every
+    /// read-path invocation without changing behaviour. Routing reads through
+    /// this helper keeps the TTL refresh guaranteed (`extend_ttl` on an absent
+    /// key traps, so it must stay guarded) while paying for exactly one read.
+    ///
+    /// Returns `None` — leaving TTL untouched — when the entry does not exist.
+    fn read_persistent<K, V>(env: &Env, key: &K) -> Option<V>
+    where
+        K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>,
+        V: TryFromVal<Env, Val>,
+    {
+        let value = env.storage().persistent().get::<K, V>(key);
+        if value.is_some() {
+            Self::extend_persistent(env, key);
+        }
+        value
     }
 
     /// TTL-bump variant that first checks the entry exists (Issue #82 optimization).
@@ -1913,7 +1943,16 @@ impl OnboardingContract {
         // registrations. The platform admin must co-sign every onboarding transaction
         // to prevent unauthorized state transitions.
         config.platform_admin.require_auth();
-        Self::extend_persistent(&env, &DataKey::Config);
+
+        // [SECURITY] Issue #621: Reject onboarding while the escrow contract is paused.
+        // When an escrow contract is configured, query it for pause state before allowing
+        // new user registration.
+        if let Some(ref escrow_addr) = config.escrow_contract {
+            let escrow_client = EscrowClient::new(&env, escrow_addr);
+            if escrow_client.is_paused() {
+                Self::emit_onboard_failed_and_panic(&env, &user, Error::ContractPaused);
+            }
+        }
 
         // Normalize the username (lowercase + trim whitespace)
         let normalized = normalize_username(&env, &username);
@@ -2299,14 +2338,8 @@ impl OnboardingContract {
     /// None — always returns a `bool`.
     pub fn is_onboarded(env: Env, user: Address) -> bool {
         user.require_auth();
-        let key = DataKey::UserProfile(user.clone());
-        // Issue #423/#435: extend TTL on read to prevent storage expiry
-        if env.storage().persistent().has(&key) {
-            Self::extend_persistent(&env, &key);
-            true
-        } else {
-            false
-        }
+        // Issue #423/#435: extend TTL on read to prevent storage expiry.
+        Self::extend_persistent_if_present(&env, &DataKey::UserProfile(user))
     }
 
     /// Get a user's role.
@@ -2414,8 +2447,8 @@ impl OnboardingContract {
             _ => {} // Proceed for Buyer, Artisan, Moderator
         }
 
-        // Fetch and validate existing profile before mutation
-        let mut profile = Self::get_user_profile(&env, user.clone());
+        // Fetch and validate existing profile; reject deactivated accounts before mutation
+        let mut profile = Self::assert_user_onboarded_and_active(&env, user.clone());
 
         // [SECURITY] Prevent unnecessary state mutations and replay attacks
         // by recording state transition audit trail for forensic analysis
@@ -2471,13 +2504,8 @@ impl OnboardingContract {
     /// - User is the admin
     pub fn deactivate_profile(env: Env, user: Address) {
         user.require_auth();
-        let mut profile = Self::get_user_profile(&env, user.clone());
+        let mut profile = Self::assert_user_onboarded_and_active(&env, user.clone());
 
-        if profile.status == ProfileStatus::Deactivated {
-            env.panic_with_error(Error::ProfileDeactivated);
-        }
-
-        // Replace the old to_string().as_ref() line with this:
         let username_string = String::from_str(&env, profile.username.to_string().as_ref());
         let normalized = normalize_username(&env, &username_string);
         if normalized == String::from_str(&env, "admin") {
@@ -2577,7 +2605,6 @@ impl OnboardingContract {
         }
 
         // Re-claim username — fail if another user took it while deactivated
-        // Replace the old to_string().as_ref() line with this:
         let username_string = String::from_str(&env, profile.username.to_string().as_ref());
         let normalized = normalize_username(&env, &username_string);
         if env
@@ -2792,7 +2819,7 @@ impl OnboardingContract {
     ///
     /// # Preconditions
     /// - Contract must be initialized.
-    /// - Caller must be `platform_admin`.
+    /// - Caller must be `platform_admin` (admin-only restriction).
     ///
     /// # Storage Side-Effects
     /// - **Read/Write** [`DataKey::Config`] — thresholds updated, TTL extended.
@@ -2895,19 +2922,7 @@ impl OnboardingContract {
     pub fn get_user_metrics(env: Env, address: Address) -> UserMetrics {
         // Issue #426/#434: require auth to prevent unauthorized access to user activity data
         address.require_auth();
-        let metrics_key = DataKey::UserMetrics(address.clone());
-        let metrics = env
-            .storage()
-            .persistent()
-            .get::<DataKey, UserMetrics>(&metrics_key)
-            .unwrap_or(UserMetrics {
-                total_escrow_count: 0,
-                total_volume: 0,
-            });
-        if env.storage().persistent().has(&metrics_key) {
-            Self::extend_persistent(&env, &metrics_key);
-        }
-        metrics
+        Self::read_user_metrics(&env, &address)
     }
 
     /// Increment a user's activity metrics (called by the escrow contract).
@@ -3054,15 +3069,13 @@ impl OnboardingContract {
             None => config.platform_admin.require_auth(),
         }
 
+        // A single `get` both yields the counter and tells us whether the entry
+        // exists, so the removal below needs no extra `has` probe. The TTL is
+        // not refreshed here either: this write path always ends by either
+        // removing the entry or rewriting it with a fresh TTL (#447).
         let key = DataKey::ActiveContractCount(user.clone());
-        let current = env
-            .storage()
-            .persistent()
-            .get::<_, u32>(&key)
-            .unwrap_or(0u32);
-        if env.storage().persistent().has(&key) {
-            Self::extend_persistent(&env, &key);
-        }
+        let stored = env.storage().persistent().get::<_, u32>(&key);
+        let current = stored.unwrap_or(0u32);
 
         let next = if delta > 0 {
             current.saturating_add(delta as u32)
@@ -3075,7 +3088,7 @@ impl OnboardingContract {
         };
 
         if next == 0 {
-            if env.storage().persistent().has(&key) {
+            if stored.is_some() {
                 env.storage().persistent().remove(&key);
             }
         } else {
@@ -3383,32 +3396,29 @@ impl OnboardingContract {
 
     /// Get the full verification history for a user.
     ///
-    /// Only the user themselves may read their own verification history.
+    /// Only the user themselves may read their own verification history. The read path
+    /// intentionally walks the circular-buffer from slot `0` to `count - 1` using the
+    /// persisted count key as the source of truth; it must not infer slots from timestamps
+    /// or mutate the storage layout while iterating.
     pub fn get_verification_history(env: Env, user: Address) -> Vec<VerificationEntry> {
         user.require_auth();
 
         Self::migrate_legacy_verification_history(&env, &user);
 
         let count_key = DataKey::VerificationHistoryCount(user.clone());
-        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-        if env.storage().persistent().has(&count_key) {
-            Self::extend_persistent(&env, &count_key);
-        }
+        let count: u32 = Self::read_persistent(&env, &count_key).unwrap_or(0);
 
         let mut result = Vec::new(&env);
         for index in 0..count {
             let entry_key = DataKey::VerificationHistoryIndexed(user.clone(), index);
-            if let Some(compact) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, CompactVerificationEntry>(&entry_key)
+            if let Some(compact) =
+                Self::read_persistent::<_, CompactVerificationEntry>(&env, &entry_key)
             {
                 result.push_back(VerificationEntry {
                     timestamp: compact.timestamp,
                     action: Self::verification_action_to_string(&env, compact.action),
                     by: compact.by,
                 });
-                Self::extend_persistent(&env, &entry_key);
             }
         }
         result
@@ -3448,13 +3458,12 @@ impl OnboardingContract {
         let mut queue = Vec::new(&env);
 
         for index in head..tail {
+            // Issue #447: every slot walked here has its TTL refreshed, not just
+            // the head slot that `advance_verification_head` touches. Without
+            // this, a queue entry sitting behind a long-lived head request could
+            // be archived and silently drop its user from the queue.
             let queue_index_key = DataKey::VerificationQueueIndex(index);
-            if let Some(user) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, Address>(&queue_index_key)
-            {
-                Self::extend_persistent(&env, &queue_index_key);
+            if let Some(user) = Self::read_persistent::<_, Address>(&env, &queue_index_key) {
                 if Self::is_verification_pending_internal(&env, &user) {
                     queue.push_back(user);
                 }
@@ -3646,14 +3655,7 @@ impl OnboardingContract {
 
         // Enforce cooldown between username changes for the same user.
         let cooldown_key = DataKey::LastUsernameChange(user.clone());
-        if let Some(last_change) = env
-            .storage()
-            .persistent()
-            .get::<DataKey, u64>(&cooldown_key)
-        {
-            if env.storage().persistent().has(&cooldown_key) {
-                Self::extend_persistent(&env, &cooldown_key);
-            }
+        if let Some(last_change) = Self::read_persistent::<_, u64>(&env, &cooldown_key) {
             let current_time = env.ledger().timestamp();
             assert!(
                 current_time > last_change.saturating_add(USERNAME_CHANGE_COOLDOWN),
@@ -3886,12 +3888,7 @@ impl OnboardingContract {
     /// # Errors
     /// None.
     pub fn get_username_change_fee(env: Env) -> i128 {
-        let fee_key = DataKey::UsernameChangeFee;
-        let fee = env.storage().persistent().get(&fee_key).unwrap_or(0);
-        if env.storage().persistent().has(&fee_key) {
-            Self::extend_persistent(&env, &fee_key);
-        }
-        fee
+        Self::read_persistent(&env, &DataKey::UsernameChangeFee).unwrap_or(0)
     }
 
     /// Get the configured token used for username change fees.

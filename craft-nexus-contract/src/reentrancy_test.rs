@@ -343,6 +343,67 @@ fn test_cancel_recurring_escrow_cei_pattern() {
     assert_eq!(escrow.is_active, false);
 }
 
+/// Issue #704 — Disputing an escrow after its deadline has passed allows arbitrator resolution
+/// and claiming of platform / arbitrator fees.
+#[test]
+fn test_dispute_expired_recurring_escrow_arbitrator_fees() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.budget().reset_unlimited();
+
+    let admin = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let seller = Address::generate(&env);
+    let platform_wallet = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+
+    let token = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token.address());
+
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    client.initialize(
+        &platform_wallet,
+        &admin,
+        &arbitrator,
+        &500, // 5% fee (500 BPS)
+        &None,
+    );
+
+    client.set_min_escrow_amount(&token.address(), &0);
+    client.set_min_release_window(&1);
+
+    token_client.mint(&buyer, &100_000_000);
+
+    let order_id = 704u32;
+    client.create_escrow(
+        &buyer,
+        &seller,
+        &token.address(),
+        &50_000_000,
+        &order_id,
+        &Some(86400),
+    );
+
+    // Fast forward ledger timestamp past funding/release deadline (86,400s)
+    env.ledger().with_mut(|li| {
+        li.timestamp += 100_000;
+    });
+
+    // Dispute escrow after deadline
+    client.dispute_escrow(&order_id, &Symbol::new(&env, "ExpiredDispute"), &buyer);
+
+    // Arbitrator resolves dispute releasing funds to seller (with platform/arbitrator fee deduction)
+    client.resolve_dispute(&order_id, &Resolution::ReleaseToSeller, &arbitrator);
+
+    // Verify escrow status is resolved
+    let escrow = client.get_escrow(&order_id);
+    assert_eq!(escrow.status, EscrowStatus::Resolved);
+}
+
+
 #[test]
 fn test_auto_release_cei_pattern() {
     let env = Env::default();
