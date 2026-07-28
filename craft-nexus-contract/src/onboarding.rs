@@ -56,9 +56,9 @@
 //! - `UserVerified`, `UsernameChanged`, and `PortfolioUpdated` carry only the
 //!   address; fetch the current value via [`OnboardingContract::get_user`] when
 //!   the new field value is needed.
-//! - `UserOnboarded` is emitted exactly once per address — a second
-//!   `onboard_user` call for the same address panics with
-//!   [`Error::AlreadyOnboarded`] and emits nothing.
+//! - `UserOnboarded` is emitted exactly once per address — a retry with the
+//!   same username and role completes idempotently without a second event; a
+//!   conflicting retry panics with [`Error::OnboardingIdentityConflict`].
 //!
 //! ## Cross-contract interface
 //!
@@ -704,6 +704,10 @@ pub enum Error {
     ContractPaused = 16,
     /// Caller has exceeded the configured rate limit for `onboard_user` retries (#943)
     RateLimitExceeded = 17,
+    /// Profile picture CID failed IPFS validation (#723)
+    InvalidProfilePicCid = 18,
+    /// Retry onboarding with a username or role that does not match the existing profile (#929)
+    OnboardingIdentityConflict = 19,
 }
 
 /// Cross-contract interface the onboarding contract uses to query the escrow
@@ -1535,6 +1539,56 @@ impl OnboardingContract {
         Self::write_profile_pic_cid(env, user, profile.profile_pic_cid.clone());
     }
 
+    /// Canonical normalized username string for a stored profile symbol (#929).
+    fn profile_username_normalized(env: &Env, username: &Symbol) -> String {
+        normalize_username(
+            env,
+            &String::from_str(env, username.to_string().as_ref()),
+        )
+    }
+
+    /// Ensure the username index maps to `user` under the canonical normalized key (#929).
+    fn ensure_canonical_username_index(env: &Env, user: &Address, normalized: &String) {
+        let key = DataKey::Username(normalized.clone());
+        if let Some(owner) = env.storage().persistent().get::<_, Address>(&key) {
+            if owner != *user {
+                env.panic_with_error(Error::UsernameTaken);
+            }
+            Self::extend_persistent(env, &key);
+        } else {
+            env.storage().persistent().set(&key, user);
+            Self::extend_persistent(env, &key);
+        }
+    }
+
+    /// Idempotent retry path when `user` already has a profile (#929).
+    fn finish_idempotent_onboard(
+        env: &Env,
+        user: &Address,
+        normalized: &String,
+        role: UserRole,
+        optimized_profile_pic_cid: Option<Bytes>,
+    ) -> UserProfile {
+        let mut profile = Self::get_user_profile(env, user.clone());
+        let stored_normalized = Self::profile_username_normalized(env, &profile.username);
+
+        if stored_normalized != *normalized || profile.role != role {
+            Self::emit_onboard_failed_and_panic(env, user, Error::OnboardingIdentityConflict);
+        }
+        if profile.status == ProfileStatus::Deactivated {
+            Self::emit_onboard_failed_and_panic(env, user, Error::ProfileDeactivated);
+        }
+
+        Self::ensure_canonical_username_index(env, user, normalized);
+
+        if optimized_profile_pic_cid.is_some() && profile.profile_pic_cid.is_none() {
+            profile.profile_pic_cid = optimized_profile_pic_cid;
+            Self::persist_public_user_profile(env, user, &profile);
+        }
+
+        profile
+    }
+
     fn migrate_embedded_versioned_profile(
         env: &Env,
         user: &Address,
@@ -2036,7 +2090,8 @@ impl OnboardingContract {
     /// # Errors (panic)
     /// * [`Error::NotInitialized`] — `initialize` has not been called.
     /// * [`Error::InvalidRole`] — `role` is not `Buyer` or `Artisan`.
-    /// * [`Error::AlreadyOnboarded`] — the address already has a profile.
+    /// * [`Error::OnboardingIdentityConflict`] — profile exists with a different username or role.
+    /// * [`Error::ProfileDeactivated`] — idempotent retry on a deactivated profile.
     /// * [`Error::UsernameTaken`] — the normalized username is in use.
     /// * [`Error::UsernameTooShort`] / [`Error::UsernameTooLong`].
     pub fn onboard_user(env: Env, user: Address, username: String, role: UserRole, profile_pic_cid: Option<String>) -> UserProfile {
@@ -2068,13 +2123,6 @@ impl OnboardingContract {
                 Self::emit_onboard_failed_and_panic(&env, &user, Error::NotInitialized)
             });
         Self::extend_persistent(&env, &DataKey::Config);
-
-        // [SECURITY] Issue #943: Throttle the volume of onboard_user calls the
-        // platform admin co-signs within a sliding window, preventing a
-        // compromised or scripted admin key from mass-onboarding accounts.
-        if let Err(e) = Self::enforce_rate_limit(&env, &config.platform_admin, &config) {
-            Self::emit_onboard_failed_and_panic(&env, &user, e);
-        }
 
         // [SECURITY] Endpoint #93: Only verified platform roles may approve new user
         // registrations. The platform admin must co-sign every onboarding transaction
@@ -2134,10 +2182,21 @@ impl OnboardingContract {
         //     `try_onboard_user` client method.
         //   - Profile shape is versioned via `CURRENT_USER_PROFILE_VERSION`; any
         //     schema change requires a migration via `migrate_user_profile`.
-        let existing = Self::try_get_stored_user_profile(&env, user.clone());
-        if existing.is_some() {
+        if let Some((_, _)) = Self::try_get_stored_user_profile(&env, user.clone()) {
             Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
-            Self::emit_onboard_failed_and_panic(&env, &user, Error::AlreadyOnboarded);
+            return Self::finish_idempotent_onboard(
+                &env,
+                &user,
+                &normalized,
+                role,
+                optimized_profile_pic_cid,
+            );
+        }
+
+        // [SECURITY] Issue #943: Throttle new onboardings only (idempotent retries
+        // for an existing profile do not consume the admin rate-limit window).
+        if let Err(e) = Self::enforce_rate_limit(&env, &config.platform_admin, &config) {
+            Self::emit_onboard_failed_and_panic(&env, &user, e);
         }
 
         // Check username uniqueness
@@ -2189,10 +2248,7 @@ impl OnboardingContract {
         //   - Username normalisation rules: lowercase, separator characters collapsed to
         //     `_`, leading/trailing separators stripped.  Apply the same rules on the
         //     client side before constructing a lookup key.
-        env.storage()
-            .persistent()
-            .set(&DataKey::Username(normalized.clone()), &user);
-        Self::extend_persistent(&env, &DataKey::Username(normalized.clone()));
+        Self::ensure_canonical_username_index(&env, &user, &normalized);
 
         // Emit UserOnboarded event (#108).
         //
@@ -2287,6 +2343,35 @@ impl OnboardingContract {
         let (_, changed) = Self::try_get_stored_user_profile(&env, user)
             .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound));
         changed
+    }
+
+    /// Restore a missing or drifted username index from the canonical profile (#929).
+    ///
+    /// Returns `true` when this call wrote or refreshed the username mapping.
+    pub fn reconcile_user_identity(env: Env, user: Address) -> bool {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        Self::extend_persistent(&env, &DataKey::Config);
+        config.platform_admin.require_auth();
+
+        let profile = Self::get_user_profile(&env, user.clone());
+        let normalized = Self::profile_username_normalized(&env, &profile.username);
+        let key = DataKey::Username(normalized.clone());
+
+        if let Some(owner) = env.storage().persistent().get::<_, Address>(&key) {
+            if owner != user {
+                env.panic_with_error(Error::UsernameTaken);
+            }
+            Self::extend_persistent(&env, &key);
+            false
+        } else {
+            env.storage().persistent().set(&key, &user);
+            Self::extend_persistent(&env, &key);
+            true
+        }
     }
 
     /// Check if the user has any active escrows on the configured escrow contract.
@@ -3832,10 +3917,11 @@ impl OnboardingContract {
 
         // Atomically remove old username mapping and add new one
         let old_username = profile.username.clone();
-        let old_string = String::from_str(&env, old_username.to_string().as_ref());
+        let old_normalized =
+            Self::profile_username_normalized(&env, &old_username);
         env.storage()
             .persistent()
-            .remove(&DataKey::Username(old_string));
+            .remove(&DataKey::Username(old_normalized));
 
         // Store new username → address mapping
         env.storage()
