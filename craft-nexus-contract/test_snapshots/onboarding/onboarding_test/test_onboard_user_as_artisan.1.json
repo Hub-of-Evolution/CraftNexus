@@ -172,22 +172,6 @@
                     },
                     {
                       "key": {
-                        "symbol": "rate_limit_max_calls"
-                      },
-                      "val": {
-                        "u32": 5
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "rate_limit_window"
-                      },
-                      "val": {
-                        "u32": 3600
-                      }
-                    },
-                    {
-                      "key": {
                         "symbol": "require_username"
                       },
                       "val": {
@@ -210,10 +194,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "RateLimit"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                  "symbol": "ReputationPolicy"
                 }
               ]
             },
@@ -230,10 +211,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "RateLimit"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                      "symbol": "ReputationPolicy"
                     }
                   ]
                 },
@@ -242,18 +220,42 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "count"
+                        "symbol": "decay_bps"
                       },
                       "val": {
-                        "u32": 1
+                        "u32": 500
                       }
                     },
                     {
                       "key": {
-                        "symbol": "window_start"
+                        "symbol": "decay_interval_secs"
                       },
                       "val": {
-                        "u64": 0
+                        "u64": 2592000
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "farming_window_secs"
+                      },
+                      "val": {
+                        "u64": 86400
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "max_successful_per_window"
+                      },
+                      "val": {
+                        "u32": 5
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "update_cooldown_secs"
+                      },
+                      "val": {
+                        "u64": 3600
                       }
                     }
                   ]
@@ -844,22 +846,6 @@
                   },
                   "val": {
                     "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "rate_limit_max_calls"
-                  },
-                  "val": {
-                    "u32": 5
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "rate_limit_window"
-                  },
-                  "val": {
-                    "u32": 3600
                   }
                 },
                 {

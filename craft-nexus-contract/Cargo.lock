@@ -181,7 +181,6 @@ dependencies = [
 name = "craft-nexus-contract"
 version = "0.2.0"
 dependencies = [
- "ed25519-dalek",
  "soroban-sdk",
  "wee_alloc",
 ]

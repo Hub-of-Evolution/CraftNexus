@@ -107,22 +107,6 @@
                     },
                     {
                       "key": {
-                        "symbol": "rate_limit_max_calls"
-                      },
-                      "val": {
-                        "u32": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "rate_limit_window"
-                      },
-                      "val": {
-                        "u32": 0
-                      }
-                    },
-                    {
-                      "key": {
                         "symbol": "require_username"
                       },
                       "val": {

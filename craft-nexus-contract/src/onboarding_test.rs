@@ -35,6 +35,17 @@ fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     (client, admin)
 }
 
+/// Disable cooldown/farming caps so Issue #100 counter-math tests stay focused.
+fn set_permissive_reputation_policy(client: &OnboardingContractClient) {
+    client.set_reputation_policy(
+        &DEFAULT_REPUTATION_DECAY_INTERVAL_SECS,
+        &DEFAULT_REPUTATION_DECAY_BPS,
+        &0u64,     // no update cooldown
+        &0u64,     // disable farming window
+        &u32::MAX, // unlimited successes when window re-enabled
+    );
+}
+
 // ===== Initialization =====
 
 #[test]
@@ -75,10 +86,22 @@ fn onboard_user_success(
     username: &String,
     role: &UserRole,
 ) -> UserProfile {
-    match client.try_onboard_user(user, username, role, &None) {
+    match client.try_onboard_user(user, username, role) {
         Ok(Ok(profile)) => profile,
         Ok(Err(_)) => panic!("try_onboard_user returned Err but should have succeeded"),
         Err(_) => panic!("try_onboard_user host call failed"),
+    }
+}
+
+fn assert_onboard_error(
+    result: Result<Result<UserProfile, soroban_sdk::Error>, soroban_sdk::InvokeError>,
+    expected: Error,
+) {
+    let expected_err = soroban_sdk::Error::from_contract_error(expected as u32);
+    match result {
+        Ok(Err(err)) => assert_eq!(err, expected_err),
+        Ok(Ok(_)) => panic!("expected onboard to fail with contract error"),
+        Err(_) => panic!("try_onboard_user host invoke failed"),
     }
 }
 
@@ -161,10 +184,11 @@ fn test_onboard_duplicate_user() {
     let username1 = String::from_str(&env, "test_user");
     let username2 = String::from_str(&env, "other_name");
 
-    client.onboard_user(&user, &username1, &UserRole::Buyer, &None);
-    let result = client.try_onboard_user(&user, &username2, &UserRole::Artisan, &None);
+    client.onboard_user(&user, &username1, &UserRole::Buyer);
+    let result = client.try_onboard_user(&user, &username2, &UserRole::Artisan);
     assert_onboard_error(result, Error::OnboardingIdentityConflict);
 }
+
 
 // ===== Issue #929 — idempotent onboarding and identity reconciliation =====
 
@@ -188,23 +212,6 @@ fn test_onboard_user_idempotent_retry_returns_same_profile() {
 }
 
 #[test]
-fn test_onboard_user_idempotent_retry_merges_profile_pic() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "pic_retry");
-    let pic_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
-    let expected = string_to_bytes(&env, &pic_cid);
-
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
-    let merged = client.onboard_user(&user, &username, &UserRole::Artisan, &Some(pic_cid));
-
-    assert_eq!(merged.profile_pic_cid, Some(expected));
-}
-
-#[test]
 fn test_reconcile_user_identity_restores_missing_username_index() {
     let env = Env::default();
     env.mock_all_auths();
@@ -213,7 +220,7 @@ fn test_reconcile_user_identity_restores_missing_username_index() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "reconcile_me");
 
-    client.onboard_user(&user, &username, &UserRole::Buyer, &None);
+    client.onboard_user(&user, &username, &UserRole::Buyer);
     let normalized = String::from_str(&env, "reconcile_me");
 
     env.as_contract(&client.address, || {
@@ -241,7 +248,7 @@ fn test_onboard_user_retry_repairs_missing_username_index() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "self_heal");
 
-    client.onboard_user(&user, &username, &UserRole::Buyer, &None);
+    client.onboard_user(&user, &username, &UserRole::Buyer);
 
     env.as_contract(&client.address, || {
         env.storage()
@@ -255,114 +262,6 @@ fn test_onboard_user_retry_repairs_missing_username_index() {
     assert_eq!(client.get_user_by_username(&username).address, user);
 }
 
-// ===== Rate limiting for onboard_user retries (#943) =====
-
-/// `onboard_user` panics rather than returning `Result`, so `try_onboard_user`
-/// surfaces contract errors as a raw `soroban_sdk::Error` code (not the typed
-/// `onboarding::Error` enum). Compare against the numeric contract error code
-/// to assert a specific failure reason.
-fn assert_onboard_error(
-    result: Result<
-        Result<UserProfile, soroban_sdk::ConversionError>,
-        Result<soroban_sdk::Error, soroban_sdk::InvokeError>,
-    >,
-    expected: Error,
-) {
-    let expected = soroban_sdk::Error::from_contract_error(expected as u32);
-    match result {
-        Err(Ok(actual)) => assert_eq!(actual, expected),
-        other => panic!(
-            "expected contract error {:?}, got {:?}",
-            expected,
-            other.is_ok()
-        ),
-    }
-}
-
-/// Onboards `count` distinct new users, each a genuinely successful call.
-fn onboard_many(client: &OnboardingContractClient, env: &Env, count: u32) {
-    const NAMES: [&str; 8] = [
-        "rl_user_0",
-        "rl_user_1",
-        "rl_user_2",
-        "rl_user_3",
-        "rl_user_4",
-        "rl_user_5",
-        "rl_user_6",
-        "rl_user_7",
-    ];
-    assert!(
-        (count as usize) <= NAMES.len(),
-        "extend NAMES for larger counts"
-    );
-    for name in NAMES.iter().take(count as usize) {
-        let user = Address::generate(env);
-        let username = String::from_str(env, name);
-        onboard_user_success(client, &user, &username, &UserRole::Buyer);
-    }
-}
-
-#[test]
-fn test_onboard_user_rate_limited_after_max_calls() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _admin) = setup_test(&env);
-
-    // The admin co-signs DEFAULT_RATE_LIMIT_MAX_CALLS distinct, successful
-    // onboardings within the window.
-    onboard_many(&client, &env, DEFAULT_RATE_LIMIT_MAX_CALLS);
-
-    // One more onboarding — for yet another new address — should now be
-    // rejected: the admin has exhausted its rate-limit window.
-    let extra_user = Address::generate(&env);
-    let extra_username = String::from_str(&env, "one_too_many");
-    let result = client.try_onboard_user(&extra_user, &extra_username, &UserRole::Buyer);
-    assert_onboard_error(result, Error::RateLimitExceeded);
-}
-
-#[test]
-fn test_onboard_user_rate_limit_resets_after_window() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _admin) = setup_test(&env);
-
-    onboard_many(&client, &env, DEFAULT_RATE_LIMIT_MAX_CALLS);
-
-    let extra_user = Address::generate(&env);
-    let extra_username = String::from_str(&env, "blocked_for_now");
-    let result = client.try_onboard_user(&extra_user, &extra_username, &UserRole::Buyer);
-    assert_onboard_error(result, Error::RateLimitExceeded);
-
-    env.ledger().with_mut(|li| {
-        li.timestamp += DEFAULT_RATE_LIMIT_WINDOW as u64 + 1;
-    });
-
-    // After the window resets, the same admin can onboard again.
-    onboard_user_success(&client, &extra_user, &extra_username, &UserRole::Buyer);
-}
-
-#[test]
-fn test_onboard_user_rate_limit_is_per_admin() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client_a, _admin_a) = setup_test(&env);
-    let (client_b, _admin_b) = setup_test(&env);
-
-    onboard_many(&client_a, &env, DEFAULT_RATE_LIMIT_MAX_CALLS);
-
-    let extra_user = Address::generate(&env);
-    let extra_username = String::from_str(&env, "blocked_admin_a");
-    let result = client_a.try_onboard_user(&extra_user, &extra_username, &UserRole::Buyer);
-    assert_onboard_error(result, Error::RateLimitExceeded);
-
-    // A different contract instance (distinct platform admin) is unaffected
-    // by admin_a's exhausted limit.
-    onboard_user_success(&client_b, &extra_user, &extra_username, &UserRole::Buyer);
-}
-
 #[test]
 fn test_onboard_username_too_short() {
     let env = Env::default();
@@ -373,7 +272,7 @@ fn test_onboard_username_too_short() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "ab");
 
-    let result = client.try_onboard_user(&user, &username, &UserRole::Buyer, &None);
+    let result = client.try_onboard_user(&user, &username, &UserRole::Buyer);
     assert!(result.is_err());
 }
 
@@ -389,7 +288,7 @@ fn test_onboard_username_too_long() {
     let long_username =
         String::from_str(&env, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
-    let result = client.try_onboard_user(&user, &long_username, &UserRole::Buyer, &None);
+    let result = client.try_onboard_user(&user, &long_username, &UserRole::Buyer);
     assert!(result.is_err());
 }
 
@@ -403,7 +302,7 @@ fn test_onboard_invalid_role() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "test");
 
-    let result = client.try_onboard_user(&user, &username, &UserRole::Admin, &None);
+    let result = client.try_onboard_user(&user, &username, &UserRole::Admin);
     assert!(result.is_err());
 }
 
@@ -420,8 +319,8 @@ fn test_onboard_duplicate_username_fails() {
     let user2 = Address::generate(&env);
     let username = String::from_str(&env, "craftsman");
 
-    client.onboard_user(&user1, &username, &UserRole::Buyer, &None);
-    let result = client.try_onboard_user(&user2, &username, &UserRole::Artisan, &None);
+    client.onboard_user(&user1, &username, &UserRole::Buyer);
+    let result = client.try_onboard_user(&user2, &username, &UserRole::Artisan);
     assert!(result.is_err());
 }
 
@@ -435,12 +334,12 @@ fn test_onboard_duplicate_username_case_insensitive() {
     let user1 = Address::generate(&env);
     let user2 = Address::generate(&env);
 
-    client.onboard_user(&user1, &String::from_str(&env, "Alice"), &UserRole::Buyer, &None);
+    client.onboard_user(&user1, &String::from_str(&env, "Alice"), &UserRole::Buyer);
     // "alice" should match "Alice" after normalization
     let _result =
-        client.try_onboard_user(&user2, &String::from_str(&env, "alice"), &UserRole::Artisan, &None);
+        client.try_onboard_user(&user2, &String::from_str(&env, "alice"), &UserRole::Artisan);
     let result =
-        client.try_onboard_user(&user2, &String::from_str(&env, "alice"), &UserRole::Artisan, &None);
+        client.try_onboard_user(&user2, &String::from_str(&env, "alice"), &UserRole::Artisan);
     assert!(result.is_err());
 }
 
@@ -458,13 +357,11 @@ fn test_onboard_duplicate_username_mixed_case() {
         &user1,
         &String::from_str(&env, "CraftMaster"),
         &UserRole::Buyer,
-        &None,
     );
     let result = client.try_onboard_user(
         &user2,
         &String::from_str(&env, "CRAFTMASTER"),
         &UserRole::Artisan,
-        &None,
     );
     assert!(result.is_err());
 }
@@ -481,7 +378,7 @@ fn test_get_user_by_username() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "craft_user");
 
-    client.onboard_user(&user, &username, &UserRole::Buyer, &None);
+    client.onboard_user(&user, &username, &UserRole::Buyer);
 
     let profile = client.get_user_by_username(&username);
     assert_eq!(profile.address, user);
@@ -496,7 +393,7 @@ fn test_get_user_by_username_case_insensitive() {
     let (client, _) = setup_test(&env);
 
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "john_doe"), &UserRole::Buyer, &None);
+    client.onboard_user(&user, &String::from_str(&env, "john_doe"), &UserRole::Buyer);
 
     // Should find user regardless of case
     let profile = client.get_user_by_username(&String::from_str(&env, "JOHN_DOE"));
@@ -532,7 +429,7 @@ fn test_is_username_taken() {
     // Before registration
     assert!(!client.is_username_taken(&username));
 
-    client.onboard_user(&user, &username, &UserRole::Buyer, &None);
+    client.onboard_user(&user, &username, &UserRole::Buyer);
 
     // After registration
     assert!(client.is_username_taken(&username));
@@ -555,7 +452,7 @@ fn test_get_user() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "test_user");
 
-    client.onboard_user(&user, &username, &UserRole::Buyer, &None);
+    client.onboard_user(&user, &username, &UserRole::Buyer);
 
     let profile = client.get_user(&user);
     assert_eq!(profile.username, Symbol::new(&env, "test_user"));
@@ -584,7 +481,7 @@ fn test_is_onboarded() {
 
     assert!(!client.is_onboarded(&user));
 
-    client.onboard_user(&user, &String::from_str(&env, "test"), &UserRole::Buyer, &None);
+    client.onboard_user(&user, &String::from_str(&env, "test"), &UserRole::Buyer);
 
     assert!(client.is_onboarded(&user));
 }
@@ -603,13 +500,11 @@ fn test_get_user_role() {
         &buyer,
         &String::from_str(&env, "buyer_user"),
         &UserRole::Buyer,
-        &None,
     );
     client.onboard_user(
         &artisan,
         &String::from_str(&env, "artisan_user"),
         &UserRole::Artisan,
-        &None,
     );
 
     assert_eq!(client.get_user_role(&buyer), UserRole::Buyer);
@@ -632,7 +527,6 @@ fn test_update_user_role() {
         &user,
         &String::from_str(&env, "test_user"),
         &UserRole::Buyer,
-        &None,
     );
 
     let updated = client.update_user_role(&user, &UserRole::Artisan);
@@ -652,7 +546,6 @@ fn test_update_user_role_to_admin_panics() {
         &user,
         &String::from_str(&env, "test_user_admin"),
         &UserRole::Buyer,
-        &None,
     );
 
     // This should panic with Error::InvalidRole (code 6)
@@ -671,7 +564,6 @@ fn test_set_moderator() {
         &user,
         &String::from_str(&env, "moderator_user"),
         &UserRole::Buyer,
-        &None,
     );
 
     let updated = client.set_moderator(&user);
@@ -691,7 +583,6 @@ fn test_verify_user() {
         &user,
         &String::from_str(&env, "test_user"),
         &UserRole::Artisan,
-        &None,
     );
 
     let verified = client.verify_user(&user);
@@ -710,7 +601,6 @@ fn test_has_role() {
         &user,
         &String::from_str(&env, "test_user"),
         &UserRole::Artisan,
-        &None,
     );
 
     assert!(client.has_role(&user, &UserRole::Artisan));
@@ -729,7 +619,6 @@ fn test_is_verified() {
         &user,
         &String::from_str(&env, "test_user"),
         &UserRole::Artisan,
-        &None,
     );
 
     assert!(!client.is_verified(&user));
@@ -755,7 +644,6 @@ fn test_new_user_has_zero_reputation() {
         &user,
         &String::from_str(&env, "artisan1"),
         &UserRole::Artisan,
-        &None,
     );
 
     let (successful, disputed) = client.get_user_reputation(&user);
@@ -771,7 +659,7 @@ fn test_get_user_metrics_defaults_to_zero() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "arty"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "arty"), &UserRole::Artisan);
 
     let metrics = client.get_user_metrics(&user);
     assert_eq!(metrics.total_escrow_count, 0);
@@ -786,7 +674,7 @@ fn test_auto_verify_not_triggered_below_threshold() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "arty2"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "arty2"), &UserRole::Artisan);
 
     // No metrics recorded yet – should not verify
     let verified = client.auto_verify_user(&user);
@@ -802,7 +690,7 @@ fn test_auto_verify_triggers_on_threshold() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "arty3"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "arty3"), &UserRole::Artisan);
 
     // Default thresholds: 5 escrows and 10_000_000_000 volume.
     // Call update_user_metrics with enough to cross both thresholds.
@@ -829,7 +717,6 @@ fn test_auto_verify_can_be_disabled() {
         &user,
         &String::from_str(&env, "manualonly"),
         &UserRole::Artisan,
-        &None,
     );
 
     client.set_auto_verify_enabled(&false);
@@ -856,7 +743,7 @@ fn test_auto_verify_no_op_when_already_verified() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "arty4"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "arty4"), &UserRole::Artisan);
 
     // Manual admin verification
     client.verify_user(&user);
@@ -875,7 +762,7 @@ fn test_manual_verification_override() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "arty5"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "arty5"), &UserRole::Artisan);
 
     // No metrics, but admin verifies manually
     client.verify_user(&user);
@@ -890,7 +777,7 @@ fn test_configurable_thresholds() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "arty6"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "arty6"), &UserRole::Artisan);
 
     // Lower thresholds to 1 escrow and 1 unit of volume
     client.set_verification_thresholds(&1u32, &1i128);
@@ -914,7 +801,6 @@ fn test_request_verification_queue() {
         &user,
         &String::from_str(&env, "queued1"),
         &UserRole::Artisan,
-        &None,
     );
 
     client.request_verification(&user);
@@ -940,7 +826,6 @@ fn test_process_verification_request_approve() {
         &user,
         &String::from_str(&env, "queued2"),
         &UserRole::Artisan,
-        &None,
     );
 
     client.request_verification(&user);
@@ -965,7 +850,6 @@ fn test_process_verification_request_reject() {
         &user,
         &String::from_str(&env, "queued3"),
         &UserRole::Artisan,
-        &None,
     );
 
     client.request_verification(&user);
@@ -989,13 +873,11 @@ fn test_process_verification_request_preserves_other_pending_users() {
         &user_one,
         &String::from_str(&env, "queued4"),
         &UserRole::Artisan,
-        &None,
     );
     client.onboard_user(
         &user_two,
         &String::from_str(&env, "queued5"),
         &UserRole::Artisan,
-        &None,
     );
 
     client.request_verification(&user_one);
@@ -1037,8 +919,6 @@ fn test_process_verification_request_unauthorized() {
         min_escrow_count_for_verify: 5,
         min_volume_for_verify: 10_000_000_000,
         escrow_contract: None,
-        rate_limit_window: 0,
-        rate_limit_max_calls: 0,
     };
 
     env.as_contract(&client.address, || {
@@ -1080,7 +960,6 @@ fn test_admin_clear_verification_request_authorized() {
         &user,
         &String::from_str(&env, "stale_req"),
         &UserRole::Artisan,
-        &None,
     );
 
     client.request_verification(&user);
@@ -1106,7 +985,7 @@ fn test_admin_clear_verification_request_no_pending() {
 
     let (client, _admin) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "no_req"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "no_req"), &UserRole::Artisan);
 
     let was_pending = client.admin_clear_verification_request(&user);
     assert!(!was_pending);
@@ -1122,7 +1001,7 @@ fn test_admin_clear_verification_request_unauthorized() {
 
     let (client, _admin) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "victim"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "victim"), &UserRole::Artisan);
     client.request_verification(&user);
 
     // Drop all mocked authorizations so the admin's require_auth() fails.
@@ -1143,7 +1022,6 @@ fn test_admin_clear_verification_request_does_not_verify() {
         &user,
         &String::from_str(&env, "unverified"),
         &UserRole::Artisan,
-        &None,
     );
 
     client.request_verification(&user);
@@ -1160,7 +1038,7 @@ fn test_verification_history_tracking() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "hist1"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "hist1"), &UserRole::Artisan);
 
     // Request → Approve
     client.request_verification(&user);
@@ -1181,8 +1059,9 @@ fn test_update_reputation_increments_counters() {
     env.mock_all_auths();
 
     let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "rep1"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "rep1"), &UserRole::Artisan);
 
     client.update_reputation(&user, &2u32, &1u32);
     let (successful, disputed) = client.get_user_reputation(&user);
@@ -1253,8 +1132,9 @@ fn test_reputation_max_trades_no_overflow() {
     env.mock_all_auths();
 
     let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "repmax"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "repmax"), &UserRole::Artisan);
 
     client.update_reputation(&user, &u32::MAX, &u32::MAX);
     let (successful, disputed) = client.get_user_reputation(&user);
@@ -1266,6 +1146,256 @@ fn test_reputation_max_trades_no_overflow() {
     let (successful2, disputed2) = client.get_user_reputation(&user);
     assert_eq!(successful2, u32::MAX);
     assert_eq!(disputed2, u32::MAX);
+}
+
+// ============================================================
+// Issue #939 – Reputation Decay & Anti-Farming Controls
+// ============================================================
+
+/// Default policy is seeded on initialize.
+#[test]
+fn test_reputation_policy_defaults_on_initialize() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let policy = client.get_reputation_policy();
+
+    assert_eq!(
+        policy.decay_interval_secs,
+        DEFAULT_REPUTATION_DECAY_INTERVAL_SECS
+    );
+    assert_eq!(policy.decay_bps, DEFAULT_REPUTATION_DECAY_BPS);
+    assert_eq!(
+        policy.update_cooldown_secs,
+        DEFAULT_REPUTATION_UPDATE_COOLDOWN_SECS
+    );
+    assert_eq!(
+        policy.farming_window_secs,
+        DEFAULT_REPUTATION_FARMING_WINDOW_SECS
+    );
+    assert_eq!(
+        policy.max_successful_per_window,
+        DEFAULT_MAX_SUCCESSFUL_PER_WINDOW
+    );
+}
+
+/// Successful reputation gains are blocked by the update cooldown.
+#[test]
+fn test_reputation_cooldown_blocks_rapid_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1_000;
+    });
+
+    let (client, _) = setup_test(&env);
+    // Keep farming permissive; exercise cooldown only.
+    client.set_reputation_policy(
+        &DEFAULT_REPUTATION_DECAY_INTERVAL_SECS,
+        &DEFAULT_REPUTATION_DECAY_BPS,
+        &3_600u64, // 1 hour cooldown
+        &0u64,
+        &u32::MAX,
+    );
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "cool1"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &1u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 1);
+    assert_eq!(client.get_user_reputation(&user), (1, 0));
+
+    // Immediate second success must be blocked.
+    client.update_reputation(&user, &1u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 1);
+    assert_eq!(client.get_user_reputation(&user), (1, 0));
+
+    let history = client.get_reputation_history(&user);
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        history.get(1).unwrap().reason,
+        Symbol::new(&env, "cooldown_blocked")
+    );
+    assert_eq!(history.get(1).unwrap().successful_applied, 0);
+
+    // After cooldown elapses, success is credited again.
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1_000 + 3_600 + 1;
+    });
+    client.update_reputation(&user, &1u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 2);
+    assert_eq!(client.get_user_reputation(&user), (2, 0));
+}
+
+/// Disputed increments still apply while success is cooldown-blocked.
+#[test]
+fn test_reputation_cooldown_allows_disputed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 5_000;
+    });
+
+    let (client, _) = setup_test(&env);
+    client.set_reputation_policy(
+        &DEFAULT_REPUTATION_DECAY_INTERVAL_SECS,
+        &0u32, // no decay noise
+        &3_600u64,
+        &0u64,
+        &u32::MAX,
+    );
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "cool2"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &3u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 3);
+
+    // Success blocked, dispute applied → trust drops.
+    client.update_reputation(&user, &2u32, &1u32);
+    assert_eq!(client.get_trust_score(&user), 2);
+    assert_eq!(client.get_user_reputation(&user), (3, 1));
+
+    let history = client.get_reputation_history(&user);
+    let last = history.get(history.len() - 1).unwrap();
+    assert_eq!(last.reason, Symbol::new(&env, "cooldown_blocked"));
+    assert_eq!(last.successful_applied, 0);
+    assert_eq!(last.disputed_applied, 1);
+}
+
+/// Anti-farming window caps rapid successful inflation.
+#[test]
+fn test_reputation_farming_window_caps_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 10_000;
+    });
+
+    let (client, _) = setup_test(&env);
+    client.set_reputation_policy(
+        &DEFAULT_REPUTATION_DECAY_INTERVAL_SECS,
+        &0u32,
+        &0u64, // no cooldown so farming alone is tested
+        &86_400u64,
+        &5u32,
+    );
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "farm1"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &3u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 3);
+
+    client.update_reputation(&user, &3u32, &0u32);
+    // Only 2 more fit under the cap of 5.
+    assert_eq!(client.get_trust_score(&user), 5);
+    assert_eq!(client.get_user_reputation(&user), (5, 0));
+
+    let history = client.get_reputation_history(&user);
+    let last = history.get(history.len() - 1).unwrap();
+    assert_eq!(last.reason, Symbol::new(&env, "farming_capped"));
+    assert_eq!(last.successful_requested, 3);
+    assert_eq!(last.successful_applied, 2);
+
+    // Further success in the same window is fully blocked.
+    client.update_reputation(&user, &1u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 5);
+
+    // After the window rolls, credits resume.
+    env.ledger().with_mut(|li| {
+        li.timestamp = 10_000 + 86_400 + 1;
+    });
+    client.update_reputation(&user, &2u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 7);
+}
+
+/// Trust score decays over time according to policy.
+#[test]
+fn test_reputation_decay_over_time() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 100;
+    });
+
+    let (client, _) = setup_test(&env);
+    // 10% decay every 1_000 seconds; no cooldown/farming interference.
+    client.set_reputation_policy(&1_000u64, &1_000u32, &0u64, &0u64, &u32::MAX);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "decay1"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &100u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 100);
+    // Lifetime counters are an audit trail and do not decay.
+    assert_eq!(client.get_user_reputation(&user), (100, 0));
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 100 + 1_000;
+    });
+    // One interval: 100 * 0.9 = 90
+    assert_eq!(client.get_trust_score(&user), 90);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 100 + 2_000;
+    });
+    // Second interval: 90 * 0.9 = 81
+    assert_eq!(client.get_trust_score(&user), 81);
+    assert_eq!(client.get_user_reputation(&user), (100, 0));
+}
+
+/// Score history records applied and blocked updates for pattern detection.
+#[test]
+fn test_reputation_history_detects_farming_pattern() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 50_000;
+    });
+
+    let (client, _) = setup_test(&env);
+    client.set_reputation_policy(&1_000_000u64, &0u32, &0u64, &86_400u64, &2u32);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "hist1"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &2u32, &0u32);
+    client.update_reputation(&user, &1u32, &0u32); // capped to 0 remaining
+    client.update_reputation(&user, &1u32, &0u32); // still capped
+
+    let history = client.get_reputation_history(&user);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history.get(0).unwrap().reason, Symbol::new(&env, "applied"));
+    assert_eq!(history.get(0).unwrap().successful_applied, 2);
+    assert_eq!(
+        history.get(1).unwrap().reason,
+        Symbol::new(&env, "farming_capped")
+    );
+    assert_eq!(history.get(1).unwrap().successful_applied, 0);
+    assert_eq!(
+        history.get(2).unwrap().reason,
+        Symbol::new(&env, "farming_capped")
+    );
+
+    // Repeated zero-applied successes in history = detectable farming pattern.
+    let blocked: u32 = history
+        .iter()
+        .filter(|e| e.successful_requested > 0 && e.successful_applied == 0)
+        .count() as u32;
+    assert_eq!(blocked, 2);
+}
+
+/// Invalid decay_bps is rejected.
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_set_reputation_policy_rejects_invalid_decay_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    client.set_reputation_policy(&1_000u64, &10_001u32, &0u64, &0u64, &5u32);
 }
 
 #[test]
@@ -1330,7 +1460,7 @@ fn test_change_username_success() {
     let original_username = String::from_str(&env, "original_user");
 
     // Onboard user
-    client.onboard_user(&user, &original_username, &UserRole::Buyer, &None);
+    client.onboard_user(&user, &original_username, &UserRole::Buyer);
 
     // Change username
     let new_username = String::from_str(&env, "new_user");
@@ -1363,7 +1493,6 @@ fn test_change_username_cooldown_active() {
         &user,
         &String::from_str(&env, "original_user"),
         &UserRole::Buyer,
-        &None,
     );
     client.change_username(&user, &String::from_str(&env, "first_change"));
 
@@ -1379,7 +1508,7 @@ fn test_change_username_case_insensitive() {
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
 
-    client.onboard_user(&user, &String::from_str(&env, "original"), &UserRole::Buyer, &None);
+    client.onboard_user(&user, &String::from_str(&env, "original"), &UserRole::Buyer);
 
     // Change to different case
     let new_username = String::from_str(&env, "NewUser");
@@ -1399,8 +1528,8 @@ fn test_change_username_to_existing() {
     let user1 = Address::generate(&env);
     let user2 = Address::generate(&env);
 
-    client.onboard_user(&user1, &String::from_str(&env, "user1"), &UserRole::Buyer, &None);
-    client.onboard_user(&user2, &String::from_str(&env, "user2"), &UserRole::Buyer, &None);
+    client.onboard_user(&user1, &String::from_str(&env, "user1"), &UserRole::Buyer);
+    client.onboard_user(&user2, &String::from_str(&env, "user2"), &UserRole::Buyer);
 
     // Try to change user2's username to user1's username
     client.change_username(&user2, &String::from_str(&env, "user1"));
@@ -1419,7 +1548,6 @@ fn test_change_username_too_short() {
         &user,
         &String::from_str(&env, "original_user"),
         &UserRole::Buyer,
-        &None,
     );
 
     // Try to change to a username that's too short
@@ -1439,7 +1567,6 @@ fn test_change_username_too_long() {
         &user,
         &String::from_str(&env, "original_user"),
         &UserRole::Buyer,
-        &None,
     );
 
     // Try to change to a username that's too long (> 50 chars)
@@ -1503,7 +1630,7 @@ fn test_change_username_collects_configured_fee() {
 
     token_admin_client.mint(&user, &5_000_000);
 
-    client.onboard_user(&user, &String::from_str(&env, "fee_user"), &UserRole::Buyer, &None);
+    client.onboard_user(&user, &String::from_str(&env, "fee_user"), &UserRole::Buyer);
     client.set_username_change_fee(&1_000_000);
     client.set_username_fee_token(&token_contract.address());
     client.set_username_fee_wallet(&fee_wallet);
@@ -1527,7 +1654,6 @@ fn test_change_username_fee_requires_token_configuration() {
         &user,
         &String::from_str(&env, "needs_fee"),
         &UserRole::Buyer,
-        &None,
     );
     client.set_username_change_fee(&1_000_000);
 
@@ -1542,7 +1668,7 @@ fn test_change_username_with_special_characters() {
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
 
-    client.onboard_user(&user, &String::from_str(&env, "original"), &UserRole::Buyer, &None);
+    client.onboard_user(&user, &String::from_str(&env, "original"), &UserRole::Buyer);
 
     // Change to username with special characters (should be normalized)
     let new_username = String::from_str(&env, "New-User_Name.123");
@@ -1564,7 +1690,6 @@ fn test_change_username_preserves_other_fields() {
         &user,
         &String::from_str(&env, "original"),
         &UserRole::Artisan,
-        &None,
     );
     assert_eq!(original.role, UserRole::Artisan);
     assert!(!original.is_verified);
@@ -1604,8 +1729,6 @@ fn test_bump_user_profile_ttl_unauthorized() {
         min_escrow_count_for_verify: 5,
         min_volume_for_verify: 10_000_000_000,
         escrow_contract: None,
-        rate_limit_window: 0,
-        rate_limit_max_calls: 0,
     };
 
     env.as_contract(&client.address, || {
@@ -1651,8 +1774,6 @@ fn test_bump_user_metrics_ttl_unauthorized() {
         min_escrow_count_for_verify: 5,
         min_volume_for_verify: 10_000_000_000,
         escrow_contract: None,
-        rate_limit_window: 0,
-        rate_limit_max_calls: 0,
     };
 
     env.as_contract(&client.address, || {
@@ -1669,7 +1790,7 @@ fn test_volume_normalization_7_decimal_token() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "vol7"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "vol7"), &UserRole::Artisan);
 
     let token_admin = Address::generate(&env);
     let token = env.register_stellar_asset_contract_v2(token_admin);
@@ -1693,7 +1814,7 @@ fn test_volume_normalization_8_decimal_token() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "vol8"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "vol8"), &UserRole::Artisan);
 
     let token = register_decimal_test_token(&env, 8);
     let raw_threshold = AUTO_VERIFY_VOLUME_THRESHOLD * 10;
@@ -1712,7 +1833,7 @@ fn test_volume_normalization_18_decimal_token() {
 
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "vol18"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "vol18"), &UserRole::Artisan);
 
     let token = register_decimal_test_token(&env, 18);
     let raw_threshold = AUTO_VERIFY_VOLUME_THRESHOLD * 10_i128.pow(11);
@@ -1736,7 +1857,7 @@ fn test_update_portfolio_success() {
     let username = String::from_str(&env, "artisan_jane");
 
     // Onboard as artisan
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
+    client.onboard_user(&user, &username, &UserRole::Artisan);
 
     // Update portfolio with valid CIDv0
     let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
@@ -1756,7 +1877,7 @@ fn test_onboard_user_stores_flat_profile_without_portfolio_key() {
     let user = Address::generate(&env);
     let username = String::from_str(&env, "artisan_flat");
 
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
+    client.onboard_user(&user, &username, &UserRole::Artisan);
 
     let stored: StoredUserProfile = env.as_contract(&client.address, || {
         env.storage()
@@ -1784,7 +1905,7 @@ fn test_update_portfolio_with_cidv1() {
     let username = String::from_str(&env, "artisan_john");
 
     // Onboard as artisan
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
+    client.onboard_user(&user, &username, &UserRole::Artisan);
 
     // Update portfolio with valid CIDv1 (base32)
     let portfolio_cid = String::from_str(
@@ -1807,7 +1928,7 @@ fn test_update_portfolio_remove() {
     let username = String::from_str(&env, "artisan_bob");
 
     // Onboard as artisan
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
+    client.onboard_user(&user, &username, &UserRole::Artisan);
 
     // Set portfolio
     let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
@@ -1826,7 +1947,7 @@ fn test_update_portfolio_uses_separate_storage_key() {
     let (client, _) = setup_test(&env);
     let user = Address::generate(&env);
     let username = String::from_str(&env, "artisan_split");
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
+    client.onboard_user(&user, &username, &UserRole::Artisan);
 
     let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
     let expected = string_to_bytes(&env, &portfolio_cid);
@@ -1860,7 +1981,7 @@ fn test_update_portfolio_buyer_cannot_update() {
     let username = String::from_str(&env, "buyer_jane");
 
     // Onboard as buyer
-    client.onboard_user(&user, &username, &UserRole::Buyer, &None);
+    client.onboard_user(&user, &username, &UserRole::Buyer);
 
     // Try to update portfolio (should fail)
     let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
@@ -1878,7 +1999,7 @@ fn test_update_portfolio_invalid_cid() {
     let username = String::from_str(&env, "artisan_alice");
 
     // Onboard as artisan
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
+    client.onboard_user(&user, &username, &UserRole::Artisan);
 
     // Try to update with invalid CID
     let invalid_cid = String::from_str(&env, "invalid_cid_format");
@@ -1909,7 +2030,7 @@ fn test_portfolio_accessible_via_get_user() {
     let username = String::from_str(&env, "artisan_carol");
 
     // Onboard as artisan
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
+    client.onboard_user(&user, &username, &UserRole::Artisan);
 
     // Update portfolio
     let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
@@ -1931,7 +2052,7 @@ fn test_portfolio_accessible_via_get_user_by_username() {
     let username = String::from_str(&env, "artisan_dave");
 
     // Onboard as artisan
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
+    client.onboard_user(&user, &username, &UserRole::Artisan);
 
     // Update portfolio
     let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
@@ -1953,7 +2074,7 @@ fn test_portfolio_none_by_default() {
     let username = String::from_str(&env, "artisan_eve");
 
     // Onboard as artisan
-    let profile = client.onboard_user(&user, &username, &UserRole::Artisan, &None);
+    let profile = client.onboard_user(&user, &username, &UserRole::Artisan);
 
     // Verify portfolio is None by default
     assert_eq!(profile.portfolio_cid, None);
@@ -1969,7 +2090,7 @@ fn test_portfolio_preserves_other_fields() {
     let username = String::from_str(&env, "artisan_frank");
 
     // Onboard as artisan
-    let original = client.onboard_user(&user, &username, &UserRole::Artisan, &None);
+    let original = client.onboard_user(&user, &username, &UserRole::Artisan);
     assert_eq!(original.role, UserRole::Artisan);
     assert!(!original.is_verified);
 
@@ -1984,234 +2105,8 @@ fn test_portfolio_preserves_other_fields() {
     assert_eq!(updated.registered_at, original.registered_at);
 }
 
-// ===== Profile Picture Tests (Issue #723) =====
-
 #[test]
-fn test_onboard_with_profile_pic_cid() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "artisan_pic");
-    let pic_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
-    let expected = string_to_bytes(&env, &pic_cid);
-
-    let profile = client.onboard_user(&user, &username, &UserRole::Artisan, &Some(pic_cid));
-
-    assert_eq!(profile.profile_pic_cid, Some(expected.clone()));
-    assert_eq!(profile.portfolio_cid, None);
-}
-
-#[test]
-fn test_onboard_with_profile_pic_cid_v1() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "artisan_picv1");
-    let pic_cid = String::from_str(
-        &env,
-        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
-    );
-    let expected = string_to_bytes(&env, &pic_cid);
-
-    let profile = client.onboard_user(&user, &username, &UserRole::Artisan, &Some(pic_cid));
-
-    assert_eq!(profile.profile_pic_cid, Some(expected));
-}
-
-#[test]
-#[should_panic]
-fn test_onboard_with_invalid_profile_pic_cid() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "artisan_badpic");
-    let invalid_cid = String::from_str(&env, "not_a_valid_cid");
-
-    client.onboard_user(&user, &username, &UserRole::Artisan, &Some(invalid_cid));
-}
-
-#[test]
-fn test_onboard_without_profile_pic_cid() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "artisan_nopic");
-
-    let profile = client.onboard_user(&user, &username, &UserRole::Artisan, &None);
-
-    assert_eq!(profile.profile_pic_cid, None);
-}
-
-#[test]
-fn test_update_profile_pic_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "artisan_upic");
-
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
-
-    let pic_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
-    let expected = string_to_bytes(&env, &pic_cid);
-    let updated = client.update_profile_pic(&user, &Some(pic_cid));
-
-    assert_eq!(updated.profile_pic_cid, Some(expected));
-}
-
-#[test]
-fn test_update_profile_pic_remove() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "artisan_rpic");
-
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
-
-    // Set profile pic
-    let pic_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
-    client.update_profile_pic(&user, &Some(pic_cid));
-
-    // Remove profile pic
-    let updated = client.update_profile_pic(&user, &None);
-    assert_eq!(updated.profile_pic_cid, None);
-}
-
-#[test]
-#[should_panic]
-fn test_update_profile_pic_invalid_cid() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "artisan_ipic");
-
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
-
-    let invalid_cid = String::from_str(&env, "invalid_cid_format");
-    client.update_profile_pic(&user, &Some(invalid_cid));
-}
-
-#[test]
-#[should_panic]
-fn test_update_profile_pic_not_onboarded() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-
-    let pic_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
-    client.update_profile_pic(&user, &Some(pic_cid));
-}
-
-#[test]
-fn test_update_profile_pic_accessible_via_get_user() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "artisan_gpic");
-
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
-
-    let pic_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
-    let expected = string_to_bytes(&env, &pic_cid);
-    client.update_profile_pic(&user, &Some(pic_cid.clone()));
-
-    // Verify accessible via get_user
-    let profile = client.get_user(&user);
-    assert_eq!(profile.profile_pic_cid, Some(expected.clone()));
-
-    // Verify accessible via get_user_by_username
-    let by_username = client.get_user_by_username(&username);
-    assert_eq!(by_username.profile_pic_cid, Some(expected));
-}
-
-#[test]
-fn test_profile_pic_none_by_default() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "artisan_dpic");
-
-    let profile = client.onboard_user(&user, &username, &UserRole::Artisan, &None);
-
-    assert_eq!(profile.profile_pic_cid, None);
-
-    // Verify no storage key exists
-    let has_key = env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .has(&DataKey::UserProfilePic(user.clone()))
-    });
-    assert!(!has_key);
-}
-
-#[test]
-fn test_profile_pic_independent_of_portfolio() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "artisan_both");
-
-    client.onboard_user(&user, &username, &UserRole::Artisan, &None);
-
-    let portfolio_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
-    let pic_cid = String::from_str(&env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
-
-    client.update_portfolio(&user, &Some(portfolio_cid));
-    client.update_profile_pic(&user, &Some(pic_cid.clone()));
-
-    let profile = client.get_user(&user);
-    assert!(profile.portfolio_cid.is_some());
-    assert_eq!(profile.profile_pic_cid, Some(string_to_bytes(&env, &pic_cid)));
-
-    // Removing portfolio doesn't affect profile pic
-    client.update_portfolio(&user, &None);
-    let profile = client.get_user(&user);
-    assert_eq!(profile.portfolio_cid, None);
-    assert!(profile.profile_pic_cid.is_some());
-}
-
-#[test]
-fn test_buyer_can_update_profile_pic() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _) = setup_test(&env);
-    let user = Address::generate(&env);
-    let username = String::from_str(&env, "buyer_bpic");
-
-    client.onboard_user(&user, &username, &UserRole::Buyer, &None);
-
-    let pic_cid = String::from_str(&env, "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG");
-    let expected = string_to_bytes(&env, &pic_cid);
-    let updated = client.update_profile_pic(&user, &Some(pic_cid));
-
-    assert_eq!(updated.profile_pic_cid, Some(expected));
-    assert_eq!(updated.role, UserRole::Buyer);
-}
-
-#[test]
-fn test_migrate_embedded_versioned_profile() {
+fn test_migrate_user_profile_moves_embedded_portfolio_to_separate_key() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -2230,7 +2125,6 @@ fn test_migrate_embedded_versioned_profile() {
         successful_trades: 2,
         disputed_trades: 1,
         portfolio_cid: Some(expected.clone()),
-        profile_pic_cid: None,
         status: ProfileStatus::Active,
     };
 
@@ -2321,7 +2215,6 @@ fn test_set_moderator_unauthorized() {
         &user,
         &soroban_sdk::String::from_str(&env, "target_user"),
         &UserRole::Buyer,
-        &None,
     );
 
     // Clear mocked auths so the next call has no authorization.
@@ -2345,7 +2238,6 @@ fn test_reactivate_profile_unauthorized() {
         &user,
         &soroban_sdk::String::from_str(&env, "someuser"),
         &UserRole::Buyer,
-        &None,
     );
     client.deactivate_profile(&user);
 
@@ -2399,10 +2291,9 @@ fn test_has_active_contracts() {
         &seller,
         &String::from_str(&env, "artisan"),
         &UserRole::Artisan,
-        &None,
     );
     // Onboard buyer as buyer
-    client.onboard_user(&user, &String::from_str(&env, "buyer"), &UserRole::Buyer, &None);
+    client.onboard_user(&user, &String::from_str(&env, "buyer"), &UserRole::Buyer);
 
     // Create escrow
     escrow_client.create_escrow(&user, &seller, &token_id.address(), &1_000_000, &1, &None);
@@ -2419,7 +2310,7 @@ fn test_update_active_contracts_tracks_state() {
 
     let (client, admin) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "tracked"), &UserRole::Buyer, &None);
+    client.onboard_user(&user, &String::from_str(&env, "tracked"), &UserRole::Buyer);
 
     let escrow_id = env.register_contract(None, crate::CraftNexusContract);
     let platform_wallet = Address::generate(&env);
@@ -2472,7 +2363,7 @@ fn test_get_active_contract_count_defaults_to_zero() {
 
     let (client, _admin) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "counter0"), &UserRole::Buyer, &None);
+    client.onboard_user(&user, &String::from_str(&env, "counter0"), &UserRole::Buyer);
 
     assert_eq!(client.get_active_contract_count(&user), 0);
     assert!(!client.has_active_contracts(&user));
@@ -2487,7 +2378,7 @@ fn test_get_active_contract_count_tracks_transitions() {
 
     let (client, admin) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "counterN"), &UserRole::Buyer, &None);
+    client.onboard_user(&user, &String::from_str(&env, "counterN"), &UserRole::Buyer);
 
     let escrow_id = env.register_contract(None, crate::CraftNexusContract);
     let platform_wallet = Address::generate(&env);
@@ -2531,7 +2422,6 @@ fn test_update_active_contracts_underflow_panics() {
         &user,
         &String::from_str(&env, "underflow"),
         &UserRole::Buyer,
-        &None,
     );
 
     let escrow_id = env.register_contract(None, crate::CraftNexusContract);
@@ -2549,7 +2439,7 @@ fn test_deactivate_profile_rejects_without_registered_escrow_contract() {
 
     let (client, _admin) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "noescrow"), &UserRole::Buyer, &None);
+    client.onboard_user(&user, &String::from_str(&env, "noescrow"), &UserRole::Buyer);
 
     client.deactivate_profile(&user);
 }
@@ -2562,7 +2452,7 @@ fn test_deactivate_profile_rejects_active_contract_count() {
 
     let (client, admin) = setup_test(&env);
     let user = Address::generate(&env);
-    client.onboard_user(&user, &String::from_str(&env, "deact"), &UserRole::Buyer, &None);
+    client.onboard_user(&user, &String::from_str(&env, "deact"), &UserRole::Buyer);
 
     let escrow_id = env.register_contract(None, crate::CraftNexusContract);
     client.set_escrow_contract(&escrow_id);
@@ -2593,8 +2483,6 @@ fn test_get_verification_queue_unauthorized() {
         min_escrow_count_for_verify: 5,
         min_volume_for_verify: 10_000_000_000,
         escrow_contract: None,
-        rate_limit_window: 0,
-        rate_limit_max_calls: 0,
     };
     env.as_contract(&contract_id, || {
         env.storage().persistent().set(&DataKey::Config, &config);
@@ -2630,7 +2518,6 @@ fn test_is_verification_pending_for_requesting_user() {
         &user,
         &String::from_str(&env, "pending_user"),
         &UserRole::Buyer,
-        &None,
     );
     client.request_verification(&user);
 
@@ -2650,7 +2537,6 @@ fn test_is_verification_pending_unauthorized() {
         &user,
         &String::from_str(&env, "pending_unauth"),
         &UserRole::Buyer,
-        &None,
     );
     client.request_verification(&user);
 
@@ -2672,7 +2558,6 @@ fn test_set_moderator_records_admin_auth() {
         &user,
         &soroban_sdk::String::from_str(&env, "promotee"),
         &UserRole::Artisan,
-        &None,
     );
 
     client.set_moderator(&user);
@@ -2702,7 +2587,6 @@ fn test_set_moderator_non_admin_rejected() {
         &target,
         &soroban_sdk::String::from_str(&env, "victim"),
         &UserRole::Buyer,
-        &None,
     );
 
     // Strip all mocked auths so only a non-admin caller could sign.
@@ -2749,8 +2633,6 @@ fn test_get_verification_queue_non_admin_rejected() {
         min_escrow_count_for_verify: 5,
         min_volume_for_verify: 10_000_000_000,
         escrow_contract: None,
-        rate_limit_window: 0,
-        rate_limit_max_calls: 0,
     };
     env.as_contract(&contract_id, || {
         env.storage().persistent().set(&DataKey::Config, &config);
@@ -2774,7 +2656,6 @@ fn test_get_verification_queue_returns_pending_users() {
         &user,
         &soroban_sdk::String::from_str(&env, "queueuser"),
         &UserRole::Artisan,
-        &None,
     );
     client.request_verification(&user);
 
@@ -2815,8 +2696,6 @@ fn test_get_user_metrics_unauthorized() {
         min_escrow_count_for_verify: 5,
         min_volume_for_verify: 10_000_000_000,
         escrow_contract: None,
-        rate_limit_window: 0,
-        rate_limit_max_calls: 0,
     };
     env.as_contract(&contract_id, || {
         env.storage().persistent().set(&DataKey::Config, &config);
@@ -2847,8 +2726,6 @@ fn test_get_user_reputation_unauthorized() {
         min_escrow_count_for_verify: 5,
         min_volume_for_verify: 10_000_000_000,
         escrow_contract: None,
-        rate_limit_window: 0,
-        rate_limit_max_calls: 0,
     };
     env.as_contract(&contract_id, || {
         env.storage().persistent().set(&DataKey::Config, &config);
@@ -2863,10 +2740,11 @@ fn test_get_user_reputation_authorized() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
     let user = Address::generate(&env);
 
     // Onboard user
-    client.onboard_user(&user, &String::from_str(&env, "rep1"), &UserRole::Artisan, &None);
+    client.onboard_user(&user, &String::from_str(&env, "rep1"), &UserRole::Artisan);
 
     // Update reputation
     client.update_reputation(&user, &2u32, &1u32);
@@ -2899,8 +2777,6 @@ fn test_has_active_contracts_unauthorized() {
         min_escrow_count_for_verify: 5,
         min_volume_for_verify: 10_000_000_000,
         escrow_contract: None,
-        rate_limit_window: 0,
-        rate_limit_max_calls: 0,
     };
     env.as_contract(&contract_id, || {
         env.storage().persistent().set(&DataKey::Config, &config);
@@ -3000,7 +2876,7 @@ fn test_get_verification_queue_extends_ttl_for_every_slot() {
     let mut users = soroban_sdk::Vec::new(&env);
     for (index, name) in ["ttlqueue1", "ttlqueue2", "ttlqueue3"].iter().enumerate() {
         let user = Address::generate(&env);
-        client.onboard_user(&user, &String::from_str(&env, name), &UserRole::Artisan, &None);
+        client.onboard_user(&user, &String::from_str(&env, name), &UserRole::Artisan);
         client.request_verification(&user);
         users.push_back(user);
         assert_eq!(client.get_verification_queue().len() as usize, index + 1);
@@ -3011,7 +2887,7 @@ fn test_get_verification_queue_extends_ttl_for_every_slot() {
             .filter(|slot| {
                 env.storage()
                     .persistent()
-                    .has(&DataKey::VerifQueueIdx(*slot))
+                    .has(&DataKey::VerificationQueueIndex(*slot))
             })
             .count()
     });
@@ -3022,7 +2898,7 @@ fn test_get_verification_queue_extends_ttl_for_every_slot() {
 
     env.as_contract(&client.address, || {
         for slot in 0..users.len() as u64 {
-            let key = DataKey::VerifQueueIdx(slot);
+            let key = DataKey::VerificationQueueIndex(slot);
             assert!(
                 env.storage().persistent().has(&key),
                 "queue slot {slot} should still be live"
@@ -3047,7 +2923,6 @@ fn test_read_paths_refresh_ttl_on_touched_entries() {
         &user,
         &String::from_str(&env, "ttlreader"),
         &UserRole::Artisan,
-        &None,
     );
     client.set_username_change_fee(&42);
 
@@ -3060,7 +2935,7 @@ fn test_read_paths_refresh_ttl_on_touched_entries() {
     env.as_contract(&client.address, || {
         for key in [
             DataKey::UserProfile(user.clone()),
-            DataKey::UsernameFee,
+            DataKey::UsernameChangeFee,
         ] {
             assert!(env.storage().persistent().has(&key));
             assert!(
@@ -3084,7 +2959,6 @@ fn test_read_helpers_do_not_create_absent_entries() {
         &user,
         &String::from_str(&env, "nodefaults"),
         &UserRole::Artisan,
-        &None,
     );
 
     let metrics = client.get_user_metrics(&user);
@@ -3097,9 +2971,9 @@ fn test_read_helpers_do_not_create_absent_entries() {
     env.as_contract(&client.address, || {
         for key in [
             DataKey::UserMetrics(user.clone()),
-            DataKey::UsernameFee,
-            DataKey::ActiveCount(user.clone()),
-            DataKey::UsernameFeeToken,
+            DataKey::UsernameChangeFee,
+            DataKey::ActiveContractCount(user.clone()),
+            DataKey::UsernameChangeFeeToken,
             DataKey::UserPortfolio(user.clone()),
         ] {
             assert!(
@@ -3125,7 +2999,6 @@ fn test_profile_read_budget_smoke() {
         &user,
         &String::from_str(&env, "budgetread"),
         &UserRole::Artisan,
-        &None,
     );
 
     env.budget().reset_default();

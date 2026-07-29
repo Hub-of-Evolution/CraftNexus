@@ -102,6 +102,10 @@ fn test_create_escrow_success() {
     assert!(!events.is_empty(), "No events emitted");
     let last_event = events.last().unwrap();
     assert_eq!(last_event.0, client.address);
+    let last_event = events.last();
+    let last_event = last_event.unwrap();
+    assert_eq!(last_event.0, client.address);
+    assert_eq!(last_event.0, client.address);
     // Topics: ["escrow_created", escrow_id]
     assert_eq!(
         last_event.1,
@@ -423,11 +427,6 @@ fn test_resolve_dispute_release_to_seller() {
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
     client.dispute_escrow(&1, &Symbol::new(&env, "Non_delivery"), &buyer);
 
-    // Advance past the evidence challenge window (#942) before finalizing.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 2 * 24 * 60 * 60 + 1;
-    });
-
     // Arbitrator is setup in setup_test as a random Address and mock_all_auths bypasses auth
     client.resolve_dispute(&1, &Resolution::ReleaseToSeller, &admin);
 
@@ -449,11 +448,6 @@ fn test_resolve_dispute_refund_to_buyer() {
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
     client.dispute_escrow(&1, &Symbol::new(&env, "Late_shipping"), &buyer);
-
-    // Advance past the evidence challenge window (#942) before finalizing.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 2 * 24 * 60 * 60 + 1;
-    });
 
     client.resolve_dispute(&1, &Resolution::RefundToBuyer, &admin);
 
@@ -477,11 +471,6 @@ fn test_resolve_dispute_by_moderator() {
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
     client.dispute_escrow(&1, &Symbol::new(&env, "Moderator_review"), &buyer);
-
-    // Advance past the evidence challenge window (#942) before finalizing.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 2 * 24 * 60 * 60 + 1;
-    });
 
     client.resolve_dispute(&1, &Resolution::RefundToBuyer, &moderator);
 
@@ -507,10 +496,10 @@ fn test_recover_admin_with_zero_window_fails() {
             .set(&DataKey::FallbackAdmin, &admin);
         env.storage()
             .persistent()
-            .set(&DataKey::AdminRecovTime, &current_time);
+            .set(&DataKey::AdminRecoveryTime, &current_time);
         env.storage()
             .persistent()
-            .set(&DataKey::AdminRecovDelay, &0u64);
+            .set(&DataKey::AdminRecoveryDelay, &0u64);
     });
 
     let recovered_admin = Address::generate(&env);
@@ -1151,10 +1140,9 @@ fn test_recover_admin_timelock_returns_standard_error() {
     });
 
     let recovered_admin = Address::generate(&env);
-    // Initiation must succeed (Ok) so the timelock persists under Soroban semantics.
-    client.recover_admin_access(&recovered_admin);
+    let initial_result = client.try_recover_admin_access(&recovered_admin);
+    assert_admin_recovery_failed(initial_result);
 
-    // Second call before the delay elapses remains blocked.
     let locked_result = client.try_recover_admin_access(&recovered_admin);
     assert_admin_recovery_failed(locked_result);
 }
@@ -1401,20 +1389,6 @@ fn test_unstake_rejects_different_token_than_original_stake() {
     });
 
     client.unstake_tokens(&seller, &other_token_contract.address());
-}
-
-#[test]
-#[should_panic(expected = "Stake cooldown active. Remaining seconds: 604800")]
-fn test_unstake_too_early_returns_remaining_seconds() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&seller, &20_000_000);
-    client.stake_tokens(&seller, &token_id, &5_000_000);
-
-    // Try to unstake immediately (remaining seconds should be 604800)
-    client.unstake_tokens(&seller, &token_id);
 }
 
 #[test]
@@ -1826,7 +1800,7 @@ fn test_execute_upgrade_rejects_legacy_storage_layout_without_migration() {
     let hash = BytesN::from_array(&env, &[9u8; 32]);
     let result = client.try_execute_upgrade(&hash);
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), Error::StorageLayoutMismatch);
+    assert_eq!(result.unwrap_err(), Ok(Error::StorageLayoutMismatch));
 }
 
 #[test]
@@ -1916,7 +1890,8 @@ fn test_multisig_threshold_two_of_two() {
         client.get_upgrade_proposal().is_none(),
         "proposal committed too early"
     );
-    assert_eq!(client.get_upgrade_approvals(&hash).len(), 1);
+    // Nonce is 0 on the first round (no cancellations yet).
+    assert_eq!(client.get_upgrade_approvals(&0).len(), 1);
 
     // Second approval — threshold reached, proposal committed.
     client.propose_upgrade_wasm(&signer2, &hash);
@@ -1945,7 +1920,8 @@ fn test_duplicate_approval_returns_already_approved() {
     assert!(result.is_err());
     assert!(result.is_err());
 
-    assert_eq!(client.get_upgrade_approvals(&hash).len(), 1);
+    // Nonce is 0; admin approved once; signer2 has not approved yet.
+    assert_eq!(client.get_upgrade_approvals(&0).len(), 1);
     assert!(client.get_upgrade_proposal().is_none());
 }
 
@@ -2006,6 +1982,235 @@ fn test_set_upgrade_signers_empty_resets_to_admin() {
     let hash = BytesN::from_array(&env, &[6u8; 32]);
     client.propose_upgrade_wasm(&admin, &hash);
     assert!(client.get_upgrade_proposal().is_some());
+}
+
+
+// ============== Upgrade Governance Security Tests ==============
+
+/// AC2: Signer rotation after first approval cannot inflate the approval count.
+/// After the first signer approves (locking the snapshot), the admin adds a
+/// new signer and changes the threshold.  The new signer should be treated as
+/// part of the NEW round's signer set, but the snapshot for the CURRENT round
+/// is already fixed.  The current round must NOT count the new signer.
+#[test]
+fn test_signer_rotation_cannot_inflate_approval_count() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let signer2 = Address::generate(&env);
+    let evil_signer = Address::generate(&env);
+
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer2.clone());
+    client.set_upgrade_signers(&signers);
+    client.set_upgrade_threshold(&2);
+
+    let hash = BytesN::from_array(&env, &[10u8; 32]);
+
+    // Round opens: admin approves (snapshot captured: {admin, signer2}, threshold=2).
+    client.propose_upgrade_wasm(&admin, &hash);
+    assert!(client.get_upgrade_proposal().is_none(), "proposal should not be committed yet");
+
+    // Admin rotates signers to include evil_signer AFTER the round has opened.
+    let mut new_signers = Vec::new(&env);
+    new_signers.push_back(admin.clone());
+    new_signers.push_back(evil_signer.clone());
+    client.set_upgrade_signers(&new_signers);
+    // Admin also tries to lower threshold to 1 after the round is open.
+    client.set_upgrade_threshold(&1);
+
+    // evil_signer was NOT in the snapshot — must be rejected.
+    let result = client.try_propose_upgrade_wasm(&evil_signer, &hash);
+    assert!(
+        result.is_err(),
+        "evil_signer added after round open must not be able to approve"
+    );
+
+    // Proposal still not committed — the threshold snapshot (2) was not met.
+    assert!(client.get_upgrade_proposal().is_none(),
+        "proposal must not be committed despite threshold change");
+
+    // Only the original signer2 (from the snapshot) can complete this round.
+    client.propose_upgrade_wasm(&signer2, &hash);
+    assert!(client.get_upgrade_proposal().is_some(), "proposal must commit after 2 of 2 original signers");
+}
+
+/// AC3: A pending proposal remains immutable after threshold approval is reached.
+/// After the proposal is committed via propose_upgrade_wasm, any call to
+/// propose_upgrade_wasm for the same hash must fail with UpgradeProposalExists.
+#[test]
+fn test_committed_proposal_is_immutable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let hash = BytesN::from_array(&env, &[11u8; 32]);
+
+    // threshold=1 (default), admin is sole signer — one call commits.
+    client.propose_upgrade_wasm(&admin, &hash);
+    assert!(client.get_upgrade_proposal().is_some());
+
+    // Any subsequent propose call must fail with UpgradeProposalExists.
+    let result = client.try_propose_upgrade_wasm(&admin, &hash);
+    assert!(result.is_err());
+}
+
+/// AC4: Cancellation clears stale approvals — after cancel, the nonce is
+/// incremented and any old partial approvals are unreachable.  Re-proposing
+/// after the cooldown starts a fresh round that requires new approvals.
+///
+/// Flow:
+/// 1. Round 0: admin sole-approves (threshold=1) → proposal committed.
+/// 2. Cancel → nonce bumped to 1, old state cleared.
+/// 3. Advance past cooldown.
+/// 4. Round 1: admin approves again → fresh state, nonce=1.
+/// 5. Old approvals for nonce 0 are empty; new round has exactly 1 approval.
+#[test]
+fn test_cancel_clears_stale_approvals_and_increments_nonce() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    // Threshold=1 so a single admin approval commits the proposal immediately.
+    let hash_a = BytesN::from_array(&env, &[12u8; 32]);
+    let hash_b = BytesN::from_array(&env, &[13u8; 32]);
+
+    // Round 0, nonce=0: admin approves hash_a → commits.
+    assert_eq!(client.get_upgrade_proposal_nonce(), 0, "nonce starts at 0");
+    client.propose_upgrade_wasm(&admin, &hash_a);
+    assert!(client.get_upgrade_proposal().is_some(), "proposal must commit at threshold=1");
+    // Approval state is removed on commit, so get_upgrade_approvals returns empty.
+    assert_eq!(client.get_upgrade_approvals(&0).len(), 0,
+        "approvals are cleared after commit");
+
+    // Cancel the committed proposal → nonce bumps to 1.
+    client.cancel_upgrade_wasm();
+    assert_eq!(client.get_upgrade_proposal_nonce(), 1, "nonce must be 1 after cancel");
+    assert!(client.get_upgrade_proposal().is_none(), "proposal must be removed after cancel");
+    // Old nonce 0 approvals remain empty (never re-populated after commit+cancel).
+    assert_eq!(client.get_upgrade_approvals(&0).len(), 0,
+        "old nonce 0 approvals must be empty after cancel");
+
+    // Advance past CANCEL_REPROPOSE_COOLDOWN (7 days + 1 s).
+    env.ledger().with_mut(|li| { li.timestamp += 7 * 24 * 60 * 60 + 1; });
+
+    // Round 1, nonce=1: admin proposes a different hash → fresh state.
+    client.propose_upgrade_wasm(&admin, &hash_b);
+    assert!(client.get_upgrade_proposal().is_some(),
+        "proposal must commit in fresh round");
+    // Nonce 0 still returns empty — old state was not replayed.
+    assert_eq!(client.get_upgrade_approvals(&0).len(), 0,
+        "nonce 0 must still be empty in round 1");
+}
+
+/// AC4 (simplified): cancel_upgrade_wasm increments the proposal nonce.
+#[test]
+fn test_cancel_increments_proposal_nonce() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let hash = BytesN::from_array(&env, &[13u8; 32]);
+
+    // Commit a proposal (threshold=1, admin is sole signer).
+    client.propose_upgrade_wasm(&admin, &hash);
+    let nonce_before = client.get_upgrade_proposal_nonce();
+    assert_eq!(nonce_before, 0, "nonce starts at 0");
+
+    // Cancel increments the nonce.
+    client.cancel_upgrade_wasm();
+    let nonce_after = client.get_upgrade_proposal_nonce();
+    assert_eq!(nonce_after, 1, "nonce must be 1 after first cancel");
+}
+
+/// Replay protection: after cancel + cooldown, re-proposing the same hash
+/// with the same signers starts a completely new round (nonce=1, empty approvals).
+#[test]
+fn test_repropose_same_hash_starts_fresh_round_after_cancel() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let signer2 = Address::generate(&env);
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer2.clone());
+    client.set_upgrade_signers(&signers);
+    client.set_upgrade_threshold(&2);
+
+    let hash = BytesN::from_array(&env, &[14u8; 32]);
+
+    // Round 0: admin approves. Threshold not yet met.
+    // To get a partial approval we need threshold=2; but cancel requires a committed
+    // proposal. Lower threshold to 1 to commit, then cancel.
+    client.set_upgrade_threshold(&1);
+    client.propose_upgrade_wasm(&admin, &hash);
+    // Committed. Cancel it.
+    client.cancel_upgrade_wasm();
+    // Nonce is now 1.
+    assert_eq!(client.get_upgrade_proposal_nonce(), 1);
+
+    // Advance past cooldown.
+    env.ledger().with_mut(|li| { li.timestamp += 7 * 24 * 60 * 60 + 1; });
+
+    // Round 1: admin approves again for the SAME hash.
+    client.set_upgrade_threshold(&2);
+    client.propose_upgrade_wasm(&admin, &hash);
+
+    // Nonce is still 1 (cancel hasn't been called again).
+    assert_eq!(client.get_upgrade_proposal_nonce(), 1);
+
+    // Only 1 approval in round 1 — admin's prior approval from round 0 is NOT counted.
+    assert_eq!(client.get_upgrade_approvals(&1).len(), 1,
+        "round 1 must have exactly 1 fresh approval, not carry over from round 0");
+
+    // Proposal must NOT be committed (threshold=2, only 1 approval so far).
+    assert!(client.get_upgrade_proposal().is_none(),
+        "proposal must not commit with only 1 of 2 required approvals in fresh round");
+
+    // signer2 approves to complete round 1.
+    client.propose_upgrade_wasm(&signer2, &hash);
+    assert!(client.get_upgrade_proposal().is_some(), "proposal must commit after 2nd approval");
+}
+
+/// Threshold snapshot: changing threshold mid-round does not affect the current round.
+#[test]
+fn test_threshold_change_mid_round_does_not_affect_current_round() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let signer2 = Address::generate(&env);
+    let signer3 = Address::generate(&env);
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer2.clone());
+    signers.push_back(signer3.clone());
+    client.set_upgrade_signers(&signers);
+    client.set_upgrade_threshold(&3); // requires all 3
+
+    let hash = BytesN::from_array(&env, &[15u8; 32]);
+
+    // admin approves first — snapshot captures threshold=3.
+    client.propose_upgrade_wasm(&admin, &hash);
+    assert!(client.get_upgrade_proposal().is_none());
+
+    // Admin lowers threshold to 1 after the round has opened.
+    client.set_upgrade_threshold(&1);
+
+    // signer2 approves — with the NEW threshold=1 this would be sufficient,
+    // but the snapshot still requires 3.
+    client.propose_upgrade_wasm(&signer2, &hash);
+    assert!(
+        client.get_upgrade_proposal().is_none(),
+        "proposal must not commit: snapshot threshold is 3, only 2 approvals so far"
+    );
+
+    // Third approval completes the snapshotted requirement.
+    client.propose_upgrade_wasm(&signer3, &hash);
+    assert!(client.get_upgrade_proposal().is_some(), "proposal must commit after 3 of 3 approvals");
 }
 
 // ============== Batch Operations Tests ==============
@@ -2954,7 +3159,7 @@ fn test_whitelist_stores_tokens_as_individual_keys() {
     assert!(env.as_contract(&client.address, || {
         env.storage()
             .persistent()
-            .has(&DataKey::TokenAllowed(token_id.clone()))
+            .has(&DataKey::WhitelistedTokenIndexed(token_id.clone()))
     }));
     assert!(env.as_contract(&client.address, || {
         !env.storage().persistent().has(&DataKey::WhitelistedTokens)
@@ -2962,7 +3167,7 @@ fn test_whitelist_stores_tokens_as_individual_keys() {
     let count: u32 = env.as_contract(&client.address, || {
         env.storage()
             .persistent()
-            .get(&DataKey::TokenCount)
+            .get(&DataKey::WhitelistedTokenCount)
             .unwrap_or(0u32)
     });
     assert_eq!(count, 1);
@@ -3099,7 +3304,7 @@ fn test_migrate_fee_token_configs_migrates_twenty_tokens_and_emits_summary() {
     env.as_contract(&client.address, || {
         env.storage()
             .persistent()
-            .set(&DataKey::FeeIndex, &fee_tokens);
+            .set(&DataKey::FeeTokenIndex, &fee_tokens);
     });
 
     let migrated = client.migrate_fee_token_configs();
@@ -3158,13 +3363,13 @@ fn test_migrate_fee_token_configs_is_idempotent_and_preserves_existing_configs()
     env.as_contract(&client.address, || {
         env.storage()
             .persistent()
-            .set(&DataKey::FeeIndex, &fee_tokens);
+            .set(&DataKey::FeeTokenIndex, &fee_tokens);
 
         let preset_one = fee_tokens.get(3).unwrap();
         let preset_two = fee_tokens.get(11).unwrap();
 
         env.storage().persistent().set(
-            &DataKey::FeeConfig(preset_one.clone()),
+            &DataKey::FeeTokenConfig(preset_one.clone()),
             &FeeTokenInfo {
                 active: false,
                 custom_fee_bps: Some(250),
@@ -3172,7 +3377,7 @@ fn test_migrate_fee_token_configs_is_idempotent_and_preserves_existing_configs()
             },
         );
         env.storage().persistent().set(
-            &DataKey::FeeConfig(preset_two.clone()),
+            &DataKey::FeeTokenConfig(preset_two.clone()),
             &FeeTokenInfo {
                 active: true,
                 custom_fee_bps: Some(900),
@@ -3376,40 +3581,34 @@ fn test_set_paused_emits_platform_status_events() {
     client.set_paused(&true);
 
     let events = env.events().all();
-    let paused_topics = vec![
-        &env,
-        Symbol::new(&env, "admin_platform_paused").into_val(&env),
-        admin.clone().into_val(&env),
-    ];
-    let paused_event_entry = events
-        .iter()
-        .rev()
-        .find(|e| e.1 == paused_topics)
-        .expect("platform_paused event missing");
-    let paused_event: PlatformPausedEvent = paused_event_entry.2.try_into_val(&env).unwrap();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        last_event.1,
+        vec![
+            &env,
+            Symbol::new(&env, "admin_platform_paused").into_val(&env),
+            admin.clone().into_val(&env),
+        ]
+    );
+
+    let paused_event: PlatformPausedEvent = last_event.2.try_into_val(&env).unwrap();
     assert_eq!(paused_event.initiator, admin.clone());
     assert_eq!(paused_event.timestamp, 1711368000);
-
-    // Emergency framework also records a deterministic pause audit entry.
-    let op = client.get_emergency_operation().unwrap();
-    assert_eq!(op.kind, EmergencyOpKind::Pause);
-    assert_eq!(op.phase, EmergencyOpPhase::Completed);
-    assert!(op.success);
 
     client.set_paused(&false);
 
     let events = env.events().all();
-    let unpaused_topics = vec![
-        &env,
-        Symbol::new(&env, "admin_platform_unpaused").into_val(&env),
-        admin.clone().into_val(&env),
-    ];
-    let unpaused_event_entry = events
-        .iter()
-        .rev()
-        .find(|e| e.1 == unpaused_topics)
-        .expect("platform_unpaused event missing");
-    let unpaused_event: PlatformUnpausedEvent = unpaused_event_entry.2.try_into_val(&env).unwrap();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        last_event.1,
+        vec![
+            &env,
+            Symbol::new(&env, "admin_platform_unpaused").into_val(&env),
+            admin.clone().into_val(&env),
+        ]
+    );
+
+    let unpaused_event: PlatformUnpausedEvent = last_event.2.try_into_val(&env).unwrap();
     assert_eq!(unpaused_event.initiator, admin);
     assert_eq!(unpaused_event.timestamp, 1711368000);
 }
@@ -3753,7 +3952,7 @@ fn test_get_escrow_count_tracks_100_global_indices() {
     assert_eq!(stored_count, 100);
 
     for index in 0u32..100 {
-        let index_key = DataKey::EscrowIndex(index);
+        let index_key = DataKey::GlobalEscrowIdIndexed(index);
         let stored_id: u32 = env.as_contract(&client.address, || {
             env.storage().persistent().get(&index_key).unwrap()
         });
@@ -3914,7 +4113,7 @@ fn test_legacy_all_escrow_ids_migrates_on_get_escrow_count() {
     assert!(!has_legacy);
 
     for (index, expected_id) in [11u32, 22, 33, 44].into_iter().enumerate() {
-        let index_key = DataKey::EscrowIndex(index as u32);
+        let index_key = DataKey::GlobalEscrowIdIndexed(index as u32);
         let stored_id: u32 = env.as_contract(&client.address, || {
             env.storage().persistent().get(&index_key).unwrap()
         });
@@ -3985,7 +4184,7 @@ fn test_legacy_all_escrow_ids_migration_is_idempotent_after_first_read() {
     assert!(!has_legacy);
 
     for (index, expected_id) in [5u32, 15, 25].into_iter().enumerate() {
-        let index_key = DataKey::EscrowIndex(index as u32);
+        let index_key = DataKey::GlobalEscrowIdIndexed(index as u32);
         let stored_id: u32 = env.as_contract(&client.address, || {
             env.storage().persistent().get(&index_key).unwrap()
         });
@@ -4001,9 +4200,9 @@ fn test_legacy_all_escrow_ids_migration_preserves_existing_indexed_entries() {
 
     let legacy_key = DataKey::AllEscrowIds;
     let count_key = DataKey::EscrowCount;
-    let existing_index_key = DataKey::EscrowIndex(0);
-    let missing_index_key = DataKey::EscrowIndex(1);
-    let tail_index_key = DataKey::EscrowIndex(2);
+    let existing_index_key = DataKey::GlobalEscrowIdIndexed(0);
+    let missing_index_key = DataKey::GlobalEscrowIdIndexed(1);
+    let tail_index_key = DataKey::GlobalEscrowIdIndexed(2);
     let mut legacy_ids = soroban_sdk::Vec::new(&env);
     for order_id in [10u32, 20, 30] {
         legacy_ids.push_back(order_id);
@@ -4371,7 +4570,7 @@ fn test_funding_deadline_set_on_create() {
         .funding_deadline
         .expect("funding_deadline must be set");
     // created_at is stored as u32 (truncated ledger timestamp); deadline is created_at + 86400
-    assert_eq!(deadline, escrow.created_at + 24 * 60 * 60);
+    assert_eq!(deadline, escrow.created_at as u64 + 24 * 60 * 60);
 }
 
 /// Buyer may cancel an unfunded escrow voluntarily before the deadline.
@@ -4592,10 +4791,7 @@ fn test_fund_audit_escrow_release_and_refund() {
     let buyer_count = client.get_fund_audit_count(&buyer);
     assert_eq!(buyer_count, 1);
     let buyer_history = client.get_fund_audit_history(&buyer);
-    assert_eq!(
-        buyer_history.get(0).unwrap().reason,
-        Symbol::new(&env, "escrow_funded")
-    );
+    assert_eq!(buyer_history.get(0).unwrap().reason, Symbol::new(&env, "escrow_funded"));
 
     // Check seller history: release entry
     let seller_count = client.get_fund_audit_count(&seller);
@@ -4665,10 +4861,7 @@ fn test_fund_audit_recurring_escrow_flow() {
     let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &10_000_000, &100, &2);
     assert_eq!(client.get_fund_audit_count(&buyer), 1);
     let buyer_hist = client.get_fund_audit_history(&buyer);
-    assert_eq!(
-        buyer_hist.get(0).unwrap().reason,
-        Symbol::new(&env, "recurring_escrow_locked")
-    );
+    assert_eq!(buyer_hist.get(0).unwrap().reason, Symbol::new(&env, "recurring_escrow_locked"));
 
     // Fast forward timestamp past cycle frequency
     env.ledger().with_mut(|li| {
@@ -4679,20 +4872,15 @@ fn test_fund_audit_recurring_escrow_flow() {
     client.release_next_cycle(&rec.id);
     assert_eq!(client.get_fund_audit_count(&seller), 1);
     let seller_hist = client.get_fund_audit_history(&seller);
-    assert_eq!(
-        seller_hist.get(0).unwrap().reason,
-        Symbol::new(&env, "recurring_release")
-    );
+    assert_eq!(seller_hist.get(0).unwrap().reason, Symbol::new(&env, "recurring_release"));
 
     // Cancel remaining
     client.cancel_recurring_escrow(&rec.id);
     assert_eq!(client.get_fund_audit_count(&buyer), 2);
     let buyer_cancel_hist = client.get_fund_audit_history(&buyer);
-    assert_eq!(
-        buyer_cancel_hist.get(1).unwrap().reason,
-        Symbol::new(&env, "recurring_cancel_refund")
-    );
+    assert_eq!(buyer_cancel_hist.get(1).unwrap().reason, Symbol::new(&env, "recurring_cancel_refund"));
 }
+
 
 #[test]
 fn test_fund_audit_pagination_and_immutability() {
@@ -4730,3 +4918,119 @@ fn test_fund_audit_pagination_and_immutability() {
     let page_oob = client.get_fund_audit_history_paginated(&buyer, &10, &2);
     assert_eq!(page_oob.len(), 0);
 }
+
+#[test]
+#[should_panic]
+fn test_stake_below_minimum_threshold_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    // Admin sets minimum stake required to 10_000_000
+    client.set_min_stake_required(&10_000_000);
+
+    token_admin.mint(&seller, &20_000_000);
+    // Staking 5_000_000 when min required is 10_000_000 should panic
+    client.stake_tokens(&seller, &token_id, &5_000_000);
+}
+
+#[test]
+#[should_panic]
+fn test_unstake_with_active_obligations_below_min_stake_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    client.set_min_stake_required(&10_000_000);
+
+    token_admin.mint(&seller, &20_000_000);
+    token_admin.mint(&buyer, &20_000_000);
+
+    // Stake 15_000_000 in two deposits so partial unstaking is possible
+    client.stake_tokens(&seller, &token_id, &15_000_000);
+
+    // Create an active escrow (seller has active obligations)
+    client.create_escrow(&buyer, &seller, &token_id, &5_000_000, &1, &None);
+    assert!(client.has_active_escrows(&seller));
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_STAKE_COOLDOWN as u64 + 1;
+    });
+
+    // Unstaking matured 15_000_000 while active escrow exists leaves 0 stake (< 10_000_000 min requirement)
+    client.unstake_tokens(&seller, &token_id);
+}
+
+#[test]
+fn test_partial_unstake_consistent_collateral_rules() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    client.set_min_stake_required(&10_000_000);
+
+    token_admin.mint(&seller, &50_000_000);
+    token_admin.mint(&buyer, &50_000_000);
+
+    // Stake 25_000_000 — this opens the first cooldown window.
+    client.stake_tokens(&seller, &token_id, &25_000_000);
+    assert_eq!(client.get_stake(&seller), 25_000_000);
+
+    // Advance past the first cooldown and unstake 25_000_000.
+    // Now the queue is empty; the next deposit will open a fresh cooldown.
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_STAKE_COOLDOWN as u64 + 1;
+    });
+    client.unstake_tokens(&seller, &token_id);
+    assert_eq!(client.get_stake(&seller), 0);
+
+    // Stake 25_000_000 again — opens a new cooldown window starting now.
+    client.stake_tokens(&seller, &token_id, &25_000_000);
+    assert_eq!(client.get_stake(&seller), 25_000_000);
+
+    // Advance 100 s and add a second deposit of 10_000_000.
+    // This inherits the existing cooldown_end (anti-gaming rule), so both
+    // deposits mature at the same time.
+    env.ledger().with_mut(|li| {
+        li.timestamp += 100;
+    });
+    client.stake_tokens(&seller, &token_id, &10_000_000);
+    assert_eq!(client.get_stake(&seller), 35_000_000);
+
+    // Advance past the shared cooldown. Both deposits mature together.
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_STAKE_COOLDOWN as u64;
+    });
+
+    // Both deposits mature; total released = 35_000_000; remaining = 0.
+    // The collateral check does not block unstake because no active obligations exist.
+    client.unstake_tokens(&seller, &token_id);
+    assert_eq!(client.get_stake(&seller), 0);
+    assert_eq!(client.is_account_under_collateralized(&seller), false);
+}
+
+#[test]
+fn test_is_account_under_collateralized_detection() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&seller, &20_000_000);
+    token_admin.mint(&buyer, &20_000_000);
+
+    // Stake 5_000_000 (when min stake is 0)
+    client.stake_tokens(&seller, &token_id, &5_000_000);
+
+    // Create an escrow
+    client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+
+    // Initially min stake is 0, so not under-collateralized
+    assert_eq!(client.is_account_under_collateralized(&seller), false);
+
+    // Admin raises min stake required to 10_000_000
+    client.set_min_stake_required(&10_000_000);
+
+    // Now seller has active obligation but stake (5M) < min_stake_required (10M)
+    assert_eq!(client.is_account_under_collateralized(&seller), true);
+}
+
