@@ -26,7 +26,10 @@
 //! | [`OnboardingContract::get_user_role`] | [`UserRole`] | Returns [`UserRole::None`] for unknown users. |
 //! | [`OnboardingContract::is_verified`] | `bool` | Reflects manual or auto verification. |
 //! | [`OnboardingContract::get_user_metrics`] | [`UserMetrics`] | Escrow count / volume used for auto-verification. |
-//! | [`OnboardingContract::get_user_reputation`] | `(u32, u32)` | `(successful_trades, disputed_trades)`. |
+//! | [`OnboardingContract::get_user_reputation`] | `(u32, u32)` | Lifetime `(successful_trades, disputed_trades)` counters. |
+//! | [`OnboardingContract::get_trust_score`] | `u32` | Decaying trust score (#939); lazy-applies decay on read. |
+//! | [`OnboardingContract::get_reputation_history`] | `Vec<ReputationHistoryEntry>` | Recent score-change log for abuse detection (#939). |
+//! | [`OnboardingContract::get_reputation_policy`] | [`ReputationPolicy`] | Decay / cooldown / anti-farming policy (#939). |
 //! | [`OnboardingContract::get_verification_history`] | `Vec<VerificationEntry>` | Compact entries decoded to human-readable actions. |
 //! | [`OnboardingContract::get_verification_queue`] | `Vec<Address>` | Pending manual-verification requests in FIFO order. |
 //! | [`OnboardingContract::get_config`] | [`OnboardingConfig`] | Global contract configuration. |
@@ -140,6 +143,27 @@ const BASE58_BTC_CHARSET: [bool; 256] = {
 const USERNAME_CHANGE_COOLDOWN: u64 = 30 * 24 * 60 * 60;
 /// Maximum verification history entries retained per user (#519).
 const MAX_VERIFICATION_HISTORY: u32 = 10;
+
+// ---------------------------------------------------------------------------
+// Issue #939 – Reputation decay & anti-farming defaults
+// ---------------------------------------------------------------------------
+
+/// Basis-points denominator (100% = 10_000).
+const REPUTATION_BPS_DENOMINATOR: u32 = 10_000;
+/// Default decay interval: 30 days. Trust score loses `decay_bps` each interval.
+const DEFAULT_REPUTATION_DECAY_INTERVAL_SECS: u64 = 30 * 24 * 60 * 60;
+/// Default decay rate: 5% of trust score per decay interval.
+const DEFAULT_REPUTATION_DECAY_BPS: u32 = 500;
+/// Minimum gap between successful trust-score increases (1 hour).
+const DEFAULT_REPUTATION_UPDATE_COOLDOWN_SECS: u64 = 60 * 60;
+/// Rolling window used by the anti-farming cap (24 hours).
+const DEFAULT_REPUTATION_FARMING_WINDOW_SECS: u64 = 24 * 60 * 60;
+/// Max successful-trade increments credited inside one farming window.
+const DEFAULT_MAX_SUCCESSFUL_PER_WINDOW: u32 = 5;
+/// Bounded reputation history retained per user for abuse-pattern detection.
+const MAX_REPUTATION_HISTORY: u32 = 20;
+/// Cap decay intervals applied in one call to bound CPU (≈ 64 periods).
+const MAX_DECAY_INTERVALS_PER_CALL: u64 = 64;
 
 #[cfg(not(target_family = "wasm"))]
 #[path = "decimal_test_token.rs"]
@@ -658,6 +682,103 @@ pub struct OnboardingConfig {
     /// Address of the ESCROW_CONTRACT authorized to call `update_reputation` / `update_user_metrics`.
     /// If `None`, the `platform_admin` is used as fallback caller. (#63, #100)
     pub escrow_contract: Option<Address>,
+}
+
+/// Global policy controlling trust-score decay and anti-farming (#939).
+///
+/// Stored as a singleton under [`DataKey::ReputationPolicy`]. Admins mutate it
+/// via [`OnboardingContract::set_reputation_policy`]. When absent (legacy
+/// deployments), readers fall back to the compile-time defaults.
+///
+/// ## Policy semantics
+/// - Every `decay_interval_secs`, `trust_score` is multiplied by
+///   `(10_000 - decay_bps) / 10_000` (lazy, on read/write).
+/// - Successful increments are rejected while
+///   `now < last_success_update_at + update_cooldown_secs`.
+/// - Inside each `farming_window_secs` window, at most
+///   `max_successful_per_window` successful increments are credited.
+/// - Disputed increments are never delayed or capped — adverse outcomes always
+///   apply so bad actors cannot hide behind cooldown.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReputationPolicy {
+    /// Seconds between decay steps applied to `trust_score`.
+    pub decay_interval_secs: u64,
+    /// Basis points of trust score removed each decay interval (max 10_000).
+    pub decay_bps: u32,
+    /// Minimum seconds between credited successful trust-score increases.
+    pub update_cooldown_secs: u64,
+    /// Rolling window length for the anti-farming cap.
+    pub farming_window_secs: u64,
+    /// Maximum successful increments credited inside one farming window.
+    pub max_successful_per_window: u32,
+}
+
+/// Per-user decaying trust score and anti-farming window (#939).
+///
+/// Lifetime trade counters on [`UserProfile`] remain an audit trail; this state
+/// is the marketplace-facing trust metric that decays and resists farming.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReputationState {
+    /// Decaying trust score. +1 per credited success, −1 per dispute.
+    pub trust_score: u32,
+    /// Ledger timestamp when decay was last applied.
+    pub last_decay_at: u64,
+    /// Ledger timestamp of the last *credited* successful increment.
+    pub last_success_update_at: u64,
+    /// Start of the current anti-farming window.
+    pub window_started_at: u64,
+    /// Successful increments already credited in the current window.
+    pub window_successful_applied: u32,
+}
+
+/// Reason code for a reputation history entry (#939).
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[repr(u32)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+enum ReputationReasonCode {
+    /// Requested deltas were fully credited.
+    Applied = 0,
+    /// Successful delta blocked by update cooldown (disputes may still apply).
+    CooldownBlocked = 1,
+    /// Successful delta reduced or zeroed by the farming-window cap.
+    FarmingCapped = 2,
+}
+
+/// Public reputation history entry returned to clients (#939).
+///
+/// Indexers and abuse-detection tooling reconstruct farming / cooldown patterns
+/// from this log. `reason` is one of `"applied"`, `"cooldown_blocked"`,
+/// `"farming_capped"`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReputationHistoryEntry {
+    pub timestamp: u64,
+    pub successful_requested: u32,
+    pub disputed_requested: u32,
+    pub successful_applied: u32,
+    pub disputed_applied: u32,
+    pub trust_score_after: u32,
+    pub reason: Symbol,
+}
+
+/// Compact on-chain reputation history record (#939).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct CompactReputationHistoryEntry {
+    pub timestamp: u64,
+    pub successful_requested: u32,
+    pub disputed_requested: u32,
+    pub successful_applied: u32,
+    pub disputed_applied: u32,
+    pub trust_score_after: u32,
+    pub reason: ReputationReasonCode,
 }
 
 /// Errors returned by the onboarding contract.
@@ -1424,6 +1545,223 @@ impl OnboardingContract {
         Self::extend_persistent(env, &count_key);
     }
 
+    /// Default reputation decay / anti-farming policy (#939).
+    fn default_reputation_policy() -> ReputationPolicy {
+        ReputationPolicy {
+            decay_interval_secs: DEFAULT_REPUTATION_DECAY_INTERVAL_SECS,
+            decay_bps: DEFAULT_REPUTATION_DECAY_BPS,
+            update_cooldown_secs: DEFAULT_REPUTATION_UPDATE_COOLDOWN_SECS,
+            farming_window_secs: DEFAULT_REPUTATION_FARMING_WINDOW_SECS,
+            max_successful_per_window: DEFAULT_MAX_SUCCESSFUL_PER_WINDOW,
+        }
+    }
+
+    /// Load the reputation policy, falling back to compile-time defaults.
+    fn get_reputation_policy_internal(env: &Env) -> ReputationPolicy {
+        Self::read_persistent(env, &DataKey::ReputationPolicy)
+            .unwrap_or_else(Self::default_reputation_policy)
+    }
+
+    /// Load or initialize per-user reputation state.
+    fn get_or_init_reputation_state(env: &Env, user: &Address) -> ReputationState {
+        let key = DataKey::ReputationState(user.clone());
+        if let Some(state) = Self::read_persistent::<_, ReputationState>(env, &key) {
+            state
+        } else {
+            let now = env.ledger().timestamp();
+            ReputationState {
+                trust_score: 0,
+                last_decay_at: now,
+                last_success_update_at: 0,
+                window_started_at: now,
+                window_successful_applied: 0,
+            }
+        }
+    }
+
+    /// Persist reputation state and refresh TTL.
+    fn persist_reputation_state(env: &Env, user: &Address, state: &ReputationState) {
+        let key = DataKey::ReputationState(user.clone());
+        env.storage().persistent().set(&key, state);
+        Self::extend_persistent(env, &key);
+    }
+
+    /// Lazily apply time-based trust-score decay per policy (#939).
+    ///
+    /// Returns `true` when `trust_score` changed. Interval count is capped at
+    /// [`MAX_DECAY_INTERVALS_PER_CALL`] to bound CPU on long idle periods.
+    fn apply_reputation_decay(
+        env: &Env,
+        state: &mut ReputationState,
+        policy: &ReputationPolicy,
+    ) -> bool {
+        if policy.decay_interval_secs == 0 || policy.decay_bps == 0 || state.trust_score == 0 {
+            return false;
+        }
+
+        let now = env.ledger().timestamp();
+        if state.last_decay_at == 0 {
+            state.last_decay_at = now;
+            return false;
+        }
+        if now <= state.last_decay_at {
+            return false;
+        }
+
+        let elapsed = now - state.last_decay_at;
+        let mut intervals = elapsed / policy.decay_interval_secs;
+        if intervals == 0 {
+            return false;
+        }
+        if intervals > MAX_DECAY_INTERVALS_PER_CALL {
+            intervals = MAX_DECAY_INTERVALS_PER_CALL;
+        }
+
+        let retain_bps = REPUTATION_BPS_DENOMINATOR.saturating_sub(policy.decay_bps);
+        let mut score = state.trust_score as u128;
+        let mut applied = 0u64;
+        while applied < intervals && score > 0 {
+            score = score.saturating_mul(retain_bps as u128) / (REPUTATION_BPS_DENOMINATOR as u128);
+            applied += 1;
+        }
+
+        state.trust_score = score as u32;
+        state.last_decay_at = state
+            .last_decay_at
+            .saturating_add(applied.saturating_mul(policy.decay_interval_secs));
+        true
+    }
+
+    /// Compute how many successful increments may be credited under cooldown
+    /// and farming-window rules. Disputed deltas are never limited here.
+    fn credit_successful_delta(
+        env: &Env,
+        state: &mut ReputationState,
+        policy: &ReputationPolicy,
+        successful_delta: u32,
+    ) -> (u32, ReputationReasonCode) {
+        if successful_delta == 0 {
+            return (0, ReputationReasonCode::Applied);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Cooldown: reject rapid successful inflation.
+        if policy.update_cooldown_secs > 0
+            && state.last_success_update_at > 0
+            && now
+                < state
+                    .last_success_update_at
+                    .saturating_add(policy.update_cooldown_secs)
+        {
+            return (0, ReputationReasonCode::CooldownBlocked);
+        }
+
+        // Farming window: roll the window forward when expired.
+        if policy.farming_window_secs == 0 {
+            // Window disabled — credit fully (still subject to cooldown above).
+            return (successful_delta, ReputationReasonCode::Applied);
+        }
+
+        if now
+            >= state
+                .window_started_at
+                .saturating_add(policy.farming_window_secs)
+            || state.window_started_at == 0
+        {
+            state.window_started_at = now;
+            state.window_successful_applied = 0;
+        }
+
+        let remaining = policy
+            .max_successful_per_window
+            .saturating_sub(state.window_successful_applied);
+        if remaining == 0 {
+            return (0, ReputationReasonCode::FarmingCapped);
+        }
+
+        let applied = if successful_delta > remaining {
+            remaining
+        } else {
+            successful_delta
+        };
+
+        let reason = if applied < successful_delta {
+            ReputationReasonCode::FarmingCapped
+        } else {
+            ReputationReasonCode::Applied
+        };
+        (applied, reason)
+    }
+
+    fn reputation_reason_symbol(env: &Env, reason: ReputationReasonCode) -> Symbol {
+        match reason {
+            ReputationReasonCode::Applied => Symbol::new(env, "applied"),
+            ReputationReasonCode::CooldownBlocked => Symbol::new(env, "cooldown_blocked"),
+            ReputationReasonCode::FarmingCapped => Symbol::new(env, "farming_capped"),
+        }
+    }
+
+    /// Append a reputation history entry with FIFO circular-buffer semantics (#939).
+    fn append_reputation_history(
+        env: &Env,
+        user: &Address,
+        successful_requested: u32,
+        disputed_requested: u32,
+        successful_applied: u32,
+        disputed_applied: u32,
+        trust_score_after: u32,
+        reason: ReputationReasonCode,
+    ) {
+        let count_key = DataKey::ReputationHistoryCount(user.clone());
+        let count: u32 = if let Some(c) = env.storage().persistent().get(&count_key) {
+            Self::extend_persistent(env, &count_key);
+            c
+        } else {
+            0
+        };
+
+        let slot = if count >= MAX_REPUTATION_HISTORY {
+            for i in 1..MAX_REPUTATION_HISTORY {
+                let src_key = DataKey::ReputationHistoryIndexed(user.clone(), i);
+                if let Some(entry) = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, CompactReputationHistoryEntry>(&src_key)
+                {
+                    let dst_key = DataKey::ReputationHistoryIndexed(user.clone(), i - 1);
+                    env.storage().persistent().set(&dst_key, &entry);
+                    Self::extend_persistent(env, &dst_key);
+                    env.storage().persistent().remove(&src_key);
+                }
+            }
+            MAX_REPUTATION_HISTORY - 1
+        } else {
+            count
+        };
+
+        let entry = CompactReputationHistoryEntry {
+            timestamp: env.ledger().timestamp(),
+            successful_requested,
+            disputed_requested,
+            successful_applied,
+            disputed_applied,
+            trust_score_after,
+            reason,
+        };
+        let entry_key = DataKey::ReputationHistoryIndexed(user.clone(), slot);
+        env.storage().persistent().set(&entry_key, &entry);
+        Self::extend_persistent(env, &entry_key);
+
+        let new_count = if count >= MAX_REPUTATION_HISTORY {
+            MAX_REPUTATION_HISTORY
+        } else {
+            count + 1
+        };
+        env.storage().persistent().set(&count_key, &new_count);
+        Self::extend_persistent(env, &count_key);
+    }
+
     fn collect_username_change_fee(
         env: &Env,
         user: &Address,
@@ -1843,6 +2181,13 @@ impl OnboardingContract {
         // Store the configuration
         env.storage().persistent().set(&DataKey::Config, &config);
         Self::extend_persistent(&env, &DataKey::Config);
+
+        // Issue #939 — seed default reputation decay / anti-farming policy.
+        let reputation_policy = Self::default_reputation_policy();
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReputationPolicy, &reputation_policy);
+        Self::extend_persistent(&env, &DataKey::ReputationPolicy);
 
         let admin_username = String::from_str(&env, "admin");
         let normalized = normalize_username(&env, &admin_username);
@@ -3749,13 +4094,22 @@ impl OnboardingContract {
 
     // -----------------------------------------------------------------------
     // Issue #100 – Reputation System (Trust Score)
+    // Issue #939 – Reputation Decay & Anti-Farming Controls
     // -----------------------------------------------------------------------
 
-    /// Update a user's reputation counters.
+    /// Update a user's reputation counters and decaying trust score.
     ///
     /// Called by the ESCROW_CONTRACT after a state change (release / refund /
-    /// resolve). Increments `successful_trades` and/or `disputed_trades` on
-    /// the user's profile using saturating addition to prevent overflow.
+    /// resolve). Lifetime counters (`successful_trades` / `disputed_trades`)
+    /// and the marketplace `trust_score` are updated using saturating arithmetic.
+    ///
+    /// ## Anti-farming & decay (#939)
+    /// Before applying deltas the contract:
+    /// 1. Lazily decays `trust_score` per [`ReputationPolicy`].
+    /// 2. Enforces an update cooldown on *successful* increments.
+    /// 3. Caps successful increments inside the farming window.
+    /// Disputed increments always apply in full. Blocked or capped attempts are
+    /// still recorded in reputation history so abuse patterns are detectable.
     /// Silently skips users who are not onboarded (no panic).
     ///
     /// ## Auth
@@ -3764,8 +4118,8 @@ impl OnboardingContract {
     ///
     /// # Parameters
     /// - `address`: `Address` — User whose counters to update.
-    /// - `successful_delta`: `u32` — Amount to add to `successful_trades`.
-    /// - `disputed_delta`: `u32` — Amount to add to `disputed_trades`.
+    /// - `successful_delta`: `u32` — Requested amount to add to successful trades.
+    /// - `disputed_delta`: `u32` — Amount to add to disputed trades (always applied).
     ///
     /// # Preconditions
     /// - Contract must be initialized.
@@ -3773,7 +4127,10 @@ impl OnboardingContract {
     ///
     /// # Storage Side-Effects
     /// - **Read** [`DataKey::Config`] — reads auth address, TTL extended.
-    /// - **Read/Write** [`DataKey::UserProfile(address)`] — counters updated, TTL extended.
+    /// - **Read** [`DataKey::ReputationPolicy`] — decay / farming rules.
+    /// - **Read/Write** [`DataKey::UserProfile(address)`] — lifetime counters.
+    /// - **Read/Write** [`DataKey::ReputationState(address)`] — trust score + window.
+    /// - **Write** reputation history keys — append audit entry.
     ///   No-op (returns early) if profile does not exist.
     ///
     /// # Emitted Events
@@ -3804,15 +4161,58 @@ impl OnboardingContract {
             None => return, // User not onboarded; skip silently
         };
 
-        profile.successful_trades = profile.successful_trades.saturating_add(successful_delta);
-        profile.disputed_trades = profile.disputed_trades.saturating_add(disputed_delta);
+        if successful_delta == 0 && disputed_delta == 0 {
+            return;
+        }
+
+        let policy = Self::get_reputation_policy_internal(&env);
+        let mut state = Self::get_or_init_reputation_state(&env, &address);
+        Self::apply_reputation_decay(&env, &mut state, &policy);
+
+        let (successful_applied, success_reason) =
+            Self::credit_successful_delta(&env, &mut state, &policy, successful_delta);
+        // Adverse outcomes always apply — cooldown/farming must not shield bad actors.
+        let disputed_applied = disputed_delta;
+
+        let reason = if successful_delta > 0 {
+            success_reason
+        } else {
+            ReputationReasonCode::Applied
+        };
+
+        profile.successful_trades = profile.successful_trades.saturating_add(successful_applied);
+        profile.disputed_trades = profile.disputed_trades.saturating_add(disputed_applied);
+
+        state.trust_score = state.trust_score.saturating_add(successful_applied);
+        state.trust_score = state.trust_score.saturating_sub(disputed_applied);
+
+        if successful_applied > 0 {
+            let now = env.ledger().timestamp();
+            state.last_success_update_at = now;
+            state.window_successful_applied = state
+                .window_successful_applied
+                .saturating_add(successful_applied);
+        }
 
         Self::persist_public_user_profile(&env, &address, &profile);
+        Self::persist_reputation_state(&env, &address, &state);
+        Self::append_reputation_history(
+            &env,
+            &address,
+            successful_delta,
+            disputed_delta,
+            successful_applied,
+            disputed_applied,
+            state.trust_score,
+            reason,
+        );
     }
 
-    /// Get a user's reputation counters.
+    /// Get a user's lifetime reputation counters.
     ///
     /// Returns `(0, 0)` for unknown addresses — never panics.
+    /// Lifetime counters are an audit trail; for the decaying marketplace
+    /// trust metric see [`get_trust_score`] (#939).
     ///
     /// # Parameters
     /// - `address`: `Address` — The user to query.
@@ -3835,6 +4235,133 @@ impl OnboardingContract {
             Some(profile) => (profile.successful_trades, profile.disputed_trades),
             None => (0, 0),
         }
+    }
+
+    /// Get a user's decaying trust score (#939).
+    ///
+    /// Lazily applies reputation decay before returning so callers always see
+    /// a current score without needing a background job. Returns `0` for
+    /// unknown addresses.
+    ///
+    /// # Auth
+    /// Requires `address.require_auth()` (same sensitivity as reputation reads).
+    pub fn get_trust_score(env: Env, address: Address) -> u32 {
+        address.require_auth();
+        if Self::try_get_user_profile(&env, address.clone()).is_none() {
+            return 0;
+        }
+
+        let policy = Self::get_reputation_policy_internal(&env);
+        let mut state = Self::get_or_init_reputation_state(&env, &address);
+        if Self::apply_reputation_decay(&env, &mut state, &policy) {
+            Self::persist_reputation_state(&env, &address, &state);
+        }
+        state.trust_score
+    }
+
+    /// Get the full per-user reputation state (#939).
+    ///
+    /// Useful for dashboards that need window counters alongside the trust
+    /// score. Applies lazy decay. Returns a zeroed state for unknown users.
+    pub fn get_reputation_state(env: Env, address: Address) -> ReputationState {
+        address.require_auth();
+        if Self::try_get_user_profile(&env, address.clone()).is_none() {
+            return ReputationState {
+                trust_score: 0,
+                last_decay_at: 0,
+                last_success_update_at: 0,
+                window_started_at: 0,
+                window_successful_applied: 0,
+            };
+        }
+
+        let policy = Self::get_reputation_policy_internal(&env);
+        let mut state = Self::get_or_init_reputation_state(&env, &address);
+        if Self::apply_reputation_decay(&env, &mut state, &policy) {
+            Self::persist_reputation_state(&env, &address, &state);
+        }
+        state
+    }
+
+    /// Return recent reputation change history for abuse-pattern detection (#939).
+    ///
+    /// Entries are ordered oldest → newest within the bounded window
+    /// ([`MAX_REPUTATION_HISTORY`]). Blocked farming / cooldown attempts are
+    /// included so repeated low-risk inflation attempts are visible.
+    pub fn get_reputation_history(env: Env, address: Address) -> Vec<ReputationHistoryEntry> {
+        address.require_auth();
+
+        let count_key = DataKey::ReputationHistoryCount(address.clone());
+        let count: u32 = Self::read_persistent(&env, &count_key).unwrap_or(0);
+
+        let mut result = Vec::new(&env);
+        for index in 0..count {
+            let entry_key = DataKey::ReputationHistoryIndexed(address.clone(), index);
+            if let Some(compact) =
+                Self::read_persistent::<_, CompactReputationHistoryEntry>(&env, &entry_key)
+            {
+                result.push_back(ReputationHistoryEntry {
+                    timestamp: compact.timestamp,
+                    successful_requested: compact.successful_requested,
+                    disputed_requested: compact.disputed_requested,
+                    successful_applied: compact.successful_applied,
+                    disputed_applied: compact.disputed_applied,
+                    trust_score_after: compact.trust_score_after,
+                    reason: Self::reputation_reason_symbol(&env, compact.reason),
+                });
+            }
+        }
+        result
+    }
+
+    /// Read the active reputation decay / anti-farming policy (#939).
+    pub fn get_reputation_policy(env: Env) -> ReputationPolicy {
+        Self::get_reputation_policy_internal(&env)
+    }
+
+    /// Set the reputation decay / anti-farming policy (admin only, #939).
+    ///
+    /// # Parameters
+    /// - `decay_interval_secs`: Seconds between decay steps (`0` disables decay).
+    /// - `decay_bps`: Basis points removed each interval (must be ≤ 10_000).
+    /// - `update_cooldown_secs`: Min seconds between successful credit (`0` disables).
+    /// - `farming_window_secs`: Anti-farming window length (`0` disables the cap).
+    /// - `max_successful_per_window`: Max successful credits per window.
+    ///
+    /// # Errors
+    /// - Panics with [`Error::NotInitialized`] if config is missing.
+    /// - Panics with [`Error::InvalidReputationPolicy`] if `decay_bps > 10_000`.
+    pub fn set_reputation_policy(
+        env: Env,
+        decay_interval_secs: u64,
+        decay_bps: u32,
+        update_cooldown_secs: u64,
+        farming_window_secs: u64,
+        max_successful_per_window: u32,
+    ) {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+
+        config.platform_admin.require_auth();
+
+        if decay_bps > REPUTATION_BPS_DENOMINATOR {
+            env.panic_with_error(Error::InvalidReputationPolicy);
+        }
+
+        let policy = ReputationPolicy {
+            decay_interval_secs,
+            decay_bps,
+            update_cooldown_secs,
+            farming_window_secs,
+            max_successful_per_window,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReputationPolicy, &policy);
+        Self::extend_persistent(&env, &DataKey::ReputationPolicy);
     }
 
     // -----------------------------------------------------------------------

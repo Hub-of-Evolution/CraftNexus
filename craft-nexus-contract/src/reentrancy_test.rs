@@ -2,9 +2,110 @@
 
 use super::*;
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{Address as _, Ledger},
     token, Address, Env, Symbol,
 };
+
+#[contract]
+struct CallbackToken;
+
+#[contractimpl]
+impl CallbackToken {
+    pub fn initialize(env: Env, target: Address, order_id: u32) {
+        env.storage().instance().set(&Symbol::new(&env, "target"), &target);
+        env.storage().instance().set(&Symbol::new(&env, "order"), &order_id);
+    }
+
+    pub fn decimals(_env: Env) -> u32 {
+        7
+    }
+
+    pub fn balance(_env: Env, _id: Address) -> i128 {
+        1_000_000
+    }
+
+    pub fn transfer(env: Env, _from: Address, _to: Address, _amount: i128) {
+        let target: Address = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "target"))
+            .unwrap();
+        let order_id: u32 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "order"))
+            .unwrap();
+        CraftNexusContractClient::new(&env, &target).release_funds(&order_id);
+    }
+}
+
+#[contract]
+struct UnsupportedTokenContract;
+
+#[contractimpl]
+impl UnsupportedTokenContract {
+    pub fn ping(_env: Env) {}
+}
+
+#[test]
+fn admin_cannot_whitelist_unsupported_token_contract() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    client.initialize(
+        &Address::generate(&env),
+        &admin,
+        &Address::generate(&env),
+        &500,
+        &None,
+    );
+
+    let unsupported = env.register_contract(None, UnsupportedTokenContract);
+    assert_eq!(
+        client.try_whitelist_token(&unsupported),
+        Err(Ok(Error::UnsupportedToken))
+    );
+    assert_eq!(client.get_whitelisted_token_count(), 0);
+}
+
+#[test]
+fn malicious_token_callback_is_rejected_and_rolls_back() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.budget().reset_unlimited();
+
+    let admin = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let seller = Address::generate(&env);
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    client.initialize(
+        &Address::generate(&env),
+        &admin,
+        &Address::generate(&env),
+        &500,
+        &None,
+    );
+
+    let order_id = 991u32;
+    let token_id = env.register_contract(None, CallbackToken);
+    CallbackTokenClient::new(&env, &token_id).initialize(&contract_id, &order_id);
+
+    assert!(client
+        .try_create_escrow(
+            &buyer,
+            &seller,
+            &token_id,
+            &5_000,
+            &order_id,
+            &Some(86_400),
+        )
+        .is_err());
+    assert!(client.try_get_escrow(&order_id).is_err());
+}
 
 #[test]
 fn test_release_cei_pattern() {
