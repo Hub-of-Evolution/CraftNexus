@@ -945,6 +945,102 @@ fn test_admin_clear_verification_request_does_not_verify() {
     assert!(!client.is_verified(&user));
 }
 
+// ============================================================
+// Issue #730 – verification queue count underflow on multi-admin races
+// ============================================================
+
+fn read_verification_queue_count(env: &Env, contract: &Address) -> u32 {
+    env.as_contract(contract, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VerificationQueueCount)
+            .unwrap_or(0u32)
+    })
+}
+
+/// Pending request count increments on enqueue and decrements once on clear.
+#[test]
+fn test_verification_queue_count_tracks_pending_requests() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    client.onboard_user(&user_a, &String::from_str(&env, "qcnt_a"), &UserRole::Artisan);
+    client.onboard_user(&user_b, &String::from_str(&env, "qcnt_b"), &UserRole::Artisan);
+
+    assert_eq!(read_verification_queue_count(&env, &client.address), 0);
+
+    client.request_verification(&user_a);
+    assert_eq!(read_verification_queue_count(&env, &client.address), 1);
+
+    client.request_verification(&user_b);
+    assert_eq!(read_verification_queue_count(&env, &client.address), 2);
+
+    client.admin_clear_verification_request(&user_a);
+    assert_eq!(read_verification_queue_count(&env, &client.address), 1);
+
+    client.process_verification_request(&user_b, &true);
+    assert_eq!(read_verification_queue_count(&env, &client.address), 0);
+}
+
+/// Two sequential admin clears of the same request must not drive the count negative.
+#[test]
+fn test_verification_queue_count_not_negative_on_double_clear() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "race_clr"), &UserRole::Artisan);
+
+    client.request_verification(&user);
+    assert_eq!(read_verification_queue_count(&env, &client.address), 1);
+
+    // First admin wins the clear.
+    assert!(client.admin_clear_verification_request(&user));
+    assert_eq!(read_verification_queue_count(&env, &client.address), 0);
+
+    // Second admin's concurrent clear is a no-op for the counter (#730).
+    assert!(!client.admin_clear_verification_request(&user));
+    assert_eq!(
+        read_verification_queue_count(&env, &client.address),
+        0,
+        "queue count must stay non-negative after a raced second clear"
+    );
+    assert_eq!(client.get_verification_queue().len(), 0);
+}
+
+/// Approve then clear (or double-process) must not underflow the pending count.
+#[test]
+fn test_verification_queue_count_not_negative_on_process_then_clear() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "race_proc"), &UserRole::Artisan);
+
+    client.request_verification(&user);
+    assert_eq!(read_verification_queue_count(&env, &client.address), 1);
+
+    // Admin A approves (clears + decrements once).
+    client.process_verification_request(&user, &true);
+    assert_eq!(read_verification_queue_count(&env, &client.address), 0);
+
+    // Admin B races a clear / second process against the same request.
+    assert!(!client.admin_clear_verification_request(&user));
+    client.process_verification_request(&user, &true);
+
+    assert_eq!(
+        read_verification_queue_count(&env, &client.address),
+        0,
+        "queue count must stay non-negative after process+clear race"
+    );
+    assert_eq!(client.get_verification_queue().len(), 0);
+}
+
 /// Verification history is tracked across request, approve, and auto-verify actions.
 #[test]
 fn test_verification_history_tracking() {
