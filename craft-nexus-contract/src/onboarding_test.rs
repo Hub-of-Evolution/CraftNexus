@@ -2921,3 +2921,224 @@ fn test_profile_read_budget_smoke() {
     let _ = client.get_user_reputation(&user);
     let _ = client.get_user_metrics(&user);
 }
+
+// ===================================================================
+//  Role Transition Tests (Issue #926)
+// ===================================================================
+
+#[test]
+fn test_role_transition_moderator_two_step() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "testuser"), &UserRole::Buyer);
+
+    // Propose Moderator role (admin calls update_user_role which triggers two-step)
+    let profile = client.update_user_role(&user, &UserRole::Moderator);
+    // Profile should still show Buyer role (pending confirmation)
+    assert_eq!(profile.role, UserRole::Buyer);
+
+    // Verify transition was created
+    let nonce: u64 = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RoleTransitionNonce)
+            .unwrap_or(0)
+    });
+    assert_eq!(nonce, 1);
+
+    // Target user confirms the role change
+    let confirmed = client.confirm_role_change(&user);
+    assert_eq!(confirmed.role, UserRole::Moderator);
+
+    // Transition should be Confirmed
+    let transition: PendingRoleChange = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingRoleChange(1))
+            .unwrap()
+    });
+    assert_eq!(transition.status, RoleTransitionStatus::Confirmed);
+}
+
+#[test]
+fn test_role_transition_propose_role_change() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "artisan1"), &UserRole::Buyer);
+
+    let transition = client.propose_role_change(&user, &UserRole::Moderator);
+    assert_eq!(transition.status, RoleTransitionStatus::Pending);
+    assert_eq!(transition.target_user, user);
+    assert_eq!(transition.current_role, UserRole::Buyer);
+    assert_eq!(transition.proposed_role, UserRole::Moderator);
+    assert!(transition.nonce > 0);
+}
+
+#[test]
+fn test_role_transition_cancel() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "user2"), &UserRole::Buyer);
+    client.propose_role_change(&user, &UserRole::Moderator);
+
+    client.cancel_role_change(&user);
+
+    let transition: PendingRoleChange = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingRoleChange(1))
+            .unwrap()
+    });
+    assert_eq!(transition.status, RoleTransitionStatus::Cancelled);
+
+    // User should still have Buyer role
+    let profile = client.get_user(&user);
+    assert_eq!(profile.role, UserRole::Buyer);
+}
+
+#[test]
+fn test_role_transition_expiry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "user3"), &UserRole::Buyer);
+    client.propose_role_change(&user, &UserRole::Moderator);
+
+    // Advance past 7-day TTL
+    env.ledger().with_mut(|li| {
+        li.timestamp += 7 * 24 * 60 * 60 + 1;
+    });
+
+    let result = client.try_confirm_role_change(&user);
+    assert!(result.is_err());
+
+    let transition: PendingRoleChange = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingRoleChange(1))
+            .unwrap()
+    });
+    assert_eq!(transition.status, RoleTransitionStatus::Expired);
+}
+
+#[test]
+fn test_role_transition_get_by_nonce() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "user4"), &UserRole::Buyer);
+    client.propose_role_change(&user, &UserRole::Moderator);
+
+    let fetched = client.get_pending_role_change(&1u64);
+    assert!(fetched.is_some());
+    let t = fetched.unwrap();
+    assert_eq!(t.target_user, user);
+    assert_eq!(t.proposed_role, UserRole::Moderator);
+}
+
+#[test]
+fn test_role_transition_expire_role_change_idempotent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "user5"), &UserRole::Buyer);
+    client.propose_role_change(&user, &UserRole::Moderator);
+
+    // Advance past TTL
+    env.ledger().with_mut(|li| {
+        li.timestamp += 7 * 24 * 60 * 60 + 1;
+    });
+
+    // expire_role_change should be idempotent
+    client.expire_role_change(&user);
+    // Second call should succeed without error (silent no-op)
+    client.expire_role_change(&user);
+
+    let transition: PendingRoleChange = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingRoleChange(1))
+            .unwrap()
+    });
+    assert_eq!(transition.status, RoleTransitionStatus::Expired);
+}
+
+#[test]
+fn test_role_transition_confirmation_by_non_target_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    let other = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "user6"), &UserRole::Buyer);
+    client.onboard_user(&other, &String::from_str(&env, "other"), &UserRole::Buyer);
+    client.propose_role_change(&user, &UserRole::Moderator);
+
+    // other cannot confirm user's role change
+    let result = client.try_confirm_role_change(&other);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_role_transition_immediate_buyer_artisan() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "user7"), &UserRole::Buyer);
+
+    // Buyer -> Artisan should be immediate (no two-step)
+    let profile = client.update_user_role(&user, &UserRole::Artisan);
+    assert_eq!(profile.role, UserRole::Artisan);
+}
+
+#[test]
+fn test_role_transition_nonce_is_monotonically_increasing() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin) = setup_test(&env);
+
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    client.onboard_user(&user1, &String::from_str(&env, "user8"), &UserRole::Buyer);
+    client.onboard_user(&user2, &String::from_str(&env, "user9"), &UserRole::Buyer);
+
+    client.propose_role_change(&user1, &UserRole::Moderator);
+    client.cancel_role_change(&user1);
+    client.propose_role_change(&user2, &UserRole::Moderator);
+
+    let nonce: u64 = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RoleTransitionNonce)
+            .unwrap_or(0)
+    });
+    assert_eq!(nonce, 2);
+
+    // First transition is Cancelled, second is Pending
+    let t1: PendingRoleChange = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&DataKey::PendingRoleChange(1)).unwrap()
+    });
+    let t2: PendingRoleChange = env.as_contract(&client.address, || {
+        env.storage().persistent().get(&DataKey::PendingRoleChange(2)).unwrap()
+    });
+    assert_eq!(t1.status, RoleTransitionStatus::Cancelled);
+    assert_eq!(t2.status, RoleTransitionStatus::Pending);
+}
