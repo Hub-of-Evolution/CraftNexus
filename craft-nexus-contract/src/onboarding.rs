@@ -197,6 +197,45 @@ pub enum DataKey {
     UsernameChangeFeeWallet,
     /// Timestamp of last username change per user - Issue #114
     LastUsernameChange(Address),
+    /// Monotonically increasing nonce for role transitions (Issue #926).
+    /// Each `propose_role_change` increments this counter for unique transition IDs.
+    RoleTransitionNonce,
+    /// A pending role change proposal keyed by its unique nonce (Issue #926).
+    /// Stores [`PendingRoleChange`] with lifecycle state, target user, and new role.
+    PendingRoleChange(u64),
+}
+
+/// Maximum lifetime of a pending role change before it expires (7 days).
+/// Issue #926
+const ROLE_TRANSITION_TTL: u64 = 7 * 24 * 60 * 60;
+/// Hard ceiling for RoleTransitionNonce to prevent wrapping.
+const MAX_ROLE_TRANSITION_NONCE: u64 = u64::MAX - 1;
+
+/// Lifecycle status of a role transition (Issue #926).
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum RoleTransitionStatus {
+    Pending = 0,
+    Confirmed = 1,
+    Cancelled = 2,
+    Expired = 3,
+}
+
+/// On-chain record of a pending two-step role change (Issue #926).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PendingRoleChange {
+    pub nonce: u64,
+    pub status: RoleTransitionStatus,
+    pub initiator: Address,
+    pub target_user: Address,
+    pub current_role: UserRole,
+    pub proposed_role: UserRole,
+    pub created_at: u64,
+    pub expires_at: u64,
 }
 
 /// User roles in the CraftNexus platform.
@@ -661,6 +700,21 @@ pub enum Error {
     ActiveContractUnderflow = 15,
     /// The escrow contract is paused — onboarding is temporarily disabled
     ContractPaused = 16,
+    // ─── Role Transition Errors (17–25) ───
+    /// No pending role change found for the specified user or nonce
+    TransitionNotFound = 17,
+    /// Role transition has expired and can no longer be confirmed
+    TransitionExpired = 18,
+    /// Role transition has already been completed (confirmed or cancelled)
+    TransitionAlreadyCompleted = 19,
+    /// Role transition is not in the Pending state
+    TransitionNotPending = 20,
+    /// Duplicate confirmation attempt on an already-executed transition
+    DuplicateConfirmation = 21,
+    /// Transition nonce has wrapped — ID space is exhausted
+    TransitionNonceExhausted = 22,
+    /// Caller is not the intended target of this role transition
+    TransitionOwnershipMismatch = 23,
 }
 
 /// Cross-contract interface the onboarding contract uses to query the escrow
@@ -2424,6 +2478,11 @@ impl OnboardingContract {
     /// - User not found in persistent storage
     /// - New role is Admin or None (invalid assignment - prevents unauthorized role escalation)
     /// - Config not initialized
+    ///
+    /// # Two-Step Transition (Issue #926)
+    /// For `Admin` and `Moderator` roles, this function now delegates to
+    /// [`propose_role_change`] to enforce a two-step confirmation workflow.
+    /// This prevents immediate role escalation without a cooldown window.
     pub fn update_user_role(env: Env, user: Address, new_role: UserRole) -> UserProfile {
         // Security: Get config to verify admin authorization
         let config: OnboardingConfig = env
@@ -2448,23 +2507,240 @@ impl OnboardingContract {
         // Fetch and validate existing profile; reject deactivated accounts before mutation
         let mut profile = Self::assert_user_onboarded_and_active(&env, user.clone());
 
-        // [SECURITY] Prevent unnecessary state mutations and replay attacks
-        // by recording state transition audit trail for forensic analysis
-        let old_role = profile.role.clone();
-        profile.role = new_role.clone();
+        // [SECURITY] Issue #926 — privileged role changes (Moderator)
+        // now require a two-step confirmation by the target user.
+        // Buyer/Artisan transitions remain immediate for UX reasons.
+        let old_role = profile.role;
+        match new_role {
+            UserRole::Moderator => {
+                // Delegate to two-step flow: propose, then the target confirms.
+                return Self::propose_role_change_internal(&env, user, new_role, old_role, &config);
+            }
+            _ => {
+                // Buyer, Artisan — immediate transition with audit event.
+                profile.role = new_role;
+                Self::persist_public_user_profile(&env, &user, &profile);
+                env.events().publish(
+                    (Symbol::new(&env, "RoleUpdated"),),
+                    (user.clone(), old_role, new_role),
+                );
+                return profile;
+            }
+        }
+    }
 
-        // Store updated profile
+    /// Propose a role change for a user (admin only). Creates a two-step
+    /// transition that the target user must confirm (Issue #926).
+    pub fn propose_role_change(env: Env, user: Address, new_role: UserRole) -> PendingRoleChange {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        config.platform_admin.require_auth();
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        let profile = Self::assert_user_onboarded_and_active(&env, user.clone());
+        let current_role = profile.role;
+
+        Self::propose_role_change_internal(&env, user, new_role, current_role, &config);
+
+        // Return the newly created PendingRoleChange from storage.
+        let nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoleTransitionNonce)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .get(&DataKey::PendingRoleChange(nonce))
+            .unwrap_or_else(|| env.panic_with_error(Error::TransitionNotFound))
+    }
+
+    /// Confirm a pending role change (target user only).
+    /// The target user must sign to accept the new role (Issue #926).
+    pub fn confirm_role_change(env: Env, user: Address) -> UserProfile {
+        user.require_auth();
+
+        // Locate the most recent pending transition for this user.
+        let nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoleTransitionNonce)
+            .unwrap_or(0);
+        let mut found: Option<PendingRoleChange> = None;
+        let mut scan = nonce;
+        while scan > 0 {
+            let key = DataKey::PendingRoleChange(scan);
+            if let Some(t) = env.storage().persistent().get::<_, PendingRoleChange>(&key) {
+                Self::extend_persistent(&env, &key);
+                if t.target_user == user && t.status == RoleTransitionStatus::Pending {
+                    if env.ledger().timestamp() >= t.expires_at {
+                        let mut expired = t.clone();
+                        expired.status = RoleTransitionStatus::Expired;
+                        Self::persist_role_change(&env, &expired);
+                        env.events().publish(
+                            (Symbol::new(&env, "RoleChangeExpired"),),
+                            (user.clone(), t.current_role, t.proposed_role, t.nonce),
+                        );
+                        env.panic_with_error(Error::TransitionExpired);
+                    }
+                    found = Some(t);
+                    break;
+                }
+            }
+            scan -= 1;
+        }
+
+        let transition = found.unwrap_or_else(|| env.panic_with_error(Error::TransitionNotFound));
+
+        // Apply the role change.
+        let mut profile = Self::assert_user_onboarded_and_active(&env, user.clone());
+        let old_role = profile.role;
+        profile.role = transition.proposed_role;
         Self::persist_public_user_profile(&env, &user, &profile);
 
-        // Issue #520 — event now carries (user, old_role, new_role) so
-        // downstream consumers don't need a follow-up read to know what
-        // the role transitioned from.
+        // Mark transition as confirmed.
+        let mut confirmed = transition.clone();
+        confirmed.status = RoleTransitionStatus::Confirmed;
+        Self::persist_role_change(&env, &confirmed);
+
         env.events().publish(
             (Symbol::new(&env, "RoleUpdated"),),
-            (user.clone(), old_role, new_role),
+            (user.clone(), old_role, transition.proposed_role),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "RoleChangeConfirmed"),),
+            (user.clone(), transition.nonce, old_role, transition.proposed_role),
         );
 
         profile
+    }
+
+    /// Cancel a pending role change (admin only) — Issue #926.
+    pub fn cancel_role_change(env: Env, user: Address) {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        config.platform_admin.require_auth();
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        let nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoleTransitionNonce)
+            .unwrap_or(0);
+        let mut scan = nonce;
+        while scan > 0 {
+            let key = DataKey::PendingRoleChange(scan);
+            if let Some(mut t) = env.storage().persistent().get::<_, PendingRoleChange>(&key) {
+                Self::extend_persistent(&env, &key);
+                if t.target_user == user && t.status == RoleTransitionStatus::Pending {
+                    t.status = RoleTransitionStatus::Cancelled;
+                    Self::persist_role_change(&env, &t);
+                    env.events().publish(
+                        (Symbol::new(&env, "RoleChangeCancelled"),),
+                        (user.clone(), t.nonce, t.current_role, t.proposed_role),
+                    );
+                    return;
+                }
+            }
+            scan -= 1;
+        }
+        env.panic_with_error(Error::TransitionNotFound);
+    }
+
+    /// Force-expire a pending role change (admin or anyone, typically called
+    /// by an indexer bot) — Issue #926.
+    pub fn expire_role_change(env: Env, user: Address) {
+        let nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoleTransitionNonce)
+            .unwrap_or(0);
+        let mut scan = nonce;
+        while scan > 0 {
+            let key = DataKey::PendingRoleChange(scan);
+            if let Some(mut t) = env.storage().persistent().get::<_, PendingRoleChange>(&key) {
+                Self::extend_persistent(&env, &key);
+                if t.target_user == user
+                    && t.status == RoleTransitionStatus::Pending
+                    && env.ledger().timestamp() >= t.expires_at
+                {
+                    t.status = RoleTransitionStatus::Expired;
+                    Self::persist_role_change(&env, &t);
+                    env.events().publish(
+                        (Symbol::new(&env, "RoleChangeExpired"),),
+                        (user.clone(), t.nonce, t.current_role, t.proposed_role),
+                    );
+                    return;
+                }
+            }
+            scan -= 1;
+        }
+        // No pending or expired transition — silent no-op for idempotency.
+    }
+
+    /// Get a pending role change by nonce (Issue #926).
+    pub fn get_pending_role_change(env: Env, nonce: u64) -> Option<PendingRoleChange> {
+        Self::read_persistent(&env, &DataKey::PendingRoleChange(nonce))
+    }
+
+    // ─── Internal helpers for role transitions ───
+
+    fn propose_role_change_internal(
+        env: &Env,
+        user: Address,
+        new_role: UserRole,
+        current_role: UserRole,
+        config: &OnboardingConfig,
+    ) -> UserProfile {
+        let now = env.ledger().timestamp();
+
+        // Allocate a unique nonce.
+        let nonce_key = DataKey::RoleTransitionNonce;
+        let current_nonce: u64 = env.storage().persistent().get(&nonce_key).unwrap_or(0);
+        if current_nonce >= MAX_ROLE_TRANSITION_NONCE {
+            env.panic_with_error(Error::TransitionNonceExhausted);
+        }
+        let nonce = current_nonce + 1;
+        env.storage().persistent().set(&nonce_key, &nonce);
+        Self::extend_persistent(env, &nonce_key);
+
+        let transition = PendingRoleChange {
+            nonce,
+            status: RoleTransitionStatus::Pending,
+            initiator: config.platform_admin.clone(),
+            target_user: user.clone(),
+            current_role,
+            proposed_role: new_role,
+            created_at: now,
+            expires_at: now + ROLE_TRANSITION_TTL,
+        };
+        Self::persist_role_change(env, &transition);
+
+        env.events().publish(
+            (Symbol::new(env, "RoleChangeProposed"),),
+            (
+                user.clone(),
+                nonce,
+                current_role,
+                new_role,
+                config.platform_admin.clone(),
+                now,
+            ),
+        );
+
+        // Return the *current* profile (role unchanged until confirmation).
+        Self::assert_user_onboarded_and_active(env, user)
+    }
+
+    fn persist_role_change(env: &Env, t: &PendingRoleChange) {
+        let key = DataKey::PendingRoleChange(t.nonce);
+        env.storage().persistent().set(&key, t);
+        Self::extend_persistent(env, &key);
     }
 
     /// Deactivate the user's profile and release their username.

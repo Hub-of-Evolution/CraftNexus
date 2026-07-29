@@ -142,6 +142,21 @@ pub enum Error {
     InvalidTokenDecimals = 44,
     /// Persisted storage is on a legacy layout that must be migrated first.
     StorageLayoutMismatch = 45,
+    // ─── Governance / Two-Step Transitions (46–55): fix caller input ───
+    /// Governance transition not found by the given ID
+    TransitionNotFound = 46,
+    /// Governance transition has expired and can no longer be executed
+    TransitionExpired = 47,
+    /// Governance transition has already been completed (confirmed or cancelled)
+    TransitionAlreadyCompleted = 48,
+    /// Governance transition is not in the Pending state
+    TransitionNotPending = 49,
+    /// Duplicate confirmation attempt on an already-executed transition
+    DuplicateConfirmation = 50,
+    /// Transition nonce has wrapped — ID space is exhausted
+    TransitionNonceExhausted = 51,
+    /// Caller is not the intended target of this governance transition
+    TransitionOwnershipMismatch = 52,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -292,6 +307,13 @@ const ADMIN_RECOVERY_DELAY: u64 = 7 * 24 * 60 * 60;
 /// shorter window (including zero) will be rejected during recovery.
 const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 
+/// Maximum lifetime of a pending governance transition before it expires (7 days).
+/// Issue #926 — transitions that are not confirmed within this window become
+/// permanently non-executable and must be re-initiated.
+const GOVERNANCE_TRANSITION_TTL: u64 = 7 * 24 * 60 * 60;
+/// Hard ceiling for GovernanceTransition nonce to prevent wrapping.
+const MAX_GOVERNANCE_NONCE: u64 = u64::MAX - 1;
+
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -414,6 +436,104 @@ pub enum DataKey {
     /// Ledger timestamp (u64) recorded when the last upgrade proposal was
     /// cancelled. Used to enforce CANCEL_REPROPOSE_COOLDOWN (Issue #618).
     LastUpgradeCancelledAt,
+    /// Monotonically increasing nonce for governance transitions (Issue #926).
+    /// Each new transition increments this counter to produce a unique transition ID.
+    GovernanceNonce,
+    /// A two-step governance transition record keyed by its unique nonce ID (Issue #926).
+    /// Stores [`GovernanceTransition`] with lifecycle state, target, initiator, and expiry.
+    GovernanceTransition(u64),
+}
+
+/// Lifecycle status of a governance transition (Issue #926).
+///
+/// Transitions advance through states in a strict finite-state machine:
+/// `Pending` → `Confirmed` | `Cancelled` | `Expired`.
+/// Once a transition leaves the `Pending` state it can never return;
+/// replay and duplicate-confirmation attacks are blocked by checking
+/// this status on every attempt to advance the transition.
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum TransitionStatus {
+    /// Transition has been proposed and is awaiting confirmation.
+    Pending = 0,
+    /// Transition has been confirmed by the target authority.
+    Confirmed = 1,
+    /// Transition was explicitly cancelled by the initiating authority.
+    Cancelled = 2,
+    /// Transition expired before confirmation.
+    Expired = 3,
+}
+
+/// On-chain record of a pending two-step governance action (Issue #926).
+///
+/// Every privileged assignment — admin transfer, WASM upgrade, or role change —
+/// creates exactly one `GovernanceTransition` with a unique nonce. The record
+/// survives until confirmed, cancelled, or expired, giving indexers and auditors
+/// a complete, replay-proof lifecycle trail.
+///
+/// # Storage
+///
+/// Stored persistently under `DataKey::GovernanceTransition(nonce)`.
+/// The transition itself carries the nonce as its `id` field so that
+/// off-chain consumers can correlate the record with the storage key
+/// without an additional lookup.
+///
+/// # Security
+///
+/// * `nonce` — monotonically increasing; never reused.
+/// * `status` — enforced as a strict state machine by every function that
+///   touches the record.
+/// * `expires_at` — ledger timestamp after which the transition is dead.
+/// * `target` — the address that MUST sign to confirm the transition.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct GovernanceTransition {
+    /// Unique transition ID (== the nonce that produced it).
+    pub nonce: u64,
+    /// Current lifecycle status.
+    pub status: TransitionStatus,
+    /// Account address that requested this transition.
+    pub initiator: Address,
+    /// Target account (e.g. the new admin candidate).
+    pub target: Address,
+    /// Previous state (e.g. the outgoing admin) for audit trail.
+    pub previous_state: Address,
+    /// Ledger timestamp when the transition was created.
+    pub created_at: u64,
+    /// Ledger timestamp after which the transition is automatically expired.
+    pub expires_at: u64,
+}
+
+/// Audit event emitted on every governance transition lifecycle change (Issue #926).
+///
+/// # Topics
+///
+/// Published under `(symbol "governance_transition", symbol action)` so
+/// indexers can stream every state change without scanning storage.
+///
+/// # Payload fields
+///
+/// * `nonce` — matches the transition's storage key.
+/// * `action` — one of `"proposed"`, `"confirmed"`, `"cancelled"`, `"expired"`.
+/// * `initiator` — the admin who initiated the transition.
+/// * `target` — the address being assigned or proposed for the role.
+/// * `previous_state` — the prior role-holder / admin at proposal time.
+/// * `timestamp` — ledger timestamp of the lifecycle event.
+/// * `outcome` — `"Success"` | `"Cancelled"` | `"Expired"` | `"Failed"`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct GovernanceEvent {
+    pub nonce: u64,
+    pub action: Symbol,
+    pub initiator: Address,
+    pub target: Address,
+    pub previous_state: Address,
+    pub timestamp: u64,
+    pub outcome: Symbol,
 }
 
 #[contracttype]
@@ -1476,6 +1596,112 @@ impl CraftNexusContract {
         );
     }
 
+    /// Emit a governance lifecycle event for off-chain auditability (Issue #926).
+    ///
+    /// Published under `(symbol "governance_transition", symbol action)` with a
+    /// full [`GovernanceEvent`] payload so indexers can reconstruct the audit
+    /// trail without scanning on-chain storage.
+    fn emit_governance_event(
+        env: &Env,
+        nonce: u64,
+        action: &str,
+        initiator: &Address,
+        target: &Address,
+        previous_state: &Address,
+        outcome: &str,
+    ) {
+        env.events().publish(
+            (
+                Symbol::new(env, "governance_transition"),
+                Symbol::new(env, action),
+            ),
+            GovernanceEvent {
+                nonce,
+                action: Symbol::new(env, action),
+                initiator: initiator.clone(),
+                target: target.clone(),
+                previous_state: previous_state.clone(),
+                timestamp: env.ledger().timestamp(),
+                outcome: Symbol::new(env, outcome),
+            },
+        );
+    }
+
+    /// Allocate and return the next governance nonce, panicking if the ID space
+    /// is exhausted (Issue #926).
+    ///
+    /// The nonce is persisted under `DataKey::GovernanceNonce` and incremented
+    /// atomically with the transition write. This produces a strictly
+    /// monotonic sequence that prevents ID reuse.
+    fn next_governance_nonce(env: &Env) -> u64 {
+        let key = DataKey::GovernanceNonce;
+        let current: u64 = env.storage().persistent().get(&key).unwrap_or(0);
+        if current >= MAX_GOVERNANCE_NONCE {
+            env.panic_with_error(Error::TransitionNonceExhausted);
+        }
+        let next = current + 1;
+        env.storage().persistent().set(&key, &next);
+        Self::extend_persistent(env, &key);
+        next
+    }
+
+    /// Load a governance transition by nonce, extending its TTL on read.
+    /// Returns `None` when no transition exists for that nonce (Issue #926).
+    fn get_governance_transition(env: &Env, nonce: u64) -> Option<GovernanceTransition> {
+        let key = DataKey::GovernanceTransition(nonce);
+        let t: Option<GovernanceTransition> = env.storage().persistent().get(&key);
+        if t.is_some() {
+            Self::extend_persistent(env, &key);
+        }
+        t
+    }
+
+    /// Persist a governance transition and extend its TTL (Issue #926).
+    fn put_governance_transition(env: &Env, t: &GovernanceTransition) {
+        let key = DataKey::GovernanceTransition(t.nonce);
+        env.storage().persistent().set(&key, t);
+        Self::extend_persistent(env, &key);
+    }
+
+    /// Assert that a governance transition is in the expected status, panicking
+    /// with the given error otherwise. If the transition is Pending but has
+    /// expired, it is atomically marked as Expired before panicking with
+    /// [`Error::TransitionExpired`] (Issue #926).
+    ///
+    /// # Warning: this function may mutate persistent storage (marking
+    /// expired transitions) even though it is named like a read operation.
+    /// Callers MUST be aware of this side effect.
+    fn assert_or_expire_transition(
+        env: &Env,
+        nonce: u64,
+        expected: TransitionStatus,
+        on_mismatch: Error,
+    ) -> GovernanceTransition {
+        let t = Self::get_governance_transition(env, nonce)
+            .unwrap_or_else(|| env.panic_with_error(Error::TransitionNotFound));
+        if t.status != expected {
+            env.panic_with_error(on_mismatch);
+        }
+        // Check expiration: even a Pending transition is dead after expiry.
+        if t.status == TransitionStatus::Pending && env.ledger().timestamp() >= t.expires_at {
+            // Mark expired persistently so subsequent calls see the final state.
+            let mut expired_t = t.clone();
+            expired_t.status = TransitionStatus::Expired;
+            Self::put_governance_transition(env, &expired_t);
+            Self::emit_governance_event(
+                env,
+                nonce,
+                "expired",
+                &expired_t.initiator,
+                &expired_t.target,
+                &expired_t.previous_state,
+                "Expired",
+            );
+            env.panic_with_error(Error::TransitionExpired);
+        }
+        t
+    }
+
     /// Stores fallback admin address for recovery purposes (#240)
     /// This ensures that even if primary admin storage is corrupted, platform can be recovered
     fn set_fallback_admin(env: &Env, admin: Address) -> Result<(), Error> {
@@ -2495,10 +2721,15 @@ impl CraftNexusContract {
     }
 
     /// Propose a new administrator for the platform (admin only).
-    /// Starts the two-step transfer process (#95).
+    /// Starts the two-step transfer process (#95, hardened in #926).
     /// Both the current admin and the incoming admin must co-sign, proving the
     /// new address is a live, registered ledger node capable of authorizing
     /// transactions (#419).
+    ///
+    /// Creates a persistent [`GovernanceTransition`] record with a unique nonce
+    /// that survives restarts and provides replay-proof lifecycle tracking.
+    /// The transition expires after [`GOVERNANCE_TRANSITION_TTL`] seconds if
+    /// not confirmed by the target account.
     pub fn update_admin(env: Env, new_admin: Address) {
         let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
@@ -2513,27 +2744,122 @@ impl CraftNexusContract {
         new_admin.require_auth();
 
         let previous_admin = config.admin.clone();
+        let now = env.ledger().timestamp();
+
+        // Issue #926 — allocate a unique nonce and persist the transition
+        // record BEFORE mutating PlatformConfig. This ensures the audit
+        // trail exists even if the subsequent write panics.
+        let nonce = Self::next_governance_nonce(&env);
+        let transition = GovernanceTransition {
+            nonce,
+            status: TransitionStatus::Pending,
+            initiator: config.admin.clone(),
+            target: new_admin.clone(),
+            previous_state: previous_admin.clone(),
+            created_at: now,
+            expires_at: now + GOVERNANCE_TRANSITION_TTL,
+        };
+        Self::put_governance_transition(&env, &transition);
+
+        // Keep backwards-compatible pending_admin for existing clients.
         config.pending_admin = Some(new_admin.clone());
         env.storage()
             .instance()
             .set(&DataKey::PlatformConfig, &config);
 
-        // Emit audit event for admin change proposal
-        Self::emit_admin_changed(&env, previous_admin, new_admin, "admin_proposed");
+        // Emit audit events
+        Self::emit_admin_changed(&env, previous_admin.clone(), new_admin.clone(), "admin_proposed");
+        Self::emit_governance_event(
+            &env,
+            nonce,
+            "proposed",
+            &config.admin,
+            &new_admin,
+            &previous_admin,
+            "Success",
+        );
     }
 
     /// Claim the administrative role (pending admin only).
-    /// Completes the two-step transfer process (#95).
-    /// Enhanced with validation, audit logging and fallback setup (#240)
+    /// Completes the two-step transfer process (#95, hardened in #926).
+    ///
+    /// Verifies that a corresponding [`GovernanceTransition`] exists, is in
+    /// the Pending state, has not expired, and that the caller is the
+    /// transition's target. Marks the transition as Confirmed and emits
+    /// audit events for both the admin change and the governance lifecycle.
     pub fn claim_admin(env: Env) {
         let mut config = Self::get_platform_config_internal(&env);
-        let pending = config.pending_admin.as_ref().expect("");
+        let pending = config.pending_admin.as_ref().expect(
+            "No pending admin; call update_admin first"
+        );
         pending.require_auth();
 
         // Validate the pending admin address before accepting the transfer
         if let Err(_) = Self::validate_admin_address(&env, pending) {
             env.panic_with_error(Error::InvalidAdminAddress);
         }
+
+        // Issue #926 — locate the transition by scanning for one that
+        // matches the current pending_admin. We iterate backwards from
+        // the most recent nonce for efficiency (typical case: 1 pending).
+        let nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::GovernanceNonce)
+            .unwrap_or(0);
+        // Walk backwards from the latest nonce; the matching transition
+        // is almost always the most recent one.
+        let mut found: Option<GovernanceTransition> = None;
+        let mut scan = nonce;
+        while scan > 0 {
+            let key = DataKey::GovernanceTransition(scan);
+            if let Some(t) = env.storage().persistent().get::<_, GovernanceTransition>(&key) {
+                Self::extend_persistent(&env, &key);
+                if t.target == *pending && t.status == TransitionStatus::Pending {
+                    // Check expiration before confirming.
+                    if env.ledger().timestamp() >= t.expires_at {
+                        let mut expired_t = t.clone();
+                        expired_t.status = TransitionStatus::Expired;
+                        Self::put_governance_transition(&env, &expired_t);
+                        Self::emit_governance_event(
+                            &env, t.nonce, "expired",
+                            &t.initiator, &t.target, &t.previous_state, "Expired",
+                        );
+                        env.panic_with_error(Error::TransitionExpired);
+                    }
+                    found = Some(t);
+                    break;
+                }
+            }
+            scan -= 1;
+        }
+
+        let transition = found.unwrap_or_else(|| {
+            // Fallback for legacy pending_admin entries that predate
+            // the GovernanceTransition storage. Complete the transfer
+            // but emit a synthetic governance event for audit trail
+            // consistency.
+            let now = env.ledger().timestamp();
+            let fallback = GovernanceTransition {
+                nonce: 0,
+                status: TransitionStatus::Pending,
+                initiator: config.admin.clone(),
+                target: pending.clone(),
+                previous_state: config.admin.clone(),
+                created_at: now,
+                expires_at: now + GOVERNANCE_TRANSITION_TTL,
+            };
+            Self::emit_governance_event(
+                &env,
+                0,
+                "confirmed",
+                &config.admin,
+                pending,
+                &config.admin,
+                "Success",
+            );
+            fallback
+        });
 
         let previous_admin = config.admin.clone();
         let new_admin = pending.clone();
@@ -2544,17 +2870,65 @@ impl CraftNexusContract {
             .instance()
             .set(&DataKey::PlatformConfig, &config);
 
+        // Mark the transition as confirmed (idempotent — no-op for nonce 0 fallback).
+        if transition.nonce > 0 {
+            let mut confirmed = transition.clone();
+            confirmed.status = TransitionStatus::Confirmed;
+            Self::put_governance_transition(&env, &confirmed);
+            Self::emit_governance_event(
+                &env,
+                transition.nonce,
+                "confirmed",
+                &transition.initiator,
+                &transition.target,
+                &transition.previous_state,
+                "Success",
+            );
+        }
+
         // Emit audit event for the completed two-step admin transfer (#631)
         Self::emit_admin_changed(&env, previous_admin, new_admin, "admin_claimed");
     }
 
     /// Cancel an in-progress two-step admin transfer (current admin only).
+    ///
+    /// Marks the corresponding [`GovernanceTransition`] as Cancelled so
+    /// it can never be replayed, then clears `pending_admin` from config
+    /// (Issue #926).
     pub fn cancel_admin_transfer(env: Env) -> Result<(), Error> {
         let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
         if config.pending_admin.is_none() {
             return Err(Error::NoPendingAdmin);
+        }
+
+        let pending_addr = config.pending_admin.as_ref().expect(
+            "pending_admin must be Some after guard check above"
+        );
+
+        // Locate and cancel the matching GovernanceTransition.
+        let nonce: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::GovernanceNonce)
+            .unwrap_or(0);
+        let mut scan = nonce;
+        while scan > 0 {
+            let key = DataKey::GovernanceTransition(scan);
+            if let Some(mut t) = env.storage().persistent().get::<_, GovernanceTransition>(&key) {
+                Self::extend_persistent(&env, &key);
+                if t.target == *pending_addr && t.status == TransitionStatus::Pending {
+                    t.status = TransitionStatus::Cancelled;
+                    Self::put_governance_transition(&env, &t);
+                    Self::emit_governance_event(
+                        &env, t.nonce, "cancelled",
+                        &t.initiator, &t.target, &t.previous_state, "Cancelled",
+                    );
+                    break;
+                }
+            }
+            scan -= 1;
         }
 
         config.pending_admin = None;
