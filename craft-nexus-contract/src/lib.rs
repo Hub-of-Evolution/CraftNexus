@@ -151,7 +151,8 @@ pub enum Error {
     /// Caller is not an authorized admin action signer
     NotAnAdminActionSigner = 49,
     /// Contract does not implement the supported token interface.
-    UnsupportedToken = 46,
+    #[deprecated]
+    UnsupportedToken = 50,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -2821,7 +2822,7 @@ impl CraftNexusContract {
         if action.executed {
             return Err(Error::AdminActionTerminal);
         }
-        if action.approvals.len() as u32 < action.threshold {
+        if (action.approvals.len() as u32) < action.threshold {
             return Err(Error::AdminActionNeedsApprovals);
         }
         let now = env.ledger().timestamp();
@@ -2929,7 +2930,7 @@ impl CraftNexusContract {
                 Ok(())
             }
             AdminActionKind::ExecuteUpgrade(expected_wasm_hash) => {
-                Self::execute_upgrade(env, expected_wasm_hash)
+                Self::execute_upgrade(env.clone(), expected_wasm_hash.clone())
             }
             AdminActionKind::SetMaxDisputeDuration(duration) => {
                 let mut config = Self::get_platform_config_internal(env);
@@ -6405,10 +6406,10 @@ impl CraftNexusContract {
             }
             ArtisanStakeData {
                 amount: existing_stake.amount + amount,
-                token,
+                token: token.clone(),
             }
         } else {
-            ArtisanStakeData { amount, token }
+            ArtisanStakeData { amount, token: token.clone() }
         };
 
         let config = Self::get_platform_config_internal(&env);
@@ -6617,6 +6618,10 @@ impl CraftNexusContract {
         }
 
         // Validate remaining collateral safety and active obligation rules
+        if matured_amount > current_stake.amount {
+            env.panic_with_error(crate::Error::InvalidRefundAmount);
+        }
+
         let remaining_amount = current_stake.amount - matured_amount;
         let config = Self::get_platform_config_internal(&env);
         let active_obligations = Self::has_active_escrows(env.clone(), artisan.clone());
@@ -6671,6 +6676,56 @@ impl CraftNexusContract {
             .get::<DataKey, ArtisanStakeData>(&DataKey::ArtisanStake(artisan))
             .map(|stake: ArtisanStakeData| stake.amount)
             .unwrap_or(0)
+    }
+
+    /// Return the total amount of matured stake for an artisan.
+    ///
+    /// Only deposits whose `cooldown_end <= now` are counted as matured.
+    pub fn get_matured_stake_amount(env: Env, artisan: Address) -> i128 {
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let now = env.ledger().timestamp();
+        let mut matured: i128 = 0;
+
+        for i in 0..total_count {
+            let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
+            if let Some(deposit) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, StakeDeposit>(&deposit_key)
+            {
+                if deposit.cooldown_end <= now {
+                    matured += deposit.amount;
+                }
+            }
+        }
+
+        matured
+    }
+
+    /// Return the total amount of pending (not yet matured) stake for an artisan.
+    ///
+    /// Only deposits whose `cooldown_end > now` are counted as pending.
+    pub fn get_pending_stake_amount(env: Env, artisan: Address) -> i128 {
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let now = env.ledger().timestamp();
+        let mut pending: i128 = 0;
+
+        for i in 0..total_count {
+            let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
+            if let Some(deposit) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, StakeDeposit>(&deposit_key)
+            {
+                if deposit.cooldown_end > now {
+                    pending += deposit.amount;
+                }
+            }
+        }
+
+        pending
     }
 
     /// Check if an artisan account is under-collateralized (active obligations exist while holding less than minimum required stake).
