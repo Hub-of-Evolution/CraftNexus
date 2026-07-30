@@ -315,3 +315,83 @@ fn test_set_rate_limit_config_disables_limiter() {
         client.dispute_escrow(&order_id, &Symbol::new(&env, "Reason"), &buyer);
     }
 }
+
+// ── Structured Dispute Evidence Storage & Expiry Policies (#927) ───────
+
+#[test]
+fn test_submit_evidence_bound_to_valid_dispute_session() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
+
+    // Create escrow without disputing it yet
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token, &50_000_000, &1, &None);
+
+    // Submission fails when not in dispute
+    let result = client.try_submit_evidence(&1, &buyer, &String::from_str(&env, "ipfs://evidence-1"));
+    assert!(result.is_err());
+
+    // Initiate dispute
+    client.dispute_escrow(&1, &Symbol::new(&env, "Reason"), &buyer);
+    let escrow = client.get_escrow(&1);
+    let dispute_session_id = escrow.dispute_initiated_at.unwrap();
+
+    // Submission succeeds during valid dispute session
+    let ev_id = client.submit_evidence(&1, &buyer, &String::from_str(&env, "ipfs://evidence-1"));
+    assert_eq!(ev_id, 0);
+
+    let log = client.get_evidence(&1);
+    assert_eq!(log.len(), 1);
+    let entry = log.get(0).unwrap();
+    assert_eq!(entry.dispute_session_id, dispute_session_id);
+    assert!(!entry.is_invalidated);
+}
+
+#[test]
+fn test_expired_evidence_automatically_invalidated() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
+    create_and_dispute(&env, &client, &buyer, &seller, &token, &token_admin, 1);
+
+    client.submit_evidence(&1, &buyer, &String::from_str(&env, "ipfs://evidence-expiring"));
+
+    // Verify valid before expiry
+    let valid_before = client.get_valid_evidence(&1);
+    assert_eq!(valid_before.len(), 1);
+    assert!(!valid_before.get(0).unwrap().is_invalidated);
+
+    // Advance time past DEFAULT_EVIDENCE_EXPIRY_WINDOW (7 days)
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_EVIDENCE_EXPIRY_WINDOW + 10;
+    });
+
+    // get_evidence marks expired entries as invalidated
+    let log_after = client.get_evidence(&1);
+    assert_eq!(log_after.len(), 1);
+    assert!(log_after.get(0).unwrap().is_invalidated);
+
+    // get_valid_evidence returns empty list
+    let valid_after = client.get_valid_evidence(&1);
+    assert_eq!(valid_after.len(), 0);
+}
+
+#[test]
+fn test_prevent_evidence_reuse_across_disputes() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
+
+    create_and_dispute(&env, &client, &buyer, &seller, &token, &token_admin, 1);
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token, &50_000_000, &2, &None);
+    client.dispute_escrow(&2, &Symbol::new(&env, "Reason2"), &buyer);
+
+    let payload = String::from_str(&env, "ipfs://reused-evidence-payload");
+
+    // First use on order 1 succeeds
+    client.submit_evidence(&1, &buyer, &payload);
+
+    // Second use of exact same payload on order 2 fails
+    let result = client.try_submit_evidence(&2, &buyer, &payload);
+    assert!(result.is_err());
+}
+

@@ -24,6 +24,9 @@ mod reentrancy_test;
 mod scalability_test;
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod arbitration_escalation_test;
+
 // Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
 // artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
 #[cfg(not(target_family = "wasm"))]
@@ -42,7 +45,7 @@ pub mod onboarding;
 /// | 40â€“42   | Validation  | Input validation failures                       | Fix caller input          |
 ///
 /// Use [`is_retryable`] to determine whether an error may succeed on retry.
-#[contracterror]
+#[contracterror(export = false)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 #[repr(u32)]
@@ -151,6 +154,13 @@ pub enum Error {
     /// Caller is not an authorized admin action signer
     NotAnAdminActionSigner = 49,
     /// Contract does not implement the supported token interface.
+    UnsupportedToken = 53,
+    /// Evidence retention window has expired or is invalid (#927)
+    EvidenceExpired = 50,
+    /// Evidence payload has already been used in a previous dispute (#927)
+    EvidenceAlreadyUsed = 51,
+    /// Invalid dispute session for evidence submission (#927)
+    InvalidDisputeSession = 52,
     UnsupportedToken = 50,
 }
 
@@ -252,6 +262,17 @@ const DEFAULT_STAKE_COOLDOWN: u32 = 7 * 24 * 60 * 60;
 const DEFAULT_MIN_RELEASE_WINDOW: u32 = 24 * 60 * 60;
 /// Absolute safety ceiling for admin-configurable max release window (365 days).
 const ABSOLUTE_MAX_RELEASE_WINDOW: u32 = 365 * 24 * 60 * 60;
+
+/// Default evidence expiry / retention window (7 days in seconds) (#927)
+const DEFAULT_EVIDENCE_EXPIRY_WINDOW: u64 = 7 * 24 * 60 * 60;
+/// Default challenge period window before a dispute can be resolved (1 day in seconds) (#942)
+const DEFAULT_EVIDENCE_CHALLENGE_WINDOW: u32 = 24 * 60 * 60;
+/// Default dispute escalation window (3 days in seconds) (#941)
+const DEFAULT_DISPUTE_ESCALATION_WINDOW: u32 = 3 * 24 * 60 * 60;
+/// Default rate limit max calls per window (#943)
+const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 5;
+/// Default rate limit window (1 hour in seconds) (#943)
+const DEFAULT_RATE_LIMIT_WINDOW: u32 = 3600;
 
 /// Maximum platform fee in basis points (10000 = 100%)
 const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
@@ -360,7 +381,7 @@ pub enum AdminActionDataKey {
     AdminActionTimelockDelay,
 }
 
-#[contracttype]
+#[contracttype(export = false)]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub enum DataKey {
@@ -482,6 +503,18 @@ pub enum DataKey {
     /// Ledger timestamp (u64) recorded when the last upgrade proposal was
     /// cancelled. Used to enforce CANCEL_REPROPOSE_COOLDOWN (Issue #618).
     LastUpgradeCancelledAt,
+    /// Structured evidence log for a disputed escrow order (#927)
+    EvidenceLog(u32),
+    /// Submitted evidence hash to prevent reuse across disputes (#927)
+    UsedEvidenceHash(BytesN<32>),
+    /// Escalation record for a dispute (#941)
+    DisputeEscalation(u32),
+    /// Configurable dispute escalation window in seconds (#941)
+    DisputeEscalationWindow,
+    /// Counter for rate-limited calls per address per window (#943)
+    RateLimitCount(Address, u64),
+    /// Platform rate limit configuration (max_calls, window) (#943)
+    RateLimitConfig,
 }
 
 #[contracttype]
@@ -1235,6 +1268,43 @@ pub struct PlatformConfig {
     pub expired_dispute_fee_policy: ExpiredDisputeFeePolicy,
     /// Minimum release window to prevent "flash" auto-releases (default: 1 day)
     pub min_release_window: u32,
+    /// Dispute escalation window in seconds (default: 3 days)
+    pub dispute_escalation_window: u32,
+}
+
+/// Structured record of dispute evidence with metadata and expiry thresholds (#927).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct DisputeEvidence {
+    pub id: u64,
+    pub order_id: u32,
+    pub dispute_session_id: u64,
+    pub submitter: Address,
+    pub evidence_uri: String,
+    pub parent_evidence_id: Option<u64>,
+    pub submitted_at: u64,
+    pub expires_at: u64,
+    pub is_invalidated: bool,
+}
+
+/// Record of dispute escalation to arbitration (#941).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct DisputeEscalationRecord {
+    pub order_id: u32,
+    pub escalated_by: Address,
+    pub escalated_at: u64,
+}
+
+/// Configuration for sensitive action rate limiting (#943).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RateLimitConfig {
+    pub max_calls: u32,
+    pub window: u32,
 }
 
 /// Partial refund proposal created during a dispute (Issue #101)
@@ -1367,6 +1437,19 @@ pub trait OnboardingInterface {
 /// - Cross-contract calls are wrapped in `try_invoke_contract` helpers so an
 ///   onboarding failure never bricks escrow settlement.
 pub struct CraftNexusContract;
+
+impl CraftNexusContract {
+    pub fn enter_reentry_guard(env: &Env) {
+        if env.storage().temporary().has(&DataKey::ReentryGuard) {
+            env.panic_with_error(crate::Error::ReentryDetected);
+        }
+        env.storage().temporary().set(&DataKey::ReentryGuard, &true);
+    }
+
+    pub fn exit_reentry_guard(env: &Env) {
+        env.storage().temporary().remove(&DataKey::ReentryGuard);
+    }
+}
 
 /// Alias and compatibility layers
 pub const ESCROW_CONTRACT: CraftNexusContract = CraftNexusContract;
@@ -1578,6 +1661,7 @@ impl CraftNexusContract {
                 stake_cooldown: DEFAULT_STAKE_COOLDOWN,
                 expired_dispute_fee_policy: ExpiredDisputeFeePolicy::RefundFullNoPlatformFee,
                 min_release_window: DEFAULT_MIN_RELEASE_WINDOW,
+                dispute_escalation_window: DEFAULT_DISPUTE_ESCALATION_WINDOW,
             });
         }
 
@@ -2565,6 +2649,7 @@ impl CraftNexusContract {
             stake_cooldown: DEFAULT_STAKE_COOLDOWN,
             expired_dispute_fee_policy: ExpiredDisputeFeePolicy::RefundFullNoPlatformFee,
             min_release_window: DEFAULT_MIN_RELEASE_WINDOW,
+            dispute_escalation_window: DEFAULT_DISPUTE_ESCALATION_WINDOW,
         };
 
         env.storage()
@@ -3013,7 +3098,7 @@ impl CraftNexusContract {
                 Ok(())
             }
             AdminActionKind::SetArtisanFeeTier(artisan, fee_bps) => {
-                let mut config = Self::get_platform_config_internal(env);
+                let config = Self::get_platform_config_internal(env);
                 if *fee_bps > MAX_PLATFORM_FEE_BPS {
                     return Err(Error::InvalidFee);
                 }
@@ -5544,6 +5629,27 @@ impl CraftNexusContract {
     ) {
         authorized_address.require_auth();
 
+        // Rate limiting check (#943)
+        let rate_config: RateLimitConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RateLimitConfig)
+            .unwrap_or(RateLimitConfig {
+                max_calls: DEFAULT_RATE_LIMIT_MAX_CALLS,
+                window: DEFAULT_RATE_LIMIT_WINDOW,
+            });
+
+        if rate_config.max_calls > 0 && rate_config.window > 0 {
+            let current_time = env.ledger().timestamp();
+            let window_index = current_time / (rate_config.window as u64);
+            let rate_key = DataKey::RateLimitCount(authorized_address.clone(), window_index);
+            let count: u32 = env.storage().persistent().get(&rate_key).unwrap_or(0);
+            if count >= rate_config.max_calls {
+                env.panic_with_error(crate::Error::BatchLimitExceeded);
+            }
+            env.storage().persistent().set(&rate_key, &(count + 1));
+        }
+
         let escrow_for_auth = Self::get_stored_escrow(&env, order_id);
 
         // Allow buyer or seller to dispute
@@ -5608,6 +5714,12 @@ impl CraftNexusContract {
 
         if escrow.status != EscrowStatus::Disputed {
             env.panic_with_error(crate::Error::InvalidEscrowState);
+        }
+
+        if let Some(dispute_initiated_at) = escrow.dispute_initiated_at {
+            if env.ledger().timestamp() < dispute_initiated_at + DEFAULT_EVIDENCE_CHALLENGE_WINDOW as u64 {
+                env.panic_with_error(crate::Error::ReleaseWindowNotElapsed);
+            }
         }
 
         // CRITICAL: Update status BEFORE external calls (CEI pattern)
@@ -5736,6 +5848,256 @@ impl CraftNexusContract {
         }
     }
 
+    /// Submit evidence for a disputed escrow order (#927).
+    ///
+    /// Evidence is bound to the active dispute session, stamped with an expiry timestamp,
+    /// and hashed to prevent evidence payload reuse across disputes.
+    pub fn submit_evidence(
+        env: Env,
+        order_id: u32,
+        submitter: Address,
+        evidence_uri: String,
+    ) -> u64 {
+        submitter.require_auth();
+
+        let escrow = Self::get_stored_escrow(&env, order_id);
+        if escrow.status != EscrowStatus::Disputed {
+            env.panic_with_error(crate::Error::NotInDispute);
+        }
+
+        if !(submitter == escrow.buyer || submitter == escrow.seller) {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+
+        let dispute_session_id = escrow.dispute_initiated_at.unwrap_or(escrow.created_at as u64);
+
+        // Prevent evidence reuse across multiple disputes (#927)
+        let len = (evidence_uri.len() as usize).min(256);
+        let mut buf = [0u8; 256];
+        evidence_uri.copy_into_slice(&mut buf[0..len]);
+        let bytes = Bytes::from_slice(&env, &buf[0..len]);
+        let hash: BytesN<32> = env.crypto().sha256(&bytes).into();
+        let hash_key = DataKey::UsedEvidenceHash(hash);
+        if env.storage().persistent().has(&hash_key) {
+            env.panic_with_error(crate::Error::EvidenceAlreadyUsed);
+        }
+        env.storage().persistent().set(&hash_key, &true);
+
+        let key = DataKey::EvidenceLog(order_id);
+        let mut log: Vec<DisputeEvidence> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let id = log.len() as u64;
+        let submitted_at = env.ledger().timestamp();
+        let expires_at = submitted_at + DEFAULT_EVIDENCE_EXPIRY_WINDOW;
+
+        let evidence = DisputeEvidence {
+            id,
+            order_id,
+            dispute_session_id,
+            submitter,
+            evidence_uri,
+            parent_evidence_id: None,
+            submitted_at,
+            expires_at,
+            is_invalidated: false,
+        };
+
+        log.push_back(evidence);
+        env.storage().persistent().set(&key, &log);
+        id
+    }
+
+    /// Submit counter-evidence responding to a prior evidence entry (#927).
+    pub fn submit_counter_evidence(
+        env: Env,
+        order_id: u32,
+        submitter: Address,
+        evidence_uri: String,
+        parent_evidence_id: u64,
+    ) -> u64 {
+        submitter.require_auth();
+
+        let escrow = Self::get_stored_escrow(&env, order_id);
+        if escrow.status != EscrowStatus::Disputed {
+            env.panic_with_error(crate::Error::NotInDispute);
+        }
+
+        if !(submitter == escrow.buyer || submitter == escrow.seller) {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+
+        let dispute_session_id = escrow.dispute_initiated_at.unwrap_or(escrow.created_at as u64);
+
+        let key = DataKey::EvidenceLog(order_id);
+        let mut log: Vec<DisputeEvidence> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Validate parent evidence ID exists in current dispute evidence log
+        let mut parent_found = false;
+        for item in log.iter() {
+            if item.id == parent_evidence_id && item.dispute_session_id == dispute_session_id {
+                parent_found = true;
+                break;
+            }
+        }
+        if !parent_found {
+            env.panic_with_error(crate::Error::InvalidEscrowState);
+        }
+
+        // Prevent evidence reuse across multiple disputes (#927)
+        let len = (evidence_uri.len() as usize).min(256);
+        let mut buf = [0u8; 256];
+        evidence_uri.copy_into_slice(&mut buf[0..len]);
+        let bytes = Bytes::from_slice(&env, &buf[0..len]);
+        let hash: BytesN<32> = env.crypto().sha256(&bytes).into();
+        let hash_key = DataKey::UsedEvidenceHash(hash);
+        if env.storage().persistent().has(&hash_key) {
+            env.panic_with_error(crate::Error::EvidenceAlreadyUsed);
+        }
+        env.storage().persistent().set(&hash_key, &true);
+
+        let id = log.len() as u64;
+        let submitted_at = env.ledger().timestamp();
+        let expires_at = submitted_at + DEFAULT_EVIDENCE_EXPIRY_WINDOW;
+
+        let evidence = DisputeEvidence {
+            id,
+            order_id,
+            dispute_session_id,
+            submitter,
+            evidence_uri,
+            parent_evidence_id: Some(parent_evidence_id),
+            submitted_at,
+            expires_at,
+            is_invalidated: false,
+        };
+
+        log.push_back(evidence);
+        env.storage().persistent().set(&key, &log);
+        id
+    }
+
+    /// Retrieve all evidence records for a dispute, automatically setting `is_invalidated = true`
+    /// for any entries whose retention/expiry timestamp has passed (#927).
+    pub fn get_evidence(env: Env, order_id: u32) -> Vec<DisputeEvidence> {
+        let key = DataKey::EvidenceLog(order_id);
+        let log: Vec<DisputeEvidence> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let current_time = env.ledger().timestamp();
+        let mut updated_log = Vec::new(&env);
+        let mut modified = false;
+
+        for mut item in log.into_iter() {
+            if !item.is_invalidated && current_time > item.expires_at {
+                item.is_invalidated = true;
+                modified = true;
+            }
+            updated_log.push_back(item);
+        }
+
+        if modified {
+            env.storage().persistent().set(&key, &updated_log);
+        }
+
+        updated_log
+    }
+
+    /// Retrieve only non-expired and non-invalidated evidence records for an order (#927).
+    pub fn get_valid_evidence(env: Env, order_id: u32) -> Vec<DisputeEvidence> {
+        let all_evidence = Self::get_evidence(env.clone(), order_id);
+        let mut valid_log = Vec::new(&env);
+        let current_time = env.ledger().timestamp();
+
+        for item in all_evidence.into_iter() {
+            if !item.is_invalidated && current_time <= item.expires_at {
+                valid_log.push_back(item);
+            }
+        }
+        valid_log
+    }
+
+    /// Escalate a dispute to arbitration after the escalation window has elapsed (#941).
+    pub fn escalate_dispute(env: Env, order_id: u32, caller: Address) {
+        caller.require_auth();
+
+        let escrow = Self::get_stored_escrow(&env, order_id);
+        if escrow.status != EscrowStatus::Disputed {
+            env.panic_with_error(crate::Error::NotInDispute);
+        }
+
+        if !(caller == escrow.buyer || caller == escrow.seller) {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+
+        let escalation_key = DataKey::DisputeEscalation(order_id);
+        if env.storage().persistent().has(&escalation_key) {
+            env.panic_with_error(crate::Error::InvalidEscrowState);
+        }
+
+        let config = Self::get_platform_config_internal(&env);
+        let dispute_initiated_at = escrow
+            .dispute_initiated_at
+            .unwrap_or(escrow.created_at as u64);
+        let current_time = env.ledger().timestamp();
+
+        if current_time < dispute_initiated_at + config.dispute_escalation_window as u64 {
+            env.panic_with_error(crate::Error::ReleaseWindowNotElapsed);
+        }
+
+        let record = DisputeEscalationRecord {
+            order_id,
+            escalated_by: caller,
+            escalated_at: current_time,
+        };
+
+        env.storage().persistent().set(&escalation_key, &record);
+
+        Self::emit_dispute_escalated(&env, order_id);
+    }
+
+    /// Get escalation record for an order (#941).
+    pub fn get_dispute_escalation(env: Env, order_id: u32) -> Option<DisputeEscalationRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeEscalation(order_id))
+    }
+
+    /// Set the dispute escalation window (admin only) (#941).
+    pub fn set_dispute_escalation_window(env: Env, window: u32) {
+        let mut config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+        config.dispute_escalation_window = window;
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
+    }
+
+    /// Set rate limit configuration (admin only) (#943).
+    pub fn set_rate_limit_config(env: Env, max_calls: u32, window: u32) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+        let rate_config = RateLimitConfig { max_calls, window };
+        env.storage()
+            .persistent()
+            .set(&DataKey::RateLimitConfig, &rate_config);
+    }
+
+    fn emit_dispute_escalated(env: &Env, order_id: u32) {
+        env.events().publish(
+            (Symbol::new(env, "dispute_escalated"), order_id as u64),
+            (),
+        );
+    }
+
     /// Update platform fee percentage (admin only)
     ///
     /// # Arguments
@@ -5762,6 +6124,7 @@ impl CraftNexusContract {
             stake_cooldown: config.stake_cooldown,
             expired_dispute_fee_policy: config.expired_dispute_fee_policy,
             min_release_window: config.min_release_window,
+            dispute_escalation_window: config.dispute_escalation_window,
         };
 
         env.storage()
@@ -5797,6 +6160,7 @@ impl CraftNexusContract {
             stake_cooldown: config.stake_cooldown,
             expired_dispute_fee_policy: config.expired_dispute_fee_policy,
             min_release_window: config.min_release_window,
+            dispute_escalation_window: config.dispute_escalation_window,
         };
 
         env.storage()
@@ -7542,16 +7906,5 @@ impl CraftNexusContract {
         }
 
         Ok(unallocated)
-    }
-
-    pub fn enter_reentry_guard(env: &Env) {
-        if env.storage().temporary().has(&DataKey::ReentryGuard) {
-            env.panic_with_error(crate::Error::ReentryDetected);
-        }
-        env.storage().temporary().set(&DataKey::ReentryGuard, &true);
-    }
-
-    pub fn exit_reentry_guard(env: &Env) {
-        env.storage().temporary().remove(&DataKey::ReentryGuard);
     }
 }
