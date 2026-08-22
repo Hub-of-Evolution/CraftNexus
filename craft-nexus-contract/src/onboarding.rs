@@ -198,7 +198,9 @@ pub enum DataKey {
     /// Active contract counter per user (Issue #39)
     /// Tracks the number of active escrows/agreements for an address.
     ActiveContractCount(Address),
-    /// Pending manual verification request marker keyed by user (#138)
+    /// Pending manual verification request marker keyed by user (#138).
+    /// Stored in **temporary** storage (#702): cleared on approve/reject/clear and
+    /// must not receive `extend_ttl` (default temporary expiry is sufficient).
     VerificationRequest(Address),
     /// Queue head pointer for manual verification requests (#138)
     VerificationQueueHead,
@@ -229,6 +231,34 @@ pub enum DataKey {
     ReputationHistoryCount(Address),
     /// Indexed compact reputation history entry (#939)
     ReputationHistoryIndexed(Address, u32),
+    /// Proof-of-Humanity credential record keyed by user address (#940)
+    UserPohCredential(Address),
+    /// Secondary index mapping proof-of-humanity credential hash to owner address (#940)
+    PohCredentialHash(Bytes),
+    /// Secondary index mapping correlated identity hash to owner address (#940)
+    IdentityCorrelation(Bytes),
+    /// Rate limit tracker for onboarding attempts per address (#940)
+    RateLimitTracker(Address),
+    /// Suspicious activity flag record per user (#940)
+    SuspiciousActivityFlag(Address),
+    /// Review queue head pointer (#940)
+    ReviewQueueHead,
+    /// Review queue tail pointer (#940)
+    ReviewQueueTail,
+    /// Review queue index -> address mapping (#940)
+    ReviewQueueIndex(u64),
+    /// Timestamp of last manual verification request attempt per user (#940)
+    VerificationLastAttempt(Address),
+    /// Anti-Sybil onboarding rate limit window in seconds (#940)
+    OnboardingRateLimitWindow,
+    /// Maximum onboarding attempts allowed per window (#940)
+    MaxOnboardingAttemptsPerWindow,
+    /// Verification request cooldown in seconds (#940)
+    VerificationCooldown,
+    /// Whether Proof-of-Humanity is required for auto/manual verification (#940)
+    PohRequiredForAutoVerify,
+    /// Optional Proof-of-Humanity verifier address (#940)
+    PohVerifier,
 }
 
 /// User roles in the CraftNexus platform.
@@ -265,6 +295,10 @@ pub enum ProfileStatus {
     Active = 0,
     /// Profile has been deactivated by the user; username is released
     Deactivated = 1,
+    /// Profile is under administrative or automated anti-Sybil review (#940)
+    UnderReview = 2,
+    /// Profile is flagged for suspicious activity and restricted (#940)
+    Flagged = 3,
 }
 
 /// Public user profile returned by onboarding read/write methods.
@@ -653,6 +687,82 @@ pub struct OnboardingConfig {
     pub escrow_contract: Option<Address>,
 }
 
+/// Proof-of-Humanity credential attached to a user identity (#940).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PohCredential {
+    pub provider_id: Symbol,
+    pub credential_hash: Bytes,
+    pub verified_at: u64,
+    pub expires_at: u64,
+}
+
+/// Record tracking suspicious activity and anti-Sybil review state for a user (#940).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct SuspiciousActivityFlag {
+    pub reason_code: u32,
+    pub flagged_at: u64,
+    pub flagged_by: Address,
+    pub delay_until: u64,
+}
+
+/// Rate limit tracking entry per user address (#940).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RateLimitRecord {
+    pub window_start: u64,
+    pub count: u32,
+    pub last_attempt: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct SybilPatternDetectedEvent {
+    pub user: Address,
+    pub reason: Symbol,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PohCredentialRegisteredEvent {
+    pub user: Address,
+    pub provider_id: Symbol,
+    pub credential_hash: Bytes,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct IdentityCorrelatedEvent {
+    pub user: Address,
+    pub identity_hash: Bytes,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ProfileFlaggedEvent {
+    pub user: Address,
+    pub reason_code: u32,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReviewCompletedEvent {
+    pub user: Address,
+    pub action: Symbol,
+    pub timestamp: u64,
+}
+
 /// Global policy controlling trust-score decay and anti-farming (#939).
 ///
 /// Stored as a singleton under [`DataKey::ReputationPolicy`]. Admins mutate it
@@ -792,6 +902,22 @@ pub enum Error {
     ContractPaused = 16,
     /// Reputation policy parameters are invalid (#939)
     InvalidReputationPolicy = 17,
+    /// Onboarding or verification rate limit exceeded (#940)
+    RateLimitExceeded = 18,
+    /// Proof-of-Humanity credential hash is already registered to another user (#940)
+    DuplicateIdentityCredential = 19,
+    /// Correlated identity hash is already linked to another user (#940)
+    DuplicateIdentityCorrelation = 20,
+    /// Profile is currently under administrative or automated review (#940)
+    ProfileUnderReview = 21,
+    /// Profile has been flagged for suspicious activity (#940)
+    ProfileFlagged = 22,
+    /// Proof-of-Humanity credential is invalid or missing (#940)
+    InvalidPohCredential = 23,
+    /// Proof-of-Humanity credential has expired (#940)
+    PohCredentialExpired = 24,
+    /// Cooldown period for manual verification request is still active (#940)
+    VerificationCooldownActive = 25,
 }
 
 /// Cross-contract interface the onboarding contract uses to query the escrow
@@ -1195,11 +1321,12 @@ impl OnboardingContract {
 
     fn is_verification_pending_internal(env: &Env, user: &Address) -> bool {
         let key = DataKey::VerificationRequest(user.clone());
-        let is_pending = env.storage().persistent().has(&key);
-        if is_pending {
-            Self::extend_persistent(env, &key);
-        }
-        is_pending
+        // Issue #702: pending markers live in temporary storage. Do not call
+        // extend_ttl — temporary entries are cleared on process/clear and rely
+        // on short default expiry rather than persistent rent extensions.
+        // Also accept a legacy persistent marker from pre-#702 deployments
+        // without refreshing its TTL (that would defeat this optimization).
+        env.storage().temporary().has(&key) || env.storage().persistent().has(&key)
     }
 
     fn enqueue_verification_request(env: &Env, user: &Address) {
@@ -1209,10 +1336,10 @@ impl OnboardingContract {
         Self::extend_persistent(env, &queue_index_key);
 
         let pending_key = DataKey::VerificationRequest(user.clone());
+        // Temporary write only — no extend_ttl (#702).
         env.storage()
-            .persistent()
+            .temporary()
             .set(&pending_key, &env.ledger().timestamp());
-        Self::extend_persistent(env, &pending_key);
 
         Self::set_queue_pointer(env, DataKey::VerificationQueueTail, tail + 1);
     }
@@ -1244,8 +1371,46 @@ impl OnboardingContract {
 
     fn clear_verification_request(env: &Env, user: &Address) {
         let pending_key = DataKey::VerificationRequest(user.clone());
+        env.storage().temporary().remove(&pending_key);
+        // Drop any legacy persistent marker left by pre-#702 deployments.
         env.storage().persistent().remove(&pending_key);
         Self::advance_verification_head(env);
+    }
+
+    fn enqueue_review_request(env: &Env, user: &Address) {
+        let tail = Self::get_queue_pointer(env, &DataKey::ReviewQueueTail);
+        let queue_index_key = DataKey::ReviewQueueIndex(tail);
+        env.storage().persistent().set(&queue_index_key, user);
+        Self::extend_persistent(env, &queue_index_key);
+        Self::set_queue_pointer(env, DataKey::ReviewQueueTail, tail + 1);
+    }
+
+    fn advance_review_head(env: &Env) {
+        let mut head = Self::get_queue_pointer(env, &DataKey::ReviewQueueHead);
+        let tail = Self::get_queue_pointer(env, &DataKey::ReviewQueueTail);
+
+        while head < tail {
+            let queue_index_key = DataKey::ReviewQueueIndex(head);
+            let queued_user: Option<Address> = env.storage().persistent().get(&queue_index_key);
+
+            let Some(queued_user) = queued_user else {
+                head += 1;
+                continue;
+            };
+
+            let profile_opt = Self::try_get_user_profile(env, queued_user.clone());
+            if let Some(profile) = profile_opt {
+                if profile.status == ProfileStatus::UnderReview {
+                    Self::extend_persistent(env, &queue_index_key);
+                    break;
+                }
+            }
+
+            env.storage().persistent().remove(&queue_index_key);
+            head += 1;
+        }
+
+        Self::set_queue_pointer(env, DataKey::ReviewQueueHead, head);
     }
 
     fn read_username_fee_token(env: &Env) -> Option<Address> {
@@ -1945,6 +2110,11 @@ impl OnboardingContract {
     /// missing key is a no-op, but it still costs CPU. For hot paths that
     /// may legitimately call the helper with absent keys, use
     /// [`Self::extend_persistent_if_present`] instead.
+    ///
+    /// # Issue #702 — temporary storage
+    /// Never route temporary keys through this helper. Pending verification
+    /// markers (`DataKey::VerificationRequest`) use temporary storage and must
+    /// not pay for `extend_ttl`; they are cleared on approve/reject/clear.
     fn extend_persistent(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
         env.storage()
             .persistent()
@@ -1979,6 +2149,18 @@ impl OnboardingContract {
             Self::extend_persistent(env, key);
         }
         value
+    }
+
+    fn update_active_user_count(env: &Env, delta: i32) {
+        let key = DataKey::ActiveUserCount;
+        let count: u32 = Self::read_persistent(env, &key).unwrap_or(0);
+        let new_count = if delta > 0 {
+            count.saturating_add(delta as u32)
+        } else {
+            count.saturating_sub((-delta) as u32)
+        };
+        env.storage().persistent().set(&key, &new_count);
+        Self::extend_persistent(env, &key);
     }
 
     /// TTL-bump variant that first checks the entry exists (Issue #82 optimization).
@@ -2138,6 +2320,19 @@ impl OnboardingContract {
         env.storage().persistent().set(&DataKey::Config, &config);
         Self::extend_persistent(&env, &DataKey::Config);
 
+        // Seed default anti-Sybil configuration (#940)
+        env.storage().persistent().set(&DataKey::OnboardingRateLimitWindow, &3600u64);
+        Self::extend_persistent(&env, &DataKey::OnboardingRateLimitWindow);
+
+        env.storage().persistent().set(&DataKey::MaxOnboardingAttemptsPerWindow, &3u32);
+        Self::extend_persistent(&env, &DataKey::MaxOnboardingAttemptsPerWindow);
+
+        env.storage().persistent().set(&DataKey::VerificationCooldown, &86400u64);
+        Self::extend_persistent(&env, &DataKey::VerificationCooldown);
+
+        env.storage().persistent().set(&DataKey::PohRequiredForAutoVerify, &false);
+        Self::extend_persistent(&env, &DataKey::PohRequiredForAutoVerify);
+
         // Issue #939 — seed default reputation decay / anti-farming policy.
         let reputation_policy = Self::default_reputation_policy();
         env.storage()
@@ -2272,17 +2467,25 @@ impl OnboardingContract {
     /// * [`Error::UsernameTaken`] — the normalized username is in use.
     /// * [`Error::UsernameTooShort`] / [`Error::UsernameTooLong`].
     pub fn onboard_user(env: Env, user: Address, username: String, role: UserRole) -> UserProfile {
-        // [SECURITY] Endpoint #93: The registering user must prove ownership of the
-        // supplied address. Unauthorized invocation without a valid user signature is
-        // rejected before any state mutation.
+        Self::onboard_user_with_identity(env.clone(), user, username, role, Bytes::new(&env))
+    }
+
+    /// Onboard a new user while optionally attaching an off-chain identity correlation hash (#940).
+    ///
+    /// Enforces rate limits per address and detects duplicate identity correlation hashes.
+    pub fn onboard_user_with_identity(
+        env: Env,
+        user: Address,
+        username: String,
+        role: UserRole,
+        identity_hash: Bytes,
+    ) -> UserProfile {
         user.require_auth();
 
-        // Validate role is valid (only Buyer or Artisan for self-onboarding)
         if role != UserRole::Buyer && role != UserRole::Artisan {
             Self::emit_onboard_failed_and_panic(&env, &user, Error::InvalidRole);
         }
 
-        // Get configuration
         let config: OnboardingConfig = env
             .storage()
             .persistent()
@@ -2292,14 +2495,8 @@ impl OnboardingContract {
             });
         Self::extend_persistent(&env, &DataKey::Config);
 
-        // [SECURITY] Endpoint #93: Only verified platform roles may approve new user
-        // registrations. The platform admin must co-sign every onboarding transaction
-        // to prevent unauthorized state transitions.
         config.platform_admin.require_auth();
 
-        // [SECURITY] Issue #621: Reject onboarding while the escrow contract is paused.
-        // When an escrow contract is configured, query it for pause state before allowing
-        // new user registration.
         if let Some(ref escrow_addr) = config.escrow_contract {
             let escrow_client = EscrowClient::new(&env, escrow_addr);
             if escrow_client.is_paused() {
@@ -2307,10 +2504,78 @@ impl OnboardingContract {
             }
         }
 
-        // Normalize the username (lowercase + trim whitespace)
-        let normalized = normalize_username(&env, &username);
+        // [ANTI-SYBIL] Rate Limiting per address
+        let now = env.ledger().timestamp();
+        let rate_key = DataKey::RateLimitTracker(user.clone());
+        let mut rate_record: RateLimitRecord = Self::read_persistent(&env, &rate_key).unwrap_or(RateLimitRecord {
+            window_start: now,
+            count: 0,
+            last_attempt: now,
+        });
 
-        // Convert to Symbol for optimized storage
+        let window = Self::read_persistent(&env, &DataKey::OnboardingRateLimitWindow).unwrap_or(3600u64);
+        let max_attempts = Self::read_persistent(&env, &DataKey::MaxOnboardingAttemptsPerWindow).unwrap_or(3u32);
+
+        if window > 0 {
+            if now < rate_record.window_start + window {
+                if rate_record.count >= max_attempts {
+                    env.events().publish(
+                        (Symbol::new(&env, "SybilPatternDetected"),),
+                        SybilPatternDetectedEvent {
+                            user: user.clone(),
+                            reason: Symbol::new(&env, "RateLimitExceeded"),
+                            timestamp: now,
+                        },
+                    );
+                    Self::emit_onboard_failed_and_panic(&env, &user, Error::RateLimitExceeded);
+                }
+                rate_record.count += 1;
+                rate_record.last_attempt = now;
+            } else {
+                rate_record.window_start = now;
+                rate_record.count = 1;
+                rate_record.last_attempt = now;
+            }
+            env.storage().persistent().set(&rate_key, &rate_record);
+            Self::extend_persistent(&env, &rate_key);
+        }
+
+        // [ANTI-SYBIL] Identity Correlation Check
+        if !identity_hash.is_empty() {
+            let corr_key = DataKey::IdentityCorrelation(identity_hash.clone());
+            if let Some(existing_user) = Self::read_persistent::<_, Address>(&env, &corr_key) {
+                if existing_user != user {
+                    env.events().publish(
+                        (Symbol::new(&env, "SybilPatternDetected"),),
+                        SybilPatternDetectedEvent {
+                            user: user.clone(),
+                            reason: Symbol::new(&env, "DuplicateCorrelation"),
+                            timestamp: now,
+                        },
+                    );
+                    env.events().publish(
+                        (Symbol::new(&env, "IdentityCorrelated"),),
+                        IdentityCorrelatedEvent {
+                            user: user.clone(),
+                            identity_hash: identity_hash.clone(),
+                        },
+                    );
+                    Self::emit_onboard_failed_and_panic(&env, &user, Error::DuplicateIdentityCorrelation);
+                }
+            } else {
+                env.storage().persistent().set(&corr_key, &user);
+                Self::extend_persistent(&env, &corr_key);
+                env.events().publish(
+                    (Symbol::new(&env, "IdentityCorrelated"),),
+                    IdentityCorrelatedEvent {
+                        user: user.clone(),
+                        identity_hash: identity_hash.clone(),
+                    },
+                );
+            }
+        }
+
+        let normalized = normalize_username(&env, &username);
         let username_len = core::cmp::min(normalized.len() as usize, 32);
         let mut user_buf = [0u8; 32];
         normalized.copy_into_slice(&mut user_buf[..username_len]);
@@ -2324,39 +2589,12 @@ impl OnboardingContract {
             Self::emit_onboard_failed_and_panic(&env, &user, Error::UsernameTooLong);
         }
 
-        // Check if user already onboarded (#92).
-        //
-        // Reads the `DataKey::UserProfile(user)` persistent entry to determine
-        // whether this address has already completed onboarding.
-        //
-        // Storage side-effect (existing users only): if a profile is found, its
-        // persistent TTL is extended by `TTL_EXTENSION` ledgers before the panic.
-        // This "optimistic TTL refresh on read" pattern ensures that a profile
-        // that is close to expiry is not silently archived on the same ledger that
-        // rejected a duplicate-onboarding attempt — the failure path should never
-        // be a vector for accidentally losing a live record.
-        //
-        // Preconditions:
-        //   - Config must be initialized (checked and extended above).
-        //   - `user.require_auth()` must have passed (enforced at function entry).
-        //
-        // Integration notes for off-chain integrators (#92):
-        //   - Use `get_user(user)` or subscribe to `UserOnboarded` events as the
-        //     preferred way to check onboarding status; avoid probing this storage
-        //     key directly, as TTL expiry can make `has` return `false` for users
-        //     who have not interacted with the contract recently.
-        //   - `onboard_user` panics on a duplicate call, so client code should
-        //     guard with a `get_user` probe or catch the error via the auto-generated
-        //     `try_onboard_user` client method.
-        //   - Profile shape is versioned via `CURRENT_USER_PROFILE_VERSION`; any
-        //     schema change requires a migration via `migrate_user_profile`.
         let existing = Self::try_get_stored_user_profile(&env, user.clone());
         if existing.is_some() {
             Self::extend_persistent(&env, &DataKey::UserProfile(user.clone()));
             Self::emit_onboard_failed_and_panic(&env, &user, Error::AlreadyOnboarded);
         }
 
-        // Check username uniqueness
         if env
             .storage()
             .persistent()
@@ -2365,7 +2603,6 @@ impl OnboardingContract {
             Self::emit_onboard_failed_and_panic(&env, &user, Error::UsernameTaken);
         }
 
-        // Create user profile with normalized username
         let profile = UserProfile {
             version: CURRENT_USER_PROFILE_VERSION,
             address: user.clone(),
@@ -2379,52 +2616,14 @@ impl OnboardingContract {
             status: ProfileStatus::Active,
         };
 
-        // Store profile
         Self::persist_public_user_profile(&env, &user, &profile);
+        Self::update_active_user_count(&env, 1);
 
-        // Store username → address mapping for uniqueness enforcement.
-        //
-        // Storage side-effect: writes a `DataKey::Username(normalized)` persistent entry
-        // whose value is the owner's `Address`.  This secondary index is the authoritative
-        // source for username availability checks and is consulted by:
-        //   - `get_user_by_username`  — resolves a handle to a full `UserProfile`
-        //   - `change_username`       — removes the old key and writes a new one atomically
-        //   - the uniqueness guard earlier in this function (`.has` check)
-        //
-        // Preconditions (validated above):
-        //   1. No `DataKey::Username(normalized)` entry exists yet (uniqueness guard passed).
-        //   2. The normalized username satisfies the configured min/max length constraints.
-        //
-        // Integration notes for off-chain indexers (#104):
-        //   - Index the `UserOnboarded` and `UsernameChanged` events to maintain a
-        //     username → address mapping without polling contract storage directly.
-        //   - The key is stored under a `TTL_EXTENSION`-ledger TTL.  Integrators that
-        //     probe storage directly must account for key expiry if `extend_persistent`
-        //     was not called recently (e.g. for dormant accounts).
-        //   - Username normalisation rules: lowercase, separator characters collapsed to
-        //     `_`, leading/trailing separators stripped.  Apply the same rules on the
-        //     client side before constructing a lookup key.
         env.storage()
             .persistent()
             .set(&DataKey::Username(normalized.clone()), &user);
         Self::extend_persistent(&env, &DataKey::Username(normalized.clone()));
 
-        // Emit UserOnboarded event (#108).
-        //
-        // Event topic  : `("UserOnboarded",)`
-        // Event payload: `UserOnboardedEvent { user, username, role }`
-        //
-        // Fields:
-        // * `user`     - The wallet address that was just onboarded.
-        // * `username` - The normalized (lowercased, trimmed) username stored on-chain.
-        // * `role`     - The role assigned: `Buyer` (1) or `Artisan` (2).
-        //                Numeric discriminants:
-        //                  0 = Admin    (reserved; cannot be self-assigned)
-        //                  1 = Buyer
-        //                  2 = Artisan
-        //                Off-chain consumers should treat any unrecognised discriminant
-        //                as unknown and not silently drop the event.
-        //
         // Emitted after all storage writes complete, so subscribers observing this
         // event can safely query `get_user` and `get_user_by_username` immediately.
         //
@@ -2449,6 +2648,7 @@ impl OnboardingContract {
                 role,
             },
         );
+        Self::increment_persistent_u32(&env, &DataKey::GlobalOnboardCount);
 
         profile
     }
@@ -2589,6 +2789,11 @@ impl OnboardingContract {
             }
             None => 0,
         }
+    }
+
+    /// Return the number of profiles currently in active status.
+    pub fn get_active_user_count(env: Env) -> u32 {
+        Self::read_persistent(&env, &DataKey::ActiveUserCount).unwrap_or(0)
     }
 
     /// Get user profile by username (case-insensitive)
@@ -2898,6 +3103,7 @@ impl OnboardingContract {
         // Update profile state
         profile.status = ProfileStatus::Deactivated;
         Self::persist_public_user_profile(&env, &user, &profile);
+        Self::update_active_user_count(&env, -1);
 
         // Issue #524 — event payload now carries the user's role at
         // deactivation time. The role was overwritten in the
@@ -2974,6 +3180,7 @@ impl OnboardingContract {
 
         profile.status = ProfileStatus::Active;
         Self::persist_public_user_profile(&env, &user, &profile);
+        Self::update_active_user_count(&env, 1);
 
         env.events().publish(
             (Symbol::new(&env, "ProfileReactivated"), user.clone()),
@@ -3152,7 +3359,6 @@ impl OnboardingContract {
 
         config.platform_admin.require_auth();
 
-        Self::extend_persistent(&env, &DataKey::Config);
         config.escrow_contract = Some(contract_address);
 
         env.storage().persistent().set(&DataKey::Config, &config);
@@ -3227,7 +3433,6 @@ impl OnboardingContract {
             .persistent()
             .get(&DataKey::Config)
             .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
-        Self::extend_persistent(&env, &DataKey::Config);
 
         config.platform_admin.require_auth();
         config.auto_verify_enabled = enabled;
@@ -3341,7 +3546,6 @@ impl OnboardingContract {
             None => config.platform_admin.require_auth(),
         }
         Self::extend_persistent(&env, &DataKey::Config);
-        Self::extend_persistent(&env, &DataKey::Config);
 
         let key = DataKey::UserMetrics(address.clone());
         let mut metrics = Self::read_user_metrics(&env, &address);
@@ -3365,7 +3569,10 @@ impl OnboardingContract {
             volume_delta
         };
 
-        metrics.total_volume = metrics.total_volume.saturating_add(normalized_delta);
+        metrics.total_volume = metrics
+            .total_volume
+            .checked_add(normalized_delta)
+            .unwrap_or_else(|| env.panic_with_error(Error::VolumeOverflow));
 
         env.storage().persistent().set(&key, &metrics);
         Self::extend_persistent(&env, &key);
@@ -3478,7 +3685,12 @@ impl OnboardingContract {
             None => return,
         };
 
-        if profile.is_verified {
+        if profile.is_verified || profile.status == ProfileStatus::UnderReview || profile.status == ProfileStatus::Flagged {
+            return;
+        }
+
+        let poh_required = Self::read_persistent(env, &DataKey::PohRequiredForAutoVerify).unwrap_or(false);
+        if poh_required && !Self::is_poh_valid(env.clone(), address.clone()) {
             return;
         }
 
@@ -3488,7 +3700,7 @@ impl OnboardingContract {
             profile.is_verified = true;
             Self::persist_public_user_profile(env, &address, &profile);
 
-            // Emit distinct AutoVerifiedEvent to fulfill #654 architecture requirements
+            // auto-verification triggered — emit AutoVerifiedEvent (#713)
             env.events().publish(
                 (Symbol::new(env, "AutoVerifiedEvent"), address.clone()),
                 AutoVerifiedEvent {
@@ -3541,7 +3753,12 @@ impl OnboardingContract {
 
         let profile = Self::get_user_profile(&env, address.clone());
 
-        if profile.is_verified {
+        if profile.is_verified || profile.status == ProfileStatus::UnderReview || profile.status == ProfileStatus::Flagged {
+            return false;
+        }
+
+        let poh_required = Self::read_persistent(&env, &DataKey::PohRequiredForAutoVerify).unwrap_or(false);
+        if poh_required && !Self::is_poh_valid(env.clone(), address.clone()) {
             return false;
         }
 
@@ -3577,6 +3794,40 @@ impl OnboardingContract {
 
         let profile = Self::get_user_profile(&env, user.clone());
 
+        if profile.status == ProfileStatus::UnderReview {
+            env.panic_with_error(Error::ProfileUnderReview);
+        }
+        if profile.status == ProfileStatus::Flagged {
+            env.panic_with_error(Error::ProfileFlagged);
+        }
+
+        let _config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        let poh_required = Self::read_persistent(&env, &DataKey::PohRequiredForAutoVerify).unwrap_or(false);
+        if poh_required && !Self::is_poh_valid(env.clone(), user.clone()) {
+            env.panic_with_error(Error::InvalidPohCredential);
+        }
+
+        if Self::is_verification_pending_internal(&env, &user) {
+            return;
+        }
+
+        let now = env.ledger().timestamp();
+        let last_attempt_key = DataKey::VerificationLastAttempt(user.clone());
+        let cooldown = Self::read_persistent(&env, &DataKey::VerificationCooldown).unwrap_or(86400u64);
+        if let Some(last_attempt) = Self::read_persistent::<_, u64>(&env, &last_attempt_key) {
+            if cooldown > 0 && now < last_attempt + cooldown {
+                env.panic_with_error(Error::VerificationCooldownActive);
+            }
+        }
+        env.storage().persistent().set(&last_attempt_key, &now);
+        Self::extend_persistent(&env, &last_attempt_key);
+
         // Only Buyers and Artisans may request manual verification.
         // Admins and Moderators are assigned their roles directly and bypass
         // the verification queue.
@@ -3584,10 +3835,6 @@ impl OnboardingContract {
             profile.role == UserRole::Buyer || profile.role == UserRole::Artisan,
             "Only Buyers and Artisans can request verification"
         );
-
-        if Self::is_verification_pending_internal(&env, &user) {
-            return;
-        }
 
         Self::enqueue_verification_request(&env, &user);
 
@@ -3786,7 +4033,8 @@ impl OnboardingContract {
     /// # Storage Side-Effects
     /// - **Read** [`DataKey::VerificationQueueHead`] / [`DataKey::VerificationQueueTail`] — TTL extended.
     /// - **Read** [`DataKey::VerificationQueueIndex(i)`] for each slot — stale entries removed.
-    /// - **Read** [`DataKey::VerificationRequest(user)`] for each candidate — TTL extended if active.
+    /// - **Read** [`DataKey::VerificationRequest(user)`] for each candidate (temporary
+    ///   storage, no TTL extension — issue #702).
     ///
     /// # Emitted Events
     /// None.
@@ -4262,6 +4510,7 @@ impl OnboardingContract {
 
         // Interaction (CEI pattern: external transfer is the last step)
         Self::collect_username_change_fee(&env, &user, &config, snapshotted_fee_token);
+        Self::increment_persistent_u32(&env, &DataKey::GlobalUsernameChangeCount);
 
         profile
     }
@@ -4315,6 +4564,7 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFee, &fee);
+        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFee);
     }
 
@@ -4358,6 +4608,7 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFeeToken, &token);
+        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFeeToken);
     }
 
@@ -4407,6 +4658,7 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFeeWallet, &wallet);
+        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFeeWallet);
     }
 
@@ -4570,5 +4822,271 @@ impl OnboardingContract {
             .publish((Symbol::new(&env, "PortfolioUpdated"),), &user);
 
         profile
+    }
+
+    /// Read onboarding rate limit window length in seconds (#940).
+    pub fn get_rate_limit_window(env: Env) -> u64 {
+        Self::read_persistent(&env, &DataKey::OnboardingRateLimitWindow).unwrap_or(3600)
+    }
+
+    /// Read maximum onboarding attempts per window (#940).
+    pub fn get_max_onboard_attempts(env: Env) -> u32 {
+        Self::read_persistent(&env, &DataKey::MaxOnboardingAttemptsPerWindow).unwrap_or(3)
+    }
+
+    /// Read verification cooldown period in seconds (#940).
+    pub fn get_verification_cooldown(env: Env) -> u64 {
+        Self::read_persistent(&env, &DataKey::VerificationCooldown).unwrap_or(86400)
+    }
+
+    /// Read whether Proof-of-Humanity is required for auto/manual verification (#940).
+    pub fn is_poh_required_for_auto_verify(env: Env) -> bool {
+        Self::read_persistent(&env, &DataKey::PohRequiredForAutoVerify).unwrap_or(false)
+    }
+
+    /// Read optional Proof-of-Humanity verifier address (#940).
+    pub fn get_poh_verifier(env: Env) -> Option<Address> {
+        Self::read_persistent(&env, &DataKey::PohVerifier)
+    }
+
+    /// Update anti-Sybil, rate-limiting, and Proof-of-Humanity configuration (admin only) (#940).
+    pub fn set_sybil_config(
+        env: Env,
+        rate_limit_window: u64,
+        max_onboard_attempts: u32,
+        verification_cooldown: u64,
+        poh_required_for_auto_verify: bool,
+        poh_verifier: Option<Address>,
+    ) {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+
+        config.platform_admin.require_auth();
+
+        env.storage().persistent().set(&DataKey::OnboardingRateLimitWindow, &rate_limit_window);
+        Self::extend_persistent(&env, &DataKey::OnboardingRateLimitWindow);
+
+        env.storage().persistent().set(&DataKey::MaxOnboardingAttemptsPerWindow, &max_onboard_attempts);
+        Self::extend_persistent(&env, &DataKey::MaxOnboardingAttemptsPerWindow);
+        Self::extend_persistent(&env, &DataKey::MaxOnboardingAttemptsPerWindow);
+
+        env.storage().persistent().set(&DataKey::VerificationCooldown, &verification_cooldown);
+        Self::extend_persistent(&env, &DataKey::VerificationCooldown);
+
+        env.storage().persistent().set(&DataKey::PohRequiredForAutoVerify, &poh_required_for_auto_verify);
+        Self::extend_persistent(&env, &DataKey::PohRequiredForAutoVerify);
+
+        if let Some(ref verifier) = poh_verifier {
+            env.storage().persistent().set(&DataKey::PohVerifier, verifier);
+            Self::extend_persistent(&env, &DataKey::PohVerifier);
+        } else {
+            env.storage().persistent().remove(&DataKey::PohVerifier);
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "ConfigUpdated"), Symbol::new(&env, "sybil_config")),
+            &config.platform_admin,
+        );
+    }
+
+    /// Attach a Proof-of-Humanity credential to a user profile (#940).
+    ///
+    /// Checks that the credential hash has not already been claimed by another address
+    /// (preventing proof duplication across Sybil accounts).
+    pub fn register_poh_credential(
+        env: Env,
+        user: Address,
+        provider_id: Symbol,
+        credential_hash: Bytes,
+        expires_at: u64,
+    ) -> PohCredential {
+        user.require_auth();
+
+        let _config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+
+        let verifier: Option<Address> = Self::read_persistent(&env, &DataKey::PohVerifier);
+        if let Some(ref v) = verifier {
+            v.require_auth();
+        }
+
+        let _profile = Self::get_user_profile(&env, user.clone());
+
+        let poh_hash_key = DataKey::PohCredentialHash(credential_hash.clone());
+        if let Some(existing_owner) = Self::read_persistent::<_, Address>(&env, &poh_hash_key) {
+            if existing_owner != user {
+                env.panic_with_error(Error::DuplicateIdentityCredential);
+            }
+        }
+
+        let cred = PohCredential {
+            provider_id: provider_id.clone(),
+            credential_hash: credential_hash.clone(),
+            verified_at: env.ledger().timestamp(),
+            expires_at,
+        };
+
+        let poh_user_key = DataKey::UserPohCredential(user.clone());
+        env.storage().persistent().set(&poh_user_key, &cred);
+        Self::extend_persistent(&env, &poh_user_key);
+
+        env.storage().persistent().set(&poh_hash_key, &user);
+        Self::extend_persistent(&env, &poh_hash_key);
+
+        env.events().publish(
+            (Symbol::new(&env, "PohCredentialRegistered"),),
+            PohCredentialRegisteredEvent {
+                user: user.clone(),
+                provider_id,
+                credential_hash,
+            },
+        );
+
+        cred
+    }
+
+    /// Read the Proof-of-Humanity credential for a user address (#940).
+    pub fn get_poh_credential(env: Env, user: Address) -> Option<PohCredential> {
+        Self::read_persistent(&env, &DataKey::UserPohCredential(user))
+    }
+
+    /// Check if a user holds a valid (unexpired) Proof-of-Humanity credential (#940).
+    pub fn is_poh_valid(env: Env, user: Address) -> bool {
+        if let Some(cred) = Self::read_persistent::<_, PohCredential>(&env, &DataKey::UserPohCredential(user)) {
+            cred.expires_at > env.ledger().timestamp()
+        } else {
+            false
+        }
+    }
+
+    /// Flag a user profile for suspicious anti-Sybil behavior and enqueue for review (admin only) (#940).
+    pub fn flag_suspicious_profile(
+        env: Env,
+        target_user: Address,
+        reason_code: u32,
+        delay_seconds: u64,
+    ) {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        config.platform_admin.require_auth();
+
+        let mut profile = Self::get_user_profile(&env, target_user.clone());
+        profile.status = ProfileStatus::UnderReview;
+        Self::persist_public_user_profile(&env, &target_user, &profile);
+
+        let now = env.ledger().timestamp();
+        let flag = SuspiciousActivityFlag {
+            reason_code,
+            flagged_at: now,
+            flagged_by: config.platform_admin.clone(),
+            delay_until: now + delay_seconds,
+        };
+
+        let flag_key = DataKey::SuspiciousActivityFlag(target_user.clone());
+        env.storage().persistent().set(&flag_key, &flag);
+        Self::extend_persistent(&env, &flag_key);
+
+        Self::enqueue_review_request(&env, &target_user);
+
+        env.events().publish(
+            (Symbol::new(&env, "ProfileFlagged"),),
+            ProfileFlaggedEvent {
+                user: target_user.clone(),
+                reason_code,
+                timestamp: now,
+            },
+        );
+        env.events().publish(
+            (Symbol::new(&env, "SybilPatternDetected"),),
+            SybilPatternDetectedEvent {
+                user: target_user,
+                reason: Symbol::new(&env, "FlaggedByAdmin"),
+                timestamp: now,
+            },
+        );
+    }
+
+    /// Read the active suspicious activity flag for a user (#940).
+    pub fn get_suspicious_flag(env: Env, user: Address) -> Option<SuspiciousActivityFlag> {
+        Self::read_persistent(&env, &DataKey::SuspiciousActivityFlag(user))
+    }
+
+    /// Retrieve queue of addresses currently under administrative anti-Sybil review (admin only) (#940).
+    pub fn get_review_queue(env: Env) -> Vec<Address> {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        config.platform_admin.require_auth();
+
+        Self::advance_review_head(&env);
+
+        let head = Self::get_queue_pointer(&env, &DataKey::ReviewQueueHead);
+        let tail = Self::get_queue_pointer(&env, &DataKey::ReviewQueueTail);
+        let mut queue = Vec::new(&env);
+
+        for index in head..tail {
+            let queue_index_key = DataKey::ReviewQueueIndex(index);
+            if let Some(user) = Self::read_persistent::<_, Address>(&env, &queue_index_key) {
+                if let Some(profile) = Self::try_get_user_profile(&env, user.clone()) {
+                    if profile.status == ProfileStatus::UnderReview {
+                        queue.push_back(user);
+                    }
+                }
+            }
+        }
+
+        queue
+    }
+
+    /// Process an anti-Sybil review decision for a user under review (admin only) (#940).
+    pub fn process_review(env: Env, user: Address, approve: bool) {
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        Self::extend_persistent(&env, &DataKey::Config);
+
+        config.platform_admin.require_auth();
+
+        let mut profile = Self::get_user_profile(&env, user.clone());
+
+        let action_str = if approve {
+            profile.status = ProfileStatus::Active;
+            env.storage()
+                .persistent()
+                .remove(&DataKey::SuspiciousActivityFlag(user.clone()));
+            "approved"
+        } else {
+            profile.status = ProfileStatus::Flagged;
+            "flagged"
+        };
+
+        Self::persist_public_user_profile(&env, &user, &profile);
+
+        let now = env.ledger().timestamp();
+        env.events().publish(
+            (Symbol::new(&env, "ReviewCompleted"),),
+            ReviewCompletedEvent {
+                user,
+                action: Symbol::new(&env, action_str),
+                timestamp: now,
+            },
+        );
     }
 }

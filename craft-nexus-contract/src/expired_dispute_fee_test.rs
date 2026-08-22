@@ -86,7 +86,7 @@ fn create_and_dispute_escrow(
 
 #[test]
 fn test_default_policy_is_refund_full_no_fee() {
-    let (_, client, _, _, _, _admin, _, _, _) = setup_test();
+    let (_, client, _, _, _, _, _, _, _) = setup_test();
 
     let policy = client.get_expired_dispute_policy();
     assert_eq!(policy, ExpiredDisputeFeePolicy::RefundFullNoPlatformFee);
@@ -94,7 +94,7 @@ fn test_default_policy_is_refund_full_no_fee() {
 
 #[test]
 fn test_update_expired_dispute_policy() {
-    let (_, client, _, _, _, _admin, _, _, _) = setup_test();
+    let (_, client, _, _, _, _, _, _, _) = setup_test();
 
     // Update to RefundMinusPlatformFee
     client.update_expired_dispute_policy(&ExpiredDisputeFeePolicy::RefundMinusPlatformFee);
@@ -144,7 +144,7 @@ fn test_policy_refund_full_no_platform_fee() {
 
 #[test]
 fn test_policy_refund_minus_platform_fee() {
-    let (env, client, buyer, seller, token_addr, _admin, platform_wallet, _, _) = setup_test();
+    let (env, client, buyer, seller, token_addr, _, platform_wallet, _, _) = setup_test();
     let token = token::Client::new(&env, &token_addr);
 
     let amount = 1_000_000i128;
@@ -186,7 +186,7 @@ fn test_policy_refund_minus_platform_fee() {
 
 #[test]
 fn test_policy_deduct_fee_from_seller() {
-    let (env, client, buyer, seller, token_addr, _admin, platform_wallet, _, _) = setup_test();
+    let (env, client, buyer, seller, token_addr, _, platform_wallet, _, _) = setup_test();
     let token = token::Client::new(&env, &token_addr);
 
     let amount = 1_000_000i128;
@@ -221,7 +221,7 @@ fn test_policy_deduct_fee_from_seller() {
 
 #[test]
 fn test_policy_split_fee() {
-    let (env, client, buyer, seller, token_addr, _admin, platform_wallet, _, _) = setup_test();
+    let (env, client, buyer, seller, token_addr, _, platform_wallet, _, _) = setup_test();
     let token = token::Client::new(&env, &token_addr);
 
     let amount = 1_000_000i128;
@@ -264,7 +264,7 @@ fn test_policy_split_fee() {
 
 #[test]
 fn test_multiple_expired_disputes_with_different_policies() {
-    let (env, client, buyer, seller, token_addr, _admin, platform_wallet, _, _) = setup_test();
+    let (env, client, buyer, seller, token_addr, _, platform_wallet, _, _) = setup_test();
     let token = token::Client::new(&env, &token_addr);
 
     let amount = 1_000_000i128;
@@ -369,7 +369,7 @@ fn test_expired_dispute_only_works_on_disputed_escrows() {
 
 #[test]
 fn test_policy_with_different_fee_percentages() {
-    let (env, client, buyer, seller, token_addr, _admin, platform_wallet, _, _) = setup_test();
+    let (env, client, buyer, seller, token_addr, _, platform_wallet, _, _) = setup_test();
     let token = token::Client::new(&env, &token_addr);
 
     // Update platform fee to 10% (1000 bps)
@@ -407,7 +407,7 @@ fn test_policy_with_different_fee_percentages() {
 
 #[test]
 fn test_policy_with_small_amounts() {
-    let (env, client, buyer, seller, token_addr, _admin, platform_wallet, _, _) = setup_test();
+    let (env, client, buyer, seller, token_addr, _, platform_wallet, _, _) = setup_test();
     let token = token::Client::new(&env, &token_addr);
 
     // Update policy to RefundMinusPlatformFee
@@ -442,7 +442,7 @@ fn test_policy_with_small_amounts() {
 
 #[test]
 fn test_policy_persists_across_config_updates() {
-    let (_, client, _, _, _, _admin, _, _, _) = setup_test();
+    let (_, client, _, _, _, _, _, _, _) = setup_test();
 
     // Set policy to SplitFee
     client.update_expired_dispute_policy(&ExpiredDisputeFeePolicy::SplitFee);
@@ -465,7 +465,7 @@ fn test_policy_persists_across_config_updates() {
 
 #[test]
 fn test_resolve_expired_dispute_decrements_active_obligations() {
-    let (env, client, buyer, seller, token_addr, _admin, _, _, _) = setup_test();
+    let (env, client, buyer, seller, token_addr, _, _, _, _) = setup_test();
 
     let amount = 1_000_000i128;
     let order_id = 1u32;

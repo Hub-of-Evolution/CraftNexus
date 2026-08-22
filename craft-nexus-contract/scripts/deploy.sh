@@ -95,15 +95,17 @@ stellar network add \
     "$NETWORK" 2>/dev/null || true
 
 # Deploy
-echo "📤 Deploying contract..."
+echo "Deploying contract..."
 CONTRACT_ID=$(stellar contract deploy \
     --wasm "$WASM_ARTIFACT" \
-    --source "$SOURCE_ACCOUNT" \
+    --source-account "$SOURCE_ACCOUNT" \
+    --rpc-url "$RPC_URL" \
+    --network-passphrase "$NETWORK_PASSPHRASE" \
     --network "$NETWORK")
 
 echo ""
-echo "✅ Contract deployed successfully!"
-echo "📝 Contract ID: $CONTRACT_ID"
+echo "Contract deployed successfully!"
+echo "Contract ID: $CONTRACT_ID"
 echo ""
 echo "Add this to your .env.local:"
 echo "NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS=$CONTRACT_ID"

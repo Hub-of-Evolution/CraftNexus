@@ -31,7 +31,7 @@ See changes in this branch.
 cd craft-nexus-contract
 cargo check --tests
 cargo test
-cargo build --target wasm32-unknown-unknown --release
+cargo build --target wasm32v1-none --release
 ```
 
 - Expected: `cargo check --tests` passes with zero errors and the new test asserts that recovery fails for a zero-second window.

@@ -21,6 +21,18 @@ import {
   PLATFORM_COMMISSION_PERCENT,
   PLATFORM_COMMISSION_WALLET,
 } from "./config";
+import { calculateFee, computeFeeAllocation, previewReleaseFunds } from "./fee-policy";
+
+const USDC_DECIMALS = 7;
+const USDC_FACTOR = 10 ** USDC_DECIMALS;
+
+function parseUSDC(amount: string): number {
+  return Math.floor(parseFloat(amount) * USDC_FACTOR);
+}
+
+function formatUSDC(amount: number): string {
+  return (amount / USDC_FACTOR).toFixed(USDC_DECIMALS);
+}
 
 export interface PaymentParams {
   senderSecret: string;
@@ -93,8 +105,9 @@ export class StellarPaymentService {
   }
 
   /**
-   * Send payment with platform commission split
-   * Sends payment to seller and commission to platform wallet
+   * Send payment with platform commission split.
+   * Fee logic mirrors the on-chain deterministic policy engine (integer arithmetic),
+   * so off-chain and on-chain allocations always agree.
    */
   async sendPaymentWithCommission(
     buyerSecret: string,
@@ -107,11 +120,12 @@ export class StellarPaymentService {
       const buyerAccount = await this.server.loadAccount(buyerKeypair.publicKey());
 
       const usdcAsset = new Asset("USDC", USDC_ISSUER);
-      const amountNum = parseFloat(amount);
-      
-      // Calculate commission (5%)
-      const commissionAmount = (amountNum * PLATFORM_COMMISSION_PERCENT / 100).toFixed(7);
-      const sellerAmount = (amountNum - parseFloat(commissionAmount)).toFixed(7);
+      const amountInt = parseUSDC(amount);
+      const feeBps = PLATFORM_COMMISSION_PERCENT * 100;
+
+      const allocation = previewReleaseFunds(amountInt, feeBps);
+      const sellerAmountStr = formatUSDC(allocation.sellerAmount);
+      const commissionAmountStr = formatUSDC(allocation.platformFee);
 
       const transactionBuilder = new TransactionBuilder(buyerAccount, {
         fee: BASE_FEE.toString(),
@@ -122,7 +136,7 @@ export class StellarPaymentService {
       transactionBuilder.addOperation(Operation.payment({
         destination: sellerPublicKey,
         asset: usdcAsset,
-        amount: sellerAmount,
+        amount: sellerAmountStr,
       }));
 
       // Add commission payment if platform wallet is configured
@@ -130,7 +144,7 @@ export class StellarPaymentService {
         transactionBuilder.addOperation(Operation.payment({
           destination: PLATFORM_COMMISSION_WALLET,
           asset: usdcAsset,
-          amount: commissionAmount,
+          amount: commissionAmountStr,
         }));
       }
 

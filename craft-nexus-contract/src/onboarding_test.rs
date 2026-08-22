@@ -2826,6 +2826,77 @@ fn test_get_verification_queue_extends_ttl_for_every_slot() {
     });
 }
 
+// ============================================================
+// Issue #702 – no extend_ttl on temporary verification markers
+// ============================================================
+
+/// Pending verification markers live in temporary storage and must not pay for
+/// persistent `extend_ttl` on enqueue or pending checks.
+#[test]
+fn test_verification_request_uses_temporary_storage_without_extend_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "temp_vrfy"), &UserRole::Artisan);
+    client.request_verification(&user);
+
+    assert!(client.is_verification_pending(&user));
+
+    env.as_contract(&client.address, || {
+        let key = DataKey::VerificationRequest(user.clone());
+        assert!(
+            env.storage().temporary().has(&key),
+            "pending marker must be stored in temporary storage"
+        );
+        assert!(
+            !env.storage().persistent().has(&key),
+            "pending marker must not be duplicated into persistent storage"
+        );
+    });
+
+    // Clearing removes the temporary marker and empties the queue.
+    assert!(client.admin_clear_verification_request(&user));
+    assert!(!client.is_verification_pending(&user));
+    env.as_contract(&client.address, || {
+        let key = DataKey::VerificationRequest(user.clone());
+        assert!(!env.storage().temporary().has(&key));
+        assert!(!env.storage().persistent().has(&key));
+    });
+}
+
+/// Legacy persistent pending markers are still recognized without refreshing TTL.
+#[test]
+fn test_legacy_persistent_verification_request_cleared_without_ttl_bump() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "legacy_vrfy"), &UserRole::Artisan);
+
+    // Simulate a pre-#702 persistent pending marker + queue slot.
+    env.as_contract(&client.address, || {
+        let pending_key = DataKey::VerificationRequest(user.clone());
+        env.storage()
+            .persistent()
+            .set(&pending_key, &env.ledger().timestamp());
+        // Intentionally do not extend_ttl — mirrors the #702 policy.
+        env.storage()
+            .persistent()
+            .set(&DataKey::VerificationQueueIndex(0), &user);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VerificationQueueTail, &1u64);
+    });
+
+    assert!(client.is_verification_pending(&user));
+    assert!(client.admin_clear_verification_request(&user));
+    assert!(!client.is_verification_pending(&user));
+    assert_eq!(client.get_verification_queue().len(), 0);
+}
+
 /// Read helpers refresh TTL on the entries they return without a second probe.
 #[test]
 fn test_read_paths_refresh_ttl_on_touched_entries() {
@@ -2921,3 +2992,165 @@ fn test_profile_read_budget_smoke() {
     let _ = client.get_user_reputation(&user);
     let _ = client.get_user_metrics(&user);
 }
+
+// ── Issue #940: Anti-Sybil Onboarding & Identity Abuse Tests ─────────────────
+
+#[test]
+fn test_sybil_config_management() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+
+    client.set_sybil_config(&1800u64, &5u32, &43200u64, &true, &None);
+
+    assert_eq!(client.get_rate_limit_window(), 1800);
+    assert_eq!(client.get_max_onboard_attempts(), 5);
+    assert_eq!(client.get_verification_cooldown(), 43200);
+    assert!(client.is_poh_required_for_auto_verify());
+    assert!(client.get_poh_verifier().is_none());
+}
+
+#[test]
+fn test_proof_of_humanity_credential_registration_and_validation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "pohuser"),
+        &UserRole::Buyer,
+    );
+
+    let provider = soroban_sdk::Symbol::new(&env, "WorldID");
+    let mut cred_buf = [0u8; 32];
+    cred_buf[0] = 0xAA;
+    let cred_hash = soroban_sdk::Bytes::from_slice(&env, &cred_buf);
+    let expires = env.ledger().timestamp() + 10_000;
+
+    let cred = client.register_poh_credential(&user, &provider, &cred_hash, &expires);
+    assert_eq!(cred.provider_id, provider);
+    assert_eq!(cred.credential_hash, cred_hash);
+
+    assert!(client.is_poh_valid(&user));
+
+    let fetched = client.get_poh_credential(&user).expect("PoH credential present");
+    assert_eq!(fetched.provider_id, provider);
+}
+
+#[test]
+#[should_panic]
+fn test_poh_credential_duplicate_prevention() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    client.onboard_user(&user1, &String::from_str(&env, "userone"), &UserRole::Buyer);
+    client.onboard_user(&user2, &String::from_str(&env, "usertwo"), &UserRole::Buyer);
+
+    let provider = soroban_sdk::Symbol::new(&env, "Gitcoin");
+    let mut cred_buf = [0u8; 32];
+    cred_buf[0] = 0xBB;
+    let cred_hash = soroban_sdk::Bytes::from_slice(&env, &cred_buf);
+    let expires = env.ledger().timestamp() + 10_000;
+
+    // Register for user1
+    client.register_poh_credential(&user1, &provider, &cred_hash, &expires);
+
+    // Registering the exact same credential hash for user2 must panic (DuplicateIdentityCredential)
+    client.register_poh_credential(&user2, &provider, &cred_hash, &expires);
+}
+
+#[test]
+fn test_identity_correlation_onboarding() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    let mut id_buf = [0u8; 32];
+    id_buf[0] = 0xCC;
+    let id_hash = soroban_sdk::Bytes::from_slice(&env, &id_buf);
+
+    let profile = client.onboard_user_with_identity(
+        &user,
+        &String::from_str(&env, "correlated"),
+        &UserRole::Artisan,
+        &id_hash,
+    );
+
+    assert_eq!(profile.address, user);
+    assert_eq!(profile.status, ProfileStatus::Active);
+}
+
+#[test]
+#[should_panic]
+fn test_duplicate_identity_correlation_rejection() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    let mut id_buf = [0u8; 32];
+    id_buf[0] = 0xDD;
+    let id_hash = soroban_sdk::Bytes::from_slice(&env, &id_buf);
+
+    client.onboard_user_with_identity(
+        &user1,
+        &String::from_str(&env, "sybil1"),
+        &UserRole::Artisan,
+        &id_hash,
+    );
+
+    // Attempting to onboard user2 with the same identity hash must panic (DuplicateIdentityCorrelation)
+    client.onboard_user_with_identity(
+        &user2,
+        &String::from_str(&env, "sybil2"),
+        &UserRole::Artisan,
+        &id_hash,
+    );
+}
+
+#[test]
+fn test_suspicious_profile_flagging_and_review_queue_workflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "suspect"),
+        &UserRole::Artisan,
+    );
+
+    // Flag profile for review
+    client.flag_suspicious_profile(&user, &101u32, &86400u64);
+
+    let profile = client.get_user(&user);
+    assert_eq!(profile.status, ProfileStatus::UnderReview);
+
+    let flag = client.get_suspicious_flag(&user).expect("Flag present");
+    assert_eq!(flag.reason_code, 101);
+
+    let queue = client.get_review_queue();
+    assert!(queue.contains(&user));
+
+    // Admin approves review -> clears flag and restores Active status
+    client.process_review(&user, &true);
+
+    let restored_profile = client.get_user(&user);
+    assert_eq!(restored_profile.status, ProfileStatus::Active);
+    assert!(client.get_suspicious_flag(&user).is_none());
+}
+

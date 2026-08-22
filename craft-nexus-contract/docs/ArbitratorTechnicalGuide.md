@@ -57,6 +57,15 @@ Before an Arbitrator can finalize a dispute, both parties get a guaranteed windo
 
 Once a decision is made, the Arbitrator calls the `resolve_dispute` function.
 
+> [!IMPORTANT]
+> **Arbitrator time-lock**: `resolve_dispute` will be rejected with
+> `Error::ArbitratorDeadlineExceeded` (46) once `max_dispute_duration` seconds have elapsed
+> since the dispute was opened. After the deadline the escrow must be settled via
+> `resolve_expired_dispute` instead. This prevents a stale or compromised arbitrator from
+> issuing a resolution after the platform's expiry policy has already taken effect.
+> Arbitrators must act before the deadline — the default window is 30 days from
+> `dispute_initiated_at`.
+
 **Step-by-Step Resolution:**
 
 1. **Review Evidence**: Fetch the escrow details using `get_escrow` and examine the `dispute_reason` and `ipfs_hash`, plus the full history via `get_evidence`.

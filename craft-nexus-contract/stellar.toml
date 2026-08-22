@@ -9,7 +9,7 @@ email = "dev@project.com"
 github = "https://github.com/Hub-of-Evolution/CraftNexus"
 
 [contracts.main]
-wasm = "target/wasm32-unknown-unknown/release/craft_nexus_contract.wasm"
+wasm = "target/wasm32v1-none/release/craft_nexus_contract.wasm"
 hash = "0x..."
 id_futurenet = "0x..."
 id_mainnet = "0x..."

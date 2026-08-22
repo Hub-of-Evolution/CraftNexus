@@ -83,9 +83,9 @@ if telemetry shows unique-account growth dominating storage cost.
   its own persistent slot, so creation remains O(1) even as the total
   number of escrows grows.
 * The relevant migration surface for the global registry is the
-  internal `migrate_legacy_all_escrow_ids` helper. `migrate_user_escrows`
-  only handles per-user buyer/seller legacy vectors and is not involved
-  in the global `AllEscrowIds` transition.
+  internal `migrate_legacy_all_escrow_ids` helper. The per-user
+  buyer/seller legacy vectors are handled separately and are not
+  involved in the global `AllEscrowIds` transition.
 * Lazy migration runs before every global append and before both public
   global read paths: `get_escrow_count` and
   `get_all_escrow_ids_iterative`.

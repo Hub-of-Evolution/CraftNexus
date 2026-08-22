@@ -797,7 +797,7 @@ This will:
 **Manual Installation (Alternative):**
 ```bash
 cargo install --locked stellar-cli
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 ```
 
 ---

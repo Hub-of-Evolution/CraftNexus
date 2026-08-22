@@ -19,6 +19,25 @@ wee_alloc = "0.4.5"
 
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+arbitrary = "1.3"
+
+# ── Batch-escrow budget benchmarks ────────────────────────────────────────────
+#
+# Criterion cannot bench a `cdylib` target directly, so the benchmarks live
+# inside the crate as `#[cfg(test)]` modules that use the Soroban host's
+# built-in budget tracker (see src/bench_batch_escrow.rs).
+#
+# Run all benchmark tests:
+#
+#   cargo test --features testutils bench_ -- --nocapture
+#
+# Run only the comparative summary table:
+#
+#   cargo test --features testutils bench_create_batch_escrow_summary -- --nocapture
+#
+# Run the budget-limit CI gate (fails if batch-20 exceeds default network limits):
+#
+#   cargo test --features testutils bench_batch_20_fits_within_default_budget -- --nocapture
 
 [profile.release]
 opt-level = "z"

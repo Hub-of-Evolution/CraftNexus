@@ -76,7 +76,7 @@ fn setup_enhanced_test(
 #[test]
 fn test_recurring_escrow_lifecycle() {
     let env = Env::default();
-    let (escrow, _, buyer, artisan, token_id, token_admin, platform_wallet, _) =
+    let (_escrow, _, buyer, artisan, token_id, token_admin, platform_wallet, _) =
         setup_enhanced_test(&env);
 
     let total_amount: i128 = 1000;
@@ -141,7 +141,7 @@ fn test_cancel_recurring_escrow() {
 #[test]
 fn test_profile_deactivation_success() {
     let env = Env::default();
-    let (_escrow, onboarding, buyer, _, _, _, _, _) = setup_enhanced_test(&env);
+    let (_, onboarding, buyer, _, _, _, _, _) = setup_enhanced_test(&env);
 
     // No active escrows, should succeed
     onboarding.deactivate_profile(&buyer);

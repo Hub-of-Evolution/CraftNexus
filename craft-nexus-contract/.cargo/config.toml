@@ -1,0 +1,5 @@
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "opt-level=z", "-C", "lto", "-C", "panic=abort"]
+
+[build]
+target = "wasm32-unknown-unknown"

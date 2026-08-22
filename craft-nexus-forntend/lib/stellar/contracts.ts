@@ -185,7 +185,6 @@ export class EscrowContractService {
   /**
    * Release funds to seller
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async releaseFunds(_orderId: number, _signerSecret: string): Promise<string> {
     if (!ESCROW_CONTRACT_ADDRESS) {
       throw new Error("Escrow contract not deployed");

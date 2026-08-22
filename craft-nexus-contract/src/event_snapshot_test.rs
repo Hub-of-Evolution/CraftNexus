@@ -21,7 +21,7 @@ macro_rules! check_fields {
 fn snapshot_escrow_event() {
     check_fields!(
         EscrowEvent,
-        [escrow_id, action, buyer, seller, amount, token, timestamp]
+        [schema_version, escrow_id, action, buyer, seller, amount, token, timestamp]
     );
 }
 
@@ -29,7 +29,7 @@ fn snapshot_escrow_event() {
 fn snapshot_escrow_resolved_event() {
     check_fields!(
         EscrowResolvedEvent,
-        [escrow_id, buyer, seller, arbitrator, amount, token, timestamp]
+        [schema_version, escrow_id, buyer, seller, arbitrator, amount, token, timestamp]
     );
 }
 
