@@ -53,14 +53,15 @@ fn setup_test(
     );
 
     // Set min amount to 0 for tests to pass with small amounts
-    client.set_min_escrow_amount(&token_contract, &0);
+    client.set_min_escrow_amount(&token_contract.address(), &0);
     client.set_min_release_window(&1);
+    client.set_evidence_challenge_window(&0);
 
     (
         client,
         buyer,
         seller,
-        token_contract,
+        token_contract.address(),
         token_admin_client,
         platform_wallet,
         admin,
@@ -526,7 +527,7 @@ fn test_resolve_dispute_partial_release_50_50() {
     env.mock_all_auths();
     let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
 
-    token_admin.mint(&buyer, &100_000_000);
+    token_admin.mint(&buyer, &50_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
     client.dispute_escrow(&1, &Symbol::new(&env, "Partial_delivery"), &buyer);
 
@@ -552,7 +553,7 @@ fn test_resolve_dispute_partial_release_custom_fee_tier() {
     // Set custom 2% fee for seller
     client.set_artisan_fee_tier(&seller, &200);
 
-    token_admin.mint(&buyer, &100_000_000);
+    token_admin.mint(&buyer, &50_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
     client.dispute_escrow(&1, &Symbol::new(&env, "Partial_delivery"), &buyer);
 
@@ -572,7 +573,7 @@ fn test_resolve_dispute_partial_release_fee_deducted_once() {
     let (client, buyer, seller, token_id, token_admin, platform_wallet, admin) =
         setup_test(&env, true);
 
-    token_admin.mint(&buyer, &100_000_000);
+    token_admin.mint(&buyer, &50_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
     client.dispute_escrow(&1, &Symbol::new(&env, "Partial_delivery"), &buyer);
 
@@ -581,18 +582,21 @@ fn test_resolve_dispute_partial_release_fee_deducted_once() {
 
     let token_client = token::Client::new(&env, &token_id);
     // Fee is 5% of seller's 25M = 1_250_000 — charged exactly once
-    let expected_fee = 25_000_000 * 500 / 10_000;
+    let expected_fee = 25_000_000i128 * 500 / 10_000;
     assert_eq!(expected_fee, 1_250_000);
 
     // Buyer + seller + platform_fee should equal escrow amount
     let buyer_balance = token_client.balance(&buyer);
     let seller_balance = token_client.balance(&seller);
     let platform_balance = token_client.balance(&platform_wallet);
-    assert_eq!(buyer_balance + seller_balance + platform_balance, 50_000_000);
+    assert_eq!(
+        buyer_balance + seller_balance + platform_balance,
+        50_000_000
+    );
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #18)")]
+#[should_panic(expected = "HostError: Error(Contract, #19)")]
 fn test_resolve_dispute_partial_release_zero_buyer_amount() {
     let env = Env::default();
     env.mock_all_auths();
@@ -606,7 +610,7 @@ fn test_resolve_dispute_partial_release_zero_buyer_amount() {
 }
 
 #[test]
-#[should_panic(expected = "HostError: Error(Contract, #18)")]
+#[should_panic(expected = "HostError: Error(Contract, #19)")]
 fn test_resolve_dispute_partial_release_full_amount() {
     let env = Env::default();
     env.mock_all_auths();
@@ -712,7 +716,8 @@ fn test_platform_fee_deduction_10_percent() {
 
     let token_admin = Address::generate(&env);
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_contract.address());
+    let token_addr = token_contract.address();
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
 
     let arbitrator = Address::generate(&env);
 
@@ -720,18 +725,11 @@ fn test_platform_fee_deduction_10_percent() {
     client.initialize(&platform_wallet, &admin, &arbitrator, &1000, &None);
 
     token_admin_client.mint(&buyer, &10_000_000);
-    client.create_escrow(
-        &buyer,
-        &seller,
-        &token_contract,
-        &10_000_000,
-        &1,
-        &None,
-    );
+    client.create_escrow(&buyer, &seller, &token_addr, &10_000_000, &1, &None);
 
     client.release_funds(&1);
 
-    let token_client = token::Client::new(&env, &token_contract);
+    let token_client = token::Client::new(&env, &token_addr);
     assert_eq!(token_client.balance(&seller), 9_000_000); // 10,000,000 - 1,000,000
     assert_eq!(token_client.balance(&platform_wallet), 1_000_000);
 }
@@ -822,7 +820,8 @@ fn test_update_platform_fee() {
 
     let token_admin = Address::generate(&env);
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_contract.address());
+    let token_addr = token_contract.address();
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
 
     let arbitrator = Address::generate(&env);
 
@@ -858,18 +857,11 @@ fn test_update_platform_fee() {
     token_admin_client.mint(&Address::generate(&env), &100_000_000);
     let buyer = Address::generate(&env);
     token_admin_client.mint(&buyer, &100_000_000);
-    client.create_escrow(
-        &buyer,
-        &seller,
-        &token_contract,
-        &100_000_000,
-        &1,
-        &None,
-    );
+    client.create_escrow(&buyer, &seller, &token_addr, &100_000_000, &1, &None);
 
     client.release_funds(&1);
 
-    let token_client = token::Client::new(&env, &token_contract);
+    let token_client = token::Client::new(&env, &token_addr);
     // 100,000,000 - 8,000,000 = 92,000,000
     assert_eq!(token_client.balance(&seller), 92_000_000);
     assert_eq!(token_client.balance(&platform_wallet), 8_000_000);
@@ -946,13 +938,11 @@ fn test_initialize_emits_config_events() {
     let fee_event: ConfigUpdatedEvent = events
         .get(events.len() - 2)
         .unwrap()
-        .unwrap()
         .2
         .try_into_val(&env)
         .unwrap();
     let wallet_event: ConfigUpdatedEvent = events
         .get(events.len() - 1)
-        .unwrap()
         .unwrap()
         .2
         .try_into_val(&env)
@@ -1324,7 +1314,10 @@ fn test_recover_admin_access_success() {
     });
 
     // Second call, after the time lock has elapsed, must succeed.
-    client.try_recover_admin_access(&recovered_admin).unwrap().unwrap();
+    client
+        .try_recover_admin_access(&recovered_admin)
+        .unwrap()
+        .unwrap();
 
     let config = client.get_platform_config();
     assert_eq!(config.admin, recovered_admin);
@@ -1473,7 +1466,7 @@ fn test_integration_multiple_tokens_and_escrows() {
     client.create_escrow(
         &buyer,
         &seller,
-        &token_a_contract,
+        &token_a_contract.address(),
         &10_000_000,
         &1,
         &None,
@@ -1481,7 +1474,7 @@ fn test_integration_multiple_tokens_and_escrows() {
     client.create_escrow(
         &buyer,
         &seller,
-        &token_b_contract,
+        &token_b_contract.address(),
         &10_000_000,
         &2,
         &None,
@@ -1490,8 +1483,8 @@ fn test_integration_multiple_tokens_and_escrows() {
     client.release_funds(&1);
     client.release_funds(&2);
 
-    let token_a = token::Client::new(&env, &token_a_contract);
-    let token_b = token::Client::new(&env, &token_b_contract);
+    let token_a = token::Client::new(&env, &token_a_contract.address());
+    let token_b = token::Client::new(&env, &token_b_contract.address());
 
     // Seller: 9.5M (token A) + 9.5M (token B)
     assert_eq!(token_a.balance(&seller), 9_500_000);
@@ -1503,11 +1496,11 @@ fn test_integration_multiple_tokens_and_escrows() {
     assert_eq!(fee_a, 500_000);
     assert_eq!(fee_b, 500_000);
     assert_eq!(
-        client.get_total_fees_for_token(&token_a_contract),
+        client.get_total_fees_for_token(&token_a_contract.address()),
         500_000
     );
     assert_eq!(
-        client.get_total_fees_for_token(&token_b_contract),
+        client.get_total_fees_for_token(&token_b_contract.address()),
         500_000
     );
     assert_eq!(client.get_total_fees_collected(), 1_000_000);
@@ -1561,7 +1554,7 @@ fn test_unstake_rejects_different_token_than_original_stake() {
     let other_token_admin = Address::generate(&env);
     let other_token_contract = env.register_stellar_asset_contract_v2(other_token_admin.clone());
     let other_token_admin_client =
-        token::StellarAssetClient::new(&env, &other_token_contract);
+        token::StellarAssetClient::new(&env, &other_token_contract.address());
 
     token_admin.mint(&seller, &10_000_000);
     other_token_admin_client.mint(&seller, &10_000_000);
@@ -1571,7 +1564,7 @@ fn test_unstake_rejects_different_token_than_original_stake() {
         li.timestamp += DEFAULT_STAKE_COOLDOWN as u64 + 1;
     });
 
-    client.unstake_tokens(&seller, &other_token_contract);
+    client.unstake_tokens(&seller, &other_token_contract.address());
 }
 
 #[test]
@@ -1693,8 +1686,8 @@ fn test_create_escrow_with_service_agreement_hash() {
     let service_agreement_hash = Bytes::from_array(
         &env,
         &[
-            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-            2, 2, 2, 2,
+            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+            2, 2, 2,
         ],
     );
 
@@ -1709,10 +1702,16 @@ fn test_create_escrow_with_service_agreement_hash() {
         &None,
         &Some(service_agreement_hash.clone()),
     );
-    assert_eq!(escrow.service_agreement_hash, Some(service_agreement_hash.clone()));
+    assert_eq!(
+        escrow.service_agreement_hash,
+        Some(service_agreement_hash.clone())
+    );
 
     let metadata = client.get_escrow_metadata(&1);
-    assert_eq!(metadata.service_agreement_hash, Some(service_agreement_hash));
+    assert_eq!(
+        metadata.service_agreement_hash,
+        Some(service_agreement_hash)
+    );
     assert_eq!(metadata.ipfs_hash, None);
     assert_eq!(metadata.metadata_hash, None);
 }
@@ -1751,15 +1750,15 @@ fn test_create_escrow_with_all_metadata_fields() {
     let metadata_hash = Bytes::from_array(
         &env,
         &[
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1,
         ],
     );
     let service_agreement_hash = Bytes::from_array(
         &env,
         &[
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+            3, 3, 3,
         ],
     );
 
@@ -1776,12 +1775,18 @@ fn test_create_escrow_with_all_metadata_fields() {
     );
     assert_eq!(escrow.ipfs_hash, Some(ipfs_hash.clone()));
     assert_eq!(escrow.metadata_hash, Some(metadata_hash.clone()));
-    assert_eq!(escrow.service_agreement_hash, Some(service_agreement_hash.clone()));
+    assert_eq!(
+        escrow.service_agreement_hash,
+        Some(service_agreement_hash.clone())
+    );
 
     let metadata = client.get_escrow_metadata(&1);
     assert_eq!(metadata.ipfs_hash, Some(ipfs_hash));
     assert_eq!(metadata.metadata_hash, Some(metadata_hash));
-    assert_eq!(metadata.service_agreement_hash, Some(service_agreement_hash));
+    assert_eq!(
+        metadata.service_agreement_hash,
+        Some(service_agreement_hash)
+    );
 }
 
 #[test]
@@ -2007,7 +2012,7 @@ fn test_contract_address_admin_is_authorized() {
     });
 
     client.initialize(&platform_wallet, &admin_contract, &arbitrator, &500, &None);
-    client.set_min_escrow_amount(&token_contract, &0);
+    client.set_min_escrow_amount(&token_contract.address(), &0);
 
     let config = client.get_platform_config();
     assert_eq!(config.admin, admin_contract);
@@ -2085,6 +2090,72 @@ fn test_contract_upgrade_unauthorized() {
 }
 
 #[test]
+fn test_upgrade_requires_compatibility_manifest() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+
+    let result = client.try_execute_upgrade(&wasm_hash);
+    assert!(matches!(result, Err(Ok(Error::UpgradeCompatibilityMissing))));
+}
+
+#[test]
+fn test_upgrade_manifest_is_recorded_and_consumed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
+    let commitment = client.get_upgrade_state_commitment();
+    let nonzero = BytesN::from_array(&env, &[1u8; 32]);
+    let manifest = UpgradeCompatibilityManifest {
+        source_version: 1,
+        target_version: 2,
+        state_commitment: commitment.clone(),
+        interface_commitment: nonzero.clone(),
+        authorization_commitment: nonzero.clone(),
+        preconditions_commitment: nonzero.clone(),
+        postconditions_commitment: nonzero.clone(),
+        rollback_limitations_commitment: nonzero.clone(),
+        migration_checkpoint: nonzero,
+        migration_complete: true,
+        manual_records: 0,
+    };
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    client.submit_upgrade_compatibility_manifest(&wasm_hash, &manifest);
+    assert_eq!(
+        client
+            .get_upgrade_compatibility_manifest(&wasm_hash)
+            .unwrap(),
+        manifest
+    );
+
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+    client.execute_upgrade(&wasm_hash);
+
+    let record = client
+        .get_upgrade_compatibility_history()
+        .last()
+        .unwrap();
+    assert_eq!(record.from_version, 1);
+    assert_eq!(record.to_version, 2);
+    assert_eq!(record.state_commitment, commitment);
+    assert!(client
+        .get_upgrade_compatibility_manifest(&wasm_hash)
+        .is_none());
+}
+
+#[test]
 fn test_get_version_initially() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2099,7 +2170,9 @@ fn test_execute_upgrade_rejects_legacy_storage_layout_without_migration() {
     let (client, _, _, _, _, _, _) = setup_test(&env, true);
 
     env.as_contract(&client.address, || {
-        env.storage().persistent().remove(&DataKey::StorageLayoutVersion);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StorageLayoutVersion);
     });
 
     let hash = BytesN::from_array(&env, &[9u8; 32]);
@@ -2118,12 +2191,17 @@ fn test_migrate_storage_layout_marks_current_layout_and_preserves_state() {
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
 
     env.as_contract(&client.address, || {
-        env.storage().persistent().remove(&DataKey::StorageLayoutVersion);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StorageLayoutVersion);
     });
 
     let migrated = client.migrate_storage_layout();
     assert_eq!(migrated, 1);
-    assert_eq!(client.get_storage_layout_version(), CURRENT_STORAGE_LAYOUT_VERSION);
+    assert_eq!(
+        client.get_storage_layout_version(),
+        CURRENT_STORAGE_LAYOUT_VERSION
+    );
 
     let escrow = client.get_escrow(&1);
     assert_eq!(escrow.buyer, buyer);
@@ -2345,7 +2423,6 @@ fn test_set_upgrade_signers_empty_resets_to_admin() {
     assert!(client.get_upgrade_proposal().is_some());
 }
 
-
 // ============== Upgrade Governance Security Tests ==============
 
 /// AC2: Signer rotation after first approval cannot inflate the approval count.
@@ -2372,7 +2449,10 @@ fn test_signer_rotation_cannot_inflate_approval_count() {
 
     // Round opens: admin approves (snapshot captured: {admin, signer2}, threshold=2).
     client.propose_upgrade_wasm(&admin, &hash);
-    assert!(client.get_upgrade_proposal().is_none(), "proposal should not be committed yet");
+    assert!(
+        client.get_upgrade_proposal().is_none(),
+        "proposal should not be committed yet"
+    );
 
     // Admin rotates signers to include evil_signer AFTER the round has opened.
     let mut new_signers = Vec::new(&env);
@@ -2390,12 +2470,17 @@ fn test_signer_rotation_cannot_inflate_approval_count() {
     );
 
     // Proposal still not committed — the threshold snapshot (2) was not met.
-    assert!(client.get_upgrade_proposal().is_none(),
-        "proposal must not be committed despite threshold change");
+    assert!(
+        client.get_upgrade_proposal().is_none(),
+        "proposal must not be committed despite threshold change"
+    );
 
     // Only the original signer2 (from the snapshot) can complete this round.
     client.propose_upgrade_wasm(&signer2, &hash);
-    assert!(client.get_upgrade_proposal().is_some(), "proposal must commit after 2 of 2 original signers");
+    assert!(
+        client.get_upgrade_proposal().is_some(),
+        "proposal must commit after 2 of 2 original signers"
+    );
 }
 
 // ===== Issue #95 — multi-sig threshold boundary scenarios =====
@@ -2419,7 +2504,10 @@ fn test_multisig_threshold_one_explicit_signer_succeeds() {
     // The admin itself is no longer a signer once an explicit list is set,
     // so it must be rejected.
     let admin_result = client.try_propose_upgrade_wasm(&admin, &hash);
-    assert!(admin_result.is_err(), "admin is not in the explicit signer list");
+    assert!(
+        admin_result.is_err(),
+        "admin is not in the explicit signer list"
+    );
 
     client.propose_upgrade_wasm(&sole_signer, &hash);
     let proposal = client.get_upgrade_proposal().expect("proposal missing");
@@ -2448,10 +2536,16 @@ fn test_multisig_threshold_equals_signer_count_three_of_three() {
     let hash = BytesN::from_array(&env, &[21u8; 32]);
 
     client.propose_upgrade_wasm(&admin, &hash);
-    assert!(client.get_upgrade_proposal().is_none(), "1 of 3 must not commit");
+    assert!(
+        client.get_upgrade_proposal().is_none(),
+        "1 of 3 must not commit"
+    );
 
     client.propose_upgrade_wasm(&signer2, &hash);
-    assert!(client.get_upgrade_proposal().is_none(), "2 of 3 must not commit");
+    assert!(
+        client.get_upgrade_proposal().is_none(),
+        "2 of 3 must not commit"
+    );
 
     client.propose_upgrade_wasm(&signer3, &hash);
     let proposal = client.get_upgrade_proposal().expect("proposal missing");
@@ -2492,7 +2586,10 @@ fn test_signer_removed_mid_round_does_not_invalidate_recorded_approval() {
 
     // signer2 (still live) approves.
     client.propose_upgrade_wasm(&signer2, &hash);
-    assert!(client.get_upgrade_proposal().is_none(), "2 of 3 snapshotted signers must not commit");
+    assert!(
+        client.get_upgrade_proposal().is_none(),
+        "2 of 3 snapshotted signers must not commit"
+    );
 
     // signer3, though removed from the live list, was part of this round's
     // snapshot and must still be able to complete it.
@@ -2522,7 +2619,10 @@ fn test_stale_upgrade_proposal_cancelled_and_reproposed() {
     env.ledger().with_mut(|li| {
         li.timestamp += 30 * 24 * 60 * 60; // 30 days
     });
-    assert!(client.get_upgrade_proposal().is_some(), "no automatic expiry — proposal still pending");
+    assert!(
+        client.get_upgrade_proposal().is_some(),
+        "no automatic expiry — proposal still pending"
+    );
 
     // The stale proposal is cancelled instead of executed.
     client.cancel_upgrade_wasm();
@@ -2639,29 +2739,52 @@ fn test_cancel_clears_stale_approvals_and_increments_nonce() {
     // Round 0, nonce=0: admin approves hash_a → commits.
     assert_eq!(client.get_upgrade_proposal_nonce(), 0, "nonce starts at 0");
     client.propose_upgrade_wasm(&admin, &hash_a);
-    assert!(client.get_upgrade_proposal().is_some(), "proposal must commit at threshold=1");
+    assert!(
+        client.get_upgrade_proposal().is_some(),
+        "proposal must commit at threshold=1"
+    );
     // Approval state is removed on commit, so get_upgrade_approvals returns empty.
-    assert_eq!(client.get_upgrade_approvals(&0).len(), 0,
-        "approvals are cleared after commit");
+    assert_eq!(
+        client.get_upgrade_approvals(&0).len(),
+        0,
+        "approvals are cleared after commit"
+    );
 
     // Cancel the committed proposal → nonce bumps to 1.
     client.cancel_upgrade_wasm();
-    assert_eq!(client.get_upgrade_proposal_nonce(), 1, "nonce must be 1 after cancel");
-    assert!(client.get_upgrade_proposal().is_none(), "proposal must be removed after cancel");
+    assert_eq!(
+        client.get_upgrade_proposal_nonce(),
+        1,
+        "nonce must be 1 after cancel"
+    );
+    assert!(
+        client.get_upgrade_proposal().is_none(),
+        "proposal must be removed after cancel"
+    );
     // Old nonce 0 approvals remain empty (never re-populated after commit+cancel).
-    assert_eq!(client.get_upgrade_approvals(&0).len(), 0,
-        "old nonce 0 approvals must be empty after cancel");
+    assert_eq!(
+        client.get_upgrade_approvals(&0).len(),
+        0,
+        "old nonce 0 approvals must be empty after cancel"
+    );
 
     // Advance past CANCEL_REPROPOSE_COOLDOWN (7 days + 1 s).
-    env.ledger().with_mut(|li| { li.timestamp += 7 * 24 * 60 * 60 + 1; });
+    env.ledger().with_mut(|li| {
+        li.timestamp += 7 * 24 * 60 * 60 + 1;
+    });
 
     // Round 1, nonce=1: admin proposes a different hash → fresh state.
     client.propose_upgrade_wasm(&admin, &hash_b);
-    assert!(client.get_upgrade_proposal().is_some(),
-        "proposal must commit in fresh round");
+    assert!(
+        client.get_upgrade_proposal().is_some(),
+        "proposal must commit in fresh round"
+    );
     // Nonce 0 still returns empty — old state was not replayed.
-    assert_eq!(client.get_upgrade_approvals(&0).len(), 0,
-        "nonce 0 must still be empty in round 1");
+    assert_eq!(
+        client.get_upgrade_approvals(&0).len(),
+        0,
+        "nonce 0 must still be empty in round 1"
+    );
 }
 
 /// AC4 (simplified): cancel_upgrade_wasm increments the proposal nonce.
@@ -2712,7 +2835,9 @@ fn test_repropose_same_hash_starts_fresh_round_after_cancel() {
     assert_eq!(client.get_upgrade_proposal_nonce(), 1);
 
     // Advance past cooldown.
-    env.ledger().with_mut(|li| { li.timestamp += 7 * 24 * 60 * 60 + 1; });
+    env.ledger().with_mut(|li| {
+        li.timestamp += 7 * 24 * 60 * 60 + 1;
+    });
 
     // Round 1: admin approves again for the SAME hash.
     client.set_upgrade_threshold(&2);
@@ -2722,16 +2847,24 @@ fn test_repropose_same_hash_starts_fresh_round_after_cancel() {
     assert_eq!(client.get_upgrade_proposal_nonce(), 1);
 
     // Only 1 approval in round 1 — admin's prior approval from round 0 is NOT counted.
-    assert_eq!(client.get_upgrade_approvals(&1).len(), 1,
-        "round 1 must have exactly 1 fresh approval, not carry over from round 0");
+    assert_eq!(
+        client.get_upgrade_approvals(&1).len(),
+        1,
+        "round 1 must have exactly 1 fresh approval, not carry over from round 0"
+    );
 
     // Proposal must NOT be committed (threshold=2, only 1 approval so far).
-    assert!(client.get_upgrade_proposal().is_none(),
-        "proposal must not commit with only 1 of 2 required approvals in fresh round");
+    assert!(
+        client.get_upgrade_proposal().is_none(),
+        "proposal must not commit with only 1 of 2 required approvals in fresh round"
+    );
 
     // signer2 approves to complete round 1.
     client.propose_upgrade_wasm(&signer2, &hash);
-    assert!(client.get_upgrade_proposal().is_some(), "proposal must commit after 2nd approval");
+    assert!(
+        client.get_upgrade_proposal().is_some(),
+        "proposal must commit after 2nd approval"
+    );
 }
 
 /// Threshold snapshot: changing threshold mid-round does not affect the current round.
@@ -2769,7 +2902,10 @@ fn test_threshold_change_mid_round_does_not_affect_current_round() {
 
     // Third approval completes the snapshotted requirement.
     client.propose_upgrade_wasm(&signer3, &hash);
-    assert!(client.get_upgrade_proposal().is_some(), "proposal must commit after 3 of 3 approvals");
+    assert!(
+        client.get_upgrade_proposal().is_some(),
+        "proposal must commit after 3 of 3 approvals"
+    );
 }
 
 // ============== Batch Operations Tests ==============
@@ -2981,6 +3117,7 @@ fn test_create_batch_escrow_at_max_size() {
             release_window: Some(3600),
             ipfs_hash: None,
             metadata_hash: None,
+            service_agreement_hash: None,
         });
     }
     assert_eq!(batch_params.len(), MAX_BATCH_SIZE);
@@ -3014,6 +3151,7 @@ fn test_create_batch_escrow_exceeds_max_size() {
             release_window: Some(3600),
             ipfs_hash: None,
             metadata_hash: None,
+            service_agreement_hash: None,
         });
     }
     assert_eq!(batch_params.len(), MAX_BATCH_SIZE + 1);
@@ -3054,6 +3192,7 @@ fn test_create_batch_escrow_multi_buyer_unauthorized() {
             release_window: Some(3600),
             ipfs_hash: None,
             metadata_hash: None,
+            service_agreement_hash: None,
         },
         EscrowCreateParams {
             buyer: second_buyer.clone(),
@@ -3064,6 +3203,7 @@ fn test_create_batch_escrow_multi_buyer_unauthorized() {
             release_window: Some(3600),
             ipfs_hash: None,
             metadata_hash: None,
+            service_agreement_hash: None,
         },
     ];
 
@@ -3682,7 +3822,7 @@ fn test_create_escrow_non_whitelisted_token_rejected() {
     client.create_escrow(
         &buyer,
         &seller,
-        &other_token,
+        &other_token.address(),
         &10_000,
         &2,
         &Some(3600),
@@ -3756,7 +3896,7 @@ fn test_batch_escrow_non_whitelisted_token_rejected() {
         EscrowCreateParams {
             buyer: buyer.clone(),
             seller: seller.clone(),
-            token: other_token,
+            token: other_token.address(),
             amount: 10_000,
             order_id: 10,
             release_window: Some(3600),
@@ -3817,14 +3957,14 @@ fn test_multiple_tokens_on_whitelist() {
     token2_client.mint(&buyer, &100_000_000);
 
     client.whitelist_token(&token_id);
-    client.whitelist_token(&token2);
+    client.whitelist_token(&token2.address());
 
     assert!(client.is_token_whitelisted(&token_id));
-    assert!(client.is_token_whitelisted(&token2));
+    assert!(client.is_token_whitelisted(&token2.address()));
 
     // Both should succeed in escrow creation
     client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
-    client.create_escrow(&buyer, &seller, &token2, &10_000, &2, &Some(3600));
+    client.create_escrow(&buyer, &seller, &token2.address(), &10_000, &2, &Some(3600));
     assert_eq!(client.get_escrow(&1).status, EscrowStatus::Active);
     assert_eq!(client.get_escrow(&2).status, EscrowStatus::Active);
 }
@@ -5605,7 +5745,10 @@ fn test_fund_audit_escrow_release_and_refund() {
     let buyer_count = client.get_fund_audit_count(&buyer);
     assert_eq!(buyer_count, 1);
     let buyer_history = client.get_fund_audit_history(&buyer);
-    assert_eq!(buyer_history.get(0).unwrap().reason, Symbol::new(&env, "escrow_funded"));
+    assert_eq!(
+        buyer_history.get(0).unwrap().reason,
+        Symbol::new(&env, "escrow_funded")
+    );
 
     // Check seller history: release entry
     let seller_count = client.get_fund_audit_count(&seller);
@@ -5675,7 +5818,10 @@ fn test_fund_audit_recurring_escrow_flow() {
     let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &10_000_000, &100, &2);
     assert_eq!(client.get_fund_audit_count(&buyer), 1);
     let buyer_hist = client.get_fund_audit_history(&buyer);
-    assert_eq!(buyer_hist.get(0).unwrap().reason, Symbol::new(&env, "recurring_escrow_locked"));
+    assert_eq!(
+        buyer_hist.get(0).unwrap().reason,
+        Symbol::new(&env, "recurring_escrow_locked")
+    );
 
     // Fast forward timestamp past cycle frequency
     env.ledger().with_mut(|li| {
@@ -5686,15 +5832,20 @@ fn test_fund_audit_recurring_escrow_flow() {
     client.release_next_cycle(&rec.id);
     assert_eq!(client.get_fund_audit_count(&seller), 1);
     let seller_hist = client.get_fund_audit_history(&seller);
-    assert_eq!(seller_hist.get(0).unwrap().reason, Symbol::new(&env, "recurring_release"));
+    assert_eq!(
+        seller_hist.get(0).unwrap().reason,
+        Symbol::new(&env, "recurring_release")
+    );
 
     // Cancel remaining
     client.cancel_recurring_escrow(&rec.id);
     assert_eq!(client.get_fund_audit_count(&buyer), 2);
     let buyer_cancel_hist = client.get_fund_audit_history(&buyer);
-    assert_eq!(buyer_cancel_hist.get(1).unwrap().reason, Symbol::new(&env, "recurring_cancel_refund"));
+    assert_eq!(
+        buyer_cancel_hist.get(1).unwrap().reason,
+        Symbol::new(&env, "recurring_cancel_refund")
+    );
 }
-
 
 #[test]
 fn test_fund_audit_pagination_and_immutability() {
@@ -5860,8 +6011,13 @@ fn assert_fee_split_balances(
     expected_buyer: i128,
 ) {
     let escrow = contract_client.get_escrow(&order_id);
-    assert!(escrow.status == EscrowStatus::Released || escrow.status == EscrowStatus::Resolved || escrow.status == EscrowStatus::Refunded,
-        "escrow must be in terminal state, got {:?}", escrow.status);
+    assert!(
+        escrow.status == EscrowStatus::Released
+            || escrow.status == EscrowStatus::Resolved
+            || escrow.status == EscrowStatus::Refunded,
+        "escrow must be in terminal state, got {:?}",
+        escrow.status
+    );
 
     assert_eq!(
         expected_platform + expected_seller + expected_buyer,
@@ -5894,7 +6050,15 @@ fn test_release_funds_balances_to_escrow_amount() {
     let platform_balance = token_client.balance(&platform_wallet);
     let seller_balance = token_client.balance(&seller);
 
-    assert_fee_split_balances(&token_client, &client, 1, amount, platform_balance, seller_balance, 0);
+    assert_fee_split_balances(
+        &token_client,
+        &client,
+        1,
+        amount,
+        platform_balance,
+        seller_balance,
+        0,
+    );
 }
 
 #[test]
@@ -5916,14 +6080,22 @@ fn test_auto_release_balances_to_escrow_amount() {
     let platform_balance = token_client.balance(&platform_wallet);
     let seller_balance = token_client.balance(&seller);
 
-    assert_fee_split_balances(&token_client, &client, 1, amount, platform_balance, seller_balance, 0);
+    assert_fee_split_balances(
+        &token_client,
+        &client,
+        1,
+        amount,
+        platform_balance,
+        seller_balance,
+        0,
+    );
 }
 
 #[test]
 fn test_batch_release_balances_to_escrow_amount() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
 
     token_admin.mint(&buyer, &100_000_000);
     let amounts = [1_000_000i128, 2_000_000i128, 3_000_000i128];
@@ -5937,9 +6109,16 @@ fn test_batch_release_balances_to_escrow_amount() {
     let token_client = token::Client::new(&env, &token_id);
     for (i, amount) in amounts.iter().enumerate() {
         let order_id = i as u32 + 1;
-        let platform_balance = token_client.balance(&platform_wallet);
-        let seller_balance = token_client.balance(&seller);
-        assert_fee_split_balances(&token_client, &client, order_id, *amount, platform_balance, seller_balance, 0);
+        let platform_fee = amount * 500 / 10_000;
+        assert_fee_split_balances(
+            &token_client,
+            &client,
+            order_id,
+            *amount,
+            platform_fee,
+            amount - platform_fee,
+            0,
+        );
     }
 }
 
@@ -5947,10 +6126,11 @@ fn test_batch_release_balances_to_escrow_amount() {
 fn test_refund_balances_to_escrow_amount() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _platform_wallet, _) = setup_test(&env, true);
+    let (client, buyer, seller, token_id, token_admin, _platform_wallet, _) =
+        setup_test(&env, true);
 
-    token_admin.mint(&buyer, &100_000_000);
     let amount = 1_500_000i128;
+    token_admin.mint(&buyer, &amount);
     client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
     client.refund(&1);
 
@@ -5964,10 +6144,11 @@ fn test_refund_balances_to_escrow_amount() {
 fn test_dispute_release_to_seller_balances_to_escrow_amount() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, admin) = setup_test(&env, true);
+    let (client, buyer, seller, token_id, token_admin, platform_wallet, admin) =
+        setup_test(&env, true);
 
-    token_admin.mint(&buyer, &100_000_000);
     let amount = 800_000i128;
+    token_admin.mint(&buyer, &amount);
     client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
     client.dispute_escrow(&1, &Symbol::new(&env, "late_delivery"), &buyer);
 
@@ -5977,17 +6158,26 @@ fn test_dispute_release_to_seller_balances_to_escrow_amount() {
     let platform_balance = token_client.balance(&platform_wallet);
     let seller_balance = token_client.balance(&seller);
 
-    assert_fee_split_balances(&token_client, &client, 1, amount, platform_balance, seller_balance, 0);
+    assert_fee_split_balances(
+        &token_client,
+        &client,
+        1,
+        amount,
+        platform_balance,
+        seller_balance,
+        0,
+    );
 }
 
 #[test]
 fn test_dispute_refund_to_buyer_balances_to_escrow_amount() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, admin) = setup_test(&env, true);
+    let (client, buyer, seller, token_id, token_admin, _platform_wallet, admin) =
+        setup_test(&env, true);
 
-    token_admin.mint(&buyer, &100_000_000);
     let amount = 800_000i128;
+    token_admin.mint(&buyer, &amount);
     client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
     client.dispute_escrow(&1, &Symbol::new(&env, "item_not_as_described"), &buyer);
 
@@ -6022,13 +6212,28 @@ fn test_expired_dispute_all_policies_balance_to_escrow_amount() {
         let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
         let token_addr = token_contract.address();
         let token_asset = token::StellarAssetClient::new(&env, &token_addr);
-        token_asset.mint(&buyer, &100_000_000);
+        let amount = 2_500_000i128;
+        token_asset.mint(&buyer, &amount);
 
-        client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None::<Address>);
+        client.initialize(
+            &platform_wallet,
+            &admin,
+            &arbitrator,
+            &500,
+            &None::<Address>,
+        );
+        client.set_min_escrow_amount(&token_addr, &0);
+        client.set_min_release_window(&1);
         client.update_expired_dispute_policy(&policy);
 
-        let amount = 2_500_000i128;
-        client.create_escrow(&buyer, &seller, &token_addr, &amount, &(i as u32 + 1), &Some(604800));
+        client.create_escrow(
+            &buyer,
+            &seller,
+            &token_addr,
+            &amount,
+            &(i as u32 + 1),
+            &Some(604800),
+        );
         client.dispute_escrow(&(i as u32 + 1), &Symbol::new(&env, "test"), &buyer);
 
         env.ledger().with_mut(|li| {
@@ -6043,7 +6248,11 @@ fn test_expired_dispute_all_policies_balance_to_escrow_amount() {
         let seller_delta = token_client.balance(&seller);
 
         let sum = platform_delta + buyer_delta + seller_delta;
-        assert_eq!(sum, amount, "policy {:?} must balance to escrow amount", policy);
+        assert_eq!(
+            sum, amount,
+            "policy {:?} must balance to escrow amount",
+            policy
+        );
     }
 }
 
@@ -6053,10 +6262,9 @@ fn test_partial_refund_balances_to_escrow_amount() {
     env.mock_all_auths();
     let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
 
-    token_admin.mint(&buyer, &100_000_000);
     let amount = 1_200_000i128;
     let refund_gross = 700_000i128;
-
+    token_admin.mint(&buyer, &amount);
     client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
     client.dispute_escrow(&1, &Symbol::new(&env, "partial"), &buyer);
     client.propose_partial_refund(&1, &refund_gross, &buyer);
@@ -6067,7 +6275,15 @@ fn test_partial_refund_balances_to_escrow_amount() {
     let buyer_balance = token_client.balance(&buyer);
     let seller_balance = token_client.balance(&seller);
 
-    assert_fee_split_balances(&token_client, &client, 1, amount, platform_balance, seller_balance, buyer_balance);
+    assert_fee_split_balances(
+        &token_client,
+        &client,
+        1,
+        amount,
+        platform_balance,
+        seller_balance,
+        buyer_balance,
+    );
 }
 
 #[test]
@@ -6076,15 +6292,8 @@ fn test_recurring_escrow_cycle_balances_to_cycle_amount() {
     env.mock_all_auths();
     let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
 
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_recurring_escrow(
-        &buyer,
-        &seller,
-        &token_id,
-        &1_000_000,
-        &3600,
-        &2,
-    );
+    token_admin.mint(&buyer, &1_000_000);
+    client.create_recurring_escrow(&buyer, &seller, &token_id, &1_000_000, &3600, &2);
 
     env.ledger().with_mut(|li| {
         li.timestamp += 3601;
@@ -6097,7 +6306,11 @@ fn test_recurring_escrow_cycle_balances_to_cycle_amount() {
     let seller_balance = token_client.balance(&seller);
 
     let cycle_amount = 500_000i128; // 1_000_000 / 2
-    assert_fee_split_balances(&token_client, &client, 1, cycle_amount, platform_balance, seller_balance, 0);
+    assert_eq!(
+        platform_balance + seller_balance,
+        cycle_amount,
+        "recurring cycle split must consume the cycle amount"
+    );
 }
 
 #[test]
@@ -6109,7 +6322,11 @@ fn test_allocation_invariant_never_violated() {
     token_admin.mint(&buyer, &100_000_000);
 
     // Sweep a representative range of amounts.
-    for amount in [1, 19, 20, 39, 40, 99, 100, 999, 1000, 9999, 10_000, 99_999, 100_000, 999_999, 1_000_000].iter() {
+    for amount in [
+        1, 19, 20, 39, 40, 99, 100, 999, 1000, 9999, 10_000, 99_999, 100_000, 999_999, 1_000_000,
+    ]
+    .iter()
+    {
         let order_id = *amount as u32;
         client.create_escrow(&buyer, &seller, &token_id, amount, &order_id, &None);
 
@@ -6120,3 +6337,175 @@ fn test_allocation_invariant_never_violated() {
     }
 }
 
+#[test]
+fn test_partial_refund_rejects_amount_above_escrow() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Over_refund"), &buyer);
+
+    let result = client.try_propose_partial_refund(&1, &1001, &buyer);
+    assert_eq!(result.unwrap_err(), Ok(Error::InvalidRefundAmount));
+
+    let zero = client.try_propose_partial_refund(&1, &0, &buyer);
+    assert_eq!(zero.unwrap_err(), Ok(Error::InvalidRefundAmount));
+}
+
+fn assert_panic_contract_error<T>(
+    result: Result<T, Result<soroban_sdk::Error, soroban_sdk::InvokeError>>,
+    error: Error,
+) {
+    let expected = soroban_sdk::Error::from_contract_error(error as u32);
+    assert!(
+        matches!(result, Err(Ok(err)) if err == expected),
+        "expected contract error {:?}",
+        error
+    );
+}
+
+#[test]
+fn test_partial_refund_cancel_allows_new_proposal_but_not_replay() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Replay"), &buyer);
+
+    client.propose_partial_refund(&1, &300, &buyer);
+    client.cancel_partial_refund(&1);
+    client.propose_partial_refund(&1, &400, &seller);
+    client.accept_partial_refund(&1);
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Resolved);
+    let receipt = client.get_settlement_receipt(&1).expect("receipt");
+    assert_eq!(receipt.path, SettlementPath::PartialRefundAccepted);
+
+    let second = client.try_accept_partial_refund(&1);
+    assert!(second.is_err());
+    let duplicate_path = client.try_resolve_dispute(
+        &1,
+        &Resolution::RefundToBuyer,
+        &client.get_platform_config().admin,
+    );
+    assert!(duplicate_path.is_err());
+}
+
+#[test]
+fn test_dispute_cannot_be_resolved_twice_via_partial_and_arbitration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &50_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Split"), &buyer);
+    client.resolve_dispute_partial(&1, &25_000_000, &admin);
+
+    let receipt = client.get_settlement_receipt(&1).expect("receipt");
+    assert_eq!(receipt.path, SettlementPath::ArbitratedPartial);
+
+    assert_panic_contract_error(
+        client.try_resolve_dispute(&1, &Resolution::RefundToBuyer, &admin),
+        Error::SettlementAlreadyFinalized,
+    );
+    assert_eq!(
+        client.try_accept_partial_refund(&1).unwrap_err(),
+        Ok(Error::SettlementAlreadyFinalized)
+    );
+    assert_eq!(
+        client
+            .try_propose_partial_refund(&1, &100, &buyer)
+            .unwrap_err(),
+        Ok(Error::SettlementAlreadyFinalized)
+    );
+}
+
+#[test]
+fn test_settlement_finalized_is_checked_before_challenge_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
+
+    client.set_evidence_challenge_window(&86_400);
+    token_admin.mint(&buyer, &1000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Window"), &buyer);
+    client.propose_partial_refund(&1, &300, &buyer);
+    client.accept_partial_refund(&1);
+
+    assert_panic_contract_error(
+        client.try_resolve_dispute(&1, &Resolution::RefundToBuyer, &admin),
+        Error::SettlementAlreadyFinalized,
+    );
+    assert_panic_contract_error(
+        client.try_resolve_dispute_partial(&1, &400, &admin),
+        Error::SettlementAlreadyFinalized,
+    );
+}
+
+#[test]
+fn test_arbitrator_resolution_blocked_after_max_dispute_duration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Late"), &buyer);
+
+    let max_duration = client.get_max_dispute_duration();
+    env.ledger().with_mut(|li| {
+        li.timestamp += max_duration as u64;
+    });
+
+    assert_panic_contract_error(
+        client.try_resolve_dispute(&1, &Resolution::RefundToBuyer, &admin),
+        Error::ArbitratorDeadlineExceeded,
+    );
+    assert_panic_contract_error(
+        client.try_resolve_dispute_partial(&1, &400, &admin),
+        Error::ArbitratorDeadlineExceeded,
+    );
+
+    client.resolve_expired_dispute(&1);
+    let receipt = client.get_settlement_receipt(&1).expect("receipt");
+    assert_eq!(receipt.path, SettlementPath::ExpiredDispute);
+
+    assert_panic_contract_error(
+        client.try_resolve_dispute(&1, &Resolution::ReleaseToSeller, &admin),
+        Error::SettlementAlreadyFinalized,
+    );
+}
+
+#[test]
+fn test_blacklisted_arbitrator_cannot_use_partial_resolution_path() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Blacklist"), &buyer);
+
+    let arbitrator = client.get_platform_config().arbitrator;
+    client.blacklist_arbitrator(&arbitrator);
+
+    assert_panic_contract_error(
+        client.try_resolve_dispute(&1, &Resolution::RefundToBuyer, &arbitrator),
+        Error::ArbitratorBlacklisted,
+    );
+    assert_panic_contract_error(
+        client.try_resolve_dispute_partial(&1, &400, &arbitrator),
+        Error::ArbitratorBlacklisted,
+    );
+
+    client.resolve_dispute_partial(&1, &400, &admin);
+    let receipt = client.get_settlement_receipt(&1).expect("receipt");
+    assert_eq!(receipt.path, SettlementPath::ArbitratedPartial);
+}

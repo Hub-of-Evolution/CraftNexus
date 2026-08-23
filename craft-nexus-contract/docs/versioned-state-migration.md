@@ -30,6 +30,40 @@ For every migration version, operators must strictly adhere to the following seq
 
 For a WASM upgrade (as opposed to an in-place storage migration), combine this toolkit with the existing upgrade proposal flow: `propose_upgrade_wasm` (starts the `wasm_upgrade_cooldown` review window) → take a config backup → `execute_upgrade` once the cooldown elapses → run the relevant `migrate_*` functions → verify → only then consider the migration complete. `cancel_upgrade_wasm` remains available up until `execute_upgrade` is called, giving a staged, reviewable rollout instead of an atomic code swap.
 
+## Differential Upgrade Compatibility Gate
+
+An uploaded WASM and a successful unit-test run are not sufficient evidence for
+an upgrade. Before execution, run the old and new artifacts against an isolated
+fixture containing legacy profiles, active and disputed escrows, recurring
+balances, stake queues, pending upgrades, and paused configuration. Compare
+read results, authorization decisions, error classifications, invariants, and
+events. Commit the pre-migration snapshot returned by
+`get_upgrade_state_commitment` and the interface/authentication test results in
+an `UpgradeCompatibilityManifest`.
+
+Submit the manifest with `submit_upgrade_compatibility_manifest`. It must:
+
+- identify the exact source and target contract versions;
+- commit to storage preconditions, postconditions, interface behavior,
+  authorization behavior, and rollback limitations;
+- include a resumable migration checkpoint;
+- report `migration_complete: true` and `manual_records: 0`.
+
+`execute_upgrade` rejects missing, stale, incomplete, or manually unresolved
+manifests before calling `update_current_contract_wasm`. On success,
+`UpgradeHistory` records the source and target versions, WASM hash, state
+commitment, and migration checkpoint. The manifest is removed only after the
+upgrade record and version update are written. A migration runner may replace
+the manifest for the same hash while it resumes; each execution attempt is
+idempotently blocked until the final checkpoint is submitted.
+
+The manifest is an attestation boundary, not a substitute for isolated test
+execution. CI and release tooling must fail closed when the differential
+fixture, invariant suite, or rollback documentation does not produce all
+non-zero commitments required by the on-chain gate. Records that cannot be
+automatically migrated must remain outside execution until they are handled
+and the manifest is resubmitted with a new checkpoint.
+
 ---
 
 ## Migration 1: UserProfile (v1 -&gt; v2)

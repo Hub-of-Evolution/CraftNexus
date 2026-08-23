@@ -76,7 +76,7 @@ fn setup_enhanced_test(
 #[test]
 fn test_recurring_escrow_lifecycle() {
     let env = Env::default();
-    let (_escrow, _, buyer, artisan, token_id, token_admin, platform_wallet, _) =
+    let (escrow, _, buyer, artisan, token_id, token_admin, platform_wallet, _) =
         setup_enhanced_test(&env);
 
     let total_amount: i128 = 1000;

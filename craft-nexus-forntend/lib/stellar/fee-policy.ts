@@ -67,17 +67,20 @@ export function computeFeeAllocation(
       break;
     }
     case "PartialRefund": {
-      const safeRefundGross = Math.max(0, kind.refundGross);
-      const safeSellerGross = Math.max(0, kind.sellerGross);
-
-      const refundFee = calculateFee(safeRefundGross, feeBps);
-      const sellerFee = calculateFee(safeSellerGross, feeBps);
-
-      const platformFee = refundFee + sellerFee;
-      const buyerAmount = safeRefundGross - refundFee;
-      const sellerAmount = safeSellerGross - sellerFee;
-
-      allocation = { platformFee, sellerAmount, buyerAmount };
+      if (kind.refundGross <= 0 || kind.sellerGross < 0) {
+        throw new Error("InvalidRefundAmount: refund must be positive and seller remainder non-negative");
+      }
+      if (kind.refundGross + kind.sellerGross !== escrowAmount) {
+        throw new Error(
+          "InvalidRefundAmount: refundGross + sellerGross must equal escrow amount",
+        );
+      }
+      const platformFee = calculateFee(kind.sellerGross, feeBps);
+      const sellerAmount = kind.sellerGross - platformFee;
+      if (sellerAmount < 0) {
+        throw new Error("InvalidRefundAmount: fee application exceeds seller remainder");
+      }
+      allocation = { platformFee, sellerAmount, buyerAmount: kind.refundGross };
       break;
     }
     default:

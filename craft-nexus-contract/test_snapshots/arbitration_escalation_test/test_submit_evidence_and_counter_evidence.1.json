@@ -251,7 +251,7 @@
                   "string": "ipfs://seller-rebuttal"
                 },
                 {
-                  "u32": 0
+                  "u64": 0
                 }
               ]
             }
@@ -390,6 +390,45 @@
                     "hi": 0,
                     "lo": 0
                   }
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "ActiveDisputeCount"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ActiveDisputeCount"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 1
                 }
               }
             },
@@ -761,6 +800,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "service_agreement_hash"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "status"
                       },
                       "val": {
@@ -838,7 +883,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "Evidence"
+                  "symbol": "EvidenceLog"
                 },
                 {
                   "u32": 1
@@ -858,7 +903,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "Evidence"
+                      "symbol": "EvidenceLog"
                     },
                     {
                       "u32": 1
@@ -872,7 +917,15 @@
                       "map": [
                         {
                           "key": {
-                            "symbol": "evidence_hash"
+                            "symbol": "dispute_session_id"
+                          },
+                          "val": {
+                            "u64": 1700000000
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "evidence_uri"
                           },
                           "val": {
                             "string": "ipfs://buyer-evidence"
@@ -880,10 +933,26 @@
                         },
                         {
                           "key": {
+                            "symbol": "expires_at"
+                          },
+                          "val": {
+                            "u64": 1700604800
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "id"
                           },
                           "val": {
-                            "u32": 0
+                            "u64": 0
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "is_invalidated"
+                          },
+                          "val": {
+                            "bool": false
                           }
                         },
                         {
@@ -922,7 +991,15 @@
                       "map": [
                         {
                           "key": {
-                            "symbol": "evidence_hash"
+                            "symbol": "dispute_session_id"
+                          },
+                          "val": {
+                            "u64": 1700000000
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "evidence_uri"
                           },
                           "val": {
                             "string": "ipfs://seller-rebuttal"
@@ -930,10 +1007,26 @@
                         },
                         {
                           "key": {
+                            "symbol": "expires_at"
+                          },
+                          "val": {
+                            "u64": 1700604800
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "id"
                           },
                           "val": {
-                            "u32": 1
+                            "u64": 1
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "is_invalidated"
+                          },
+                          "val": {
+                            "bool": false
                           }
                         },
                         {
@@ -949,7 +1042,7 @@
                             "symbol": "parent_evidence_id"
                           },
                           "val": {
-                            "u32": 0
+                            "u64": 0
                           }
                         },
                         {
@@ -969,6 +1062,149 @@
                           }
                         }
                       ]
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "FundAuditCount"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "FundAuditCount"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "FundAuditIndexed"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
+                  "u32": 0
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "FundAuditIndexed"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                    },
+                    {
+                      "u32": 0
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "actor"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "amount"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 50000000
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "balance_impact"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": -1,
+                          "lo": 18446744073659551616
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "reason"
+                      },
+                      "val": {
+                        "symbol": "escrow_funded"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "timestamp"
+                      },
+                      "val": {
+                        "u64": 1700000000
+                      }
                     }
                   ]
                 }
@@ -1118,13 +1354,13 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "RateLimit"
+                  "symbol": "RateLimitCount"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 },
                 {
-                  "u32": 0
+                  "u64": 472222
                 }
               ]
             },
@@ -1141,42 +1377,25 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "RateLimit"
+                      "symbol": "RateLimitCount"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                     },
                     {
-                      "u32": 0
+                      "u64": 472222
                     }
                   ]
                 },
                 "durability": "persistent",
                 "val": {
-                  "map": [
-                    {
-                      "key": {
-                        "symbol": "count"
-                      },
-                      "val": {
-                        "u32": 1
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "window_start"
-                      },
-                      "val": {
-                        "u64": 1700000000
-                      }
-                    }
-                  ]
+                  "u32": 1
                 }
               }
             },
             "ext": "v0"
           },
-          518400
+          4095
         ]
       ],
       [
@@ -1282,6 +1501,45 @@
             "key": {
               "vec": [
                 {
+                  "symbol": "StorageLayoutVersion"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "StorageLayoutVersion"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
                   "symbol": "TotalLocked"
                 },
                 {
@@ -1321,6 +1579,96 @@
             "ext": "v0"
           },
           518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "UsedEvidenceHash"
+                },
+                {
+                  "bytes": "b9ed14ffccbc92b9bf50493af9a16770513dd90db8d35e62d11f55a638916919"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "UsedEvidenceHash"
+                    },
+                    {
+                      "bytes": "b9ed14ffccbc92b9bf50493af9a16770513dd90db8d35e62d11f55a638916919"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "bool": true
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "UsedEvidenceHash"
+                },
+                {
+                  "bytes": "c6f389981793c4d11d81c80c49a25e7b12666328a29266cbd832623b9bbacfe5"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "UsedEvidenceHash"
+                    },
+                    {
+                      "bytes": "c6f389981793c4d11d81c80c49a25e7b12666328a29266cbd832623b9bbacfe5"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "bool": true
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
         ]
       ],
       [
@@ -1385,7 +1733,7 @@
                                 "symbol": "evidence_challenge_window"
                               },
                               "val": {
-                                "u32": 172800
+                                "u32": 86400
                               }
                             },
                             {
@@ -1457,22 +1805,6 @@
                               },
                               "val": {
                                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "rate_limit_max_calls"
-                              },
-                              "val": {
-                                "u32": 5
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "rate_limit_window"
-                              },
-                              "val": {
-                                "u32": 3600
                               }
                             },
                             {
@@ -3194,6 +3526,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "seller"
                   },
                   "val": {
@@ -3337,6 +3677,12 @@
                 },
                 {
                   "key": {
+                    "symbol": "service_agreement_hash"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
                     "symbol": "status"
                   },
                   "val": {
@@ -3456,6 +3802,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "seller"
                   },
                   "val": {
@@ -3546,68 +3900,6 @@
       "event": {
         "ext": "v0",
         "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "dispute_evidence_submitted"
-              },
-              {
-                "u64": 1
-              }
-            ],
-            "data": {
-              "map": [
-                {
-                  "key": {
-                    "symbol": "evidence_id"
-                  },
-                  "val": {
-                    "u32": 0
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "order_id"
-                  },
-                  "val": {
-                    "u64": 1
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "parent_evidence_id"
-                  },
-                  "val": "void"
-                },
-                {
-                  "key": {
-                    "symbol": "submitter"
-                  },
-                  "val": {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "timestamp"
-                  },
-                  "val": {
-                    "u64": 1700000000
-                  }
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
         "type_": "diagnostic",
         "body": {
           "v0": {
@@ -3620,7 +3912,7 @@
               }
             ],
             "data": {
-              "u32": 0
+              "u64": 0
             }
           }
         }
@@ -3657,71 +3949,7 @@
                   "string": "ipfs://seller-rebuttal"
                 },
                 {
-                  "u32": 0
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "dispute_evidence_submitted"
-              },
-              {
-                "u64": 1
-              }
-            ],
-            "data": {
-              "map": [
-                {
-                  "key": {
-                    "symbol": "evidence_id"
-                  },
-                  "val": {
-                    "u32": 1
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "order_id"
-                  },
-                  "val": {
-                    "u64": 1
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "parent_evidence_id"
-                  },
-                  "val": {
-                    "u32": 0
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "submitter"
-                  },
-                  "val": {
-                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "timestamp"
-                  },
-                  "val": {
-                    "u64": 1700000000
-                  }
+                  "u64": 0
                 }
               ]
             }
@@ -3746,7 +3974,7 @@
               }
             ],
             "data": {
-              "u32": 1
+              "u64": 1
             }
           }
         }
@@ -3800,7 +4028,15 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "evidence_hash"
+                        "symbol": "dispute_session_id"
+                      },
+                      "val": {
+                        "u64": 1700000000
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "evidence_uri"
                       },
                       "val": {
                         "string": "ipfs://buyer-evidence"
@@ -3808,10 +4044,26 @@
                     },
                     {
                       "key": {
+                        "symbol": "expires_at"
+                      },
+                      "val": {
+                        "u64": 1700604800
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
-                        "u32": 0
+                        "u64": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "is_invalidated"
+                      },
+                      "val": {
+                        "bool": false
                       }
                     },
                     {
@@ -3850,7 +4102,15 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "evidence_hash"
+                        "symbol": "dispute_session_id"
+                      },
+                      "val": {
+                        "u64": 1700000000
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "evidence_uri"
                       },
                       "val": {
                         "string": "ipfs://seller-rebuttal"
@@ -3858,10 +4118,26 @@
                     },
                     {
                       "key": {
+                        "symbol": "expires_at"
+                      },
+                      "val": {
+                        "u64": 1700604800
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
-                        "u32": 1
+                        "u64": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "is_invalidated"
+                      },
+                      "val": {
+                        "bool": false
                       }
                     },
                     {
@@ -3877,7 +4153,7 @@
                         "symbol": "parent_evidence_id"
                       },
                       "val": {
-                        "u32": 0
+                        "u64": 0
                       }
                     },
                     {

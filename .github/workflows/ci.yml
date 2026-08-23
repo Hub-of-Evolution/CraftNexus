@@ -41,17 +41,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-target-
 
+      # Host target: crate .cargo/config.toml historically defaulted to wasm32,
+      # and wasm LTO rustflags break `cargo check --tests` (embed-bitcode=no vs LTO).
       - name: Check code
         working-directory: craft-nexus-contract
-        run: cargo check --tests
+        run: cargo check --tests --target x86_64-unknown-linux-gnu
 
       - name: Run clippy
         working-directory: craft-nexus-contract
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --target x86_64-unknown-linux-gnu -- -D warnings
 
       - name: Run tests
         working-directory: craft-nexus-contract
-        run: cargo test --release
+        run: cargo test --release --target x86_64-unknown-linux-gnu
 
       - name: Build WASM
         working-directory: craft-nexus-contract

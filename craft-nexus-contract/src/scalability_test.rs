@@ -206,23 +206,21 @@ fn test_scheduled_batch_progresses_in_bounded_idempotent_chunks() {
         });
     }
 
-    let job_id = client.schedule_batch_escrow(&buyer, &params).unwrap();
-    let first = client
-        .continue_batch_escrow(&job_id, &buyer, &5)
-        .unwrap();
+    let job_id = client.schedule_batch_escrow(&buyer, &params);
+    let first = client.continue_batch_escrow(&job_id, &buyer, &5);
     assert_eq!(first.next_index, 5);
     assert_eq!(first.status, BatchJobStatus::Pending);
     assert_eq!(client.get_escrow(&2_000).batch_id, Some(job_id));
     assert_eq!(client.get_escrow(&2_004).batch_id, Some(job_id));
 
-    let second = client
-        .continue_batch_escrow(&job_id, &buyer, &5)
-        .unwrap();
+    let second = client.continue_batch_escrow(&job_id, &buyer, &5);
     assert_eq!(second.next_index, 7);
     assert_eq!(second.status, BatchJobStatus::Completed);
     assert_eq!(client.get_escrow(&2_006).batch_id, Some(job_id));
     assert_eq!(client.get_batch_escrow_progress(&job_id).unwrap(), second);
-    assert!(client.try_continue_batch_escrow(&job_id, &buyer, &1).is_err());
+    assert!(client
+        .try_continue_batch_escrow(&job_id, &buyer, &1)
+        .is_err());
 }
 
 #[test]
@@ -241,8 +239,8 @@ fn test_scheduled_batch_can_be_cancelled_before_funds_move() {
         service_agreement_hash: None,
     });
 
-    let job_id = client.schedule_batch_escrow(&buyer, &params).unwrap();
-    client.cancel_batch_escrow(&job_id, &buyer).unwrap();
+    let job_id = client.schedule_batch_escrow(&buyer, &params);
+    client.cancel_batch_escrow(&job_id, &buyer);
     assert_eq!(
         client.get_batch_escrow_progress(&job_id).unwrap().status,
         BatchJobStatus::Cancelled
@@ -735,7 +733,10 @@ fn test_artisan_stake_queue_pruning_does_not_run_before_threshold() {
             .persistent()
             .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 48))
     });
-    assert!(stored_deposit.is_some(), "queue should still contain the last deposit");
+    assert!(
+        stored_deposit.is_some(),
+        "queue should still contain the last deposit"
+    );
 }
 
 #[test]
@@ -756,13 +757,19 @@ fn test_artisan_stake_queue_pruning_removes_all_matured_deposits() {
     client.stake_tokens(&artisan, &token, &1000);
 
     let count_after_pruning = client.get_artisan_stake_queue_count(&artisan);
-    assert_eq!(count_after_pruning, 1, "only the newest deposit should remain");
+    assert_eq!(
+        count_after_pruning, 1,
+        "only the newest deposit should remain"
+    );
 
     let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
     let count_present = env.as_contract(&client.address, || {
         env.storage().persistent().has(&count_key)
     });
-    assert!(count_present, "queue count should remain stored for the remaining deposit");
+    assert!(
+        count_present,
+        "queue count should remain stored for the remaining deposit"
+    );
 }
 
 #[test]
@@ -802,8 +809,9 @@ fn test_artisan_stake_queue_pruning_can_empty_queue() {
     // The pruned slots must not linger in persistent storage.
     for index in 1..STAKE_QUEUE_PRUNE_THRESHOLD {
         let stale_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), index);
-        let still_present =
-            env.as_contract(&client.address, || env.storage().persistent().has(&stale_key));
+        let still_present = env.as_contract(&client.address, || {
+            env.storage().persistent().has(&stale_key)
+        });
         assert!(!still_present, "pruned deposit {index} should be removed");
     }
 }
@@ -921,6 +929,14 @@ fn test_escrow_counters_stay_in_sync_at_scale() {
     assert_eq!(seller_count, 100);
 
     // Pagination surfaces must agree with the counters above.
-    assert_eq!(client.get_escrows_by_buyer(&buyer, &0, &100, &false).len(), 100);
-    assert_eq!(client.get_escrows_by_seller(&seller, &0, &100, &false).len(), 100);
+    assert_eq!(
+        client.get_escrows_by_buyer(&buyer, &0, &100, &false).len(),
+        100
+    );
+    assert_eq!(
+        client
+            .get_escrows_by_seller(&seller, &0, &100, &false)
+            .len(),
+        100
+    );
 }

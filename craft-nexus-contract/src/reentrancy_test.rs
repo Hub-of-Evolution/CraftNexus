@@ -13,8 +13,12 @@ struct CallbackToken;
 #[contractimpl]
 impl CallbackToken {
     pub fn initialize(env: Env, target: Address, order_id: u32) {
-        env.storage().instance().set(&Symbol::new(&env, "target"), &target);
-        env.storage().instance().set(&Symbol::new(&env, "order"), &order_id);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "target"), &target);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "order"), &order_id);
     }
 
     pub fn decimals(_env: Env) -> u32 {
@@ -95,14 +99,7 @@ fn malicious_token_callback_is_rejected_and_rolls_back() {
     CallbackTokenClient::new(&env, &token_id).initialize(&contract_id, &order_id);
 
     assert!(client
-        .try_create_escrow(
-            &buyer,
-            &seller,
-            &token_id,
-            &5_000,
-            &order_id,
-            &Some(86_400),
-        )
+        .try_create_escrow(&buyer, &seller, &token_id, &5_000, &order_id, &Some(86_400),)
         .is_err());
     assert!(client.try_get_escrow(&order_id).is_err());
 }
@@ -250,6 +247,8 @@ fn test_resolve_dispute_cei_pattern() {
         &500,
         &Some(onboarding_contract),
     );
+    client.set_evidence_challenge_window(&0);
+    client.set_min_release_window(&1);
 
     token_client.mint(&buyer, &10000);
 
@@ -472,6 +471,7 @@ fn test_dispute_expired_recurring_escrow_arbitrator_fees() {
         &500, // 5% fee (500 BPS)
         &None,
     );
+    client.set_evidence_challenge_window(&0);
 
     client.set_min_escrow_amount(&token.address(), &0);
     client.set_min_release_window(&1);
@@ -503,7 +503,6 @@ fn test_dispute_expired_recurring_escrow_arbitrator_fees() {
     let escrow = client.get_escrow(&order_id);
     assert_eq!(escrow.status, EscrowStatus::Resolved);
 }
-
 
 #[test]
 fn test_auto_release_cei_pattern() {
@@ -863,6 +862,7 @@ fn test_fund_escrow_cei_pattern() {
         &86400,
         &None,
         &None,
+        &None,
     );
 
     // Verify the escrow starts unfunded
@@ -887,7 +887,10 @@ fn test_fund_escrow_cei_pattern() {
             .get(&(Symbol::new(&env, "ESCROW"), order_id))
             .unwrap()
     });
-    assert!(escrow_after.funded, "escrow.funded must be true after fund_escrow (CEI: state updated before transfer)");
+    assert!(
+        escrow_after.funded,
+        "escrow.funded must be true after fund_escrow (CEI: state updated before transfer)"
+    );
     assert_eq!(escrow_after.status, EscrowStatus::Active);
 
     // Attempting to fund again must be rejected — proving the funded flag acts
