@@ -1315,6 +1315,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "state_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "status"
                   },
                   "val": {
@@ -1443,6 +1451,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "state_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "status"
                   },
                   "val": {
@@ -1564,6 +1580,14 @@
                 {
                   "key": {
                     "symbol": "role"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "state_version"
                   },
                   "val": {
                     "u32": 1

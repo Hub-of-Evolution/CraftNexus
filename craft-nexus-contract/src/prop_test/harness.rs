@@ -58,7 +58,12 @@ impl PropHarness {
                      Failure   : {}\n\
                      \n\
                      Reproduce with: PROP_SEED=0x{:016X} cargo test --features testutils prop_",
-                    i + 1, self.seed, case_seed, i, msg, case_seed
+                    i + 1,
+                    self.seed,
+                    case_seed,
+                    i,
+                    msg,
+                    case_seed
                 );
             }
         }

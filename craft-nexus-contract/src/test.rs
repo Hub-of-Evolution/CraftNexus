@@ -435,7 +435,10 @@ fn test_escrow_state_diagnostic_flags_pending_orphans() {
 
     let diagnostic = client.diagnose_escrow_state(&1);
     assert!(!diagnostic.is_consistent);
-    assert_eq!(diagnostic.issue, EscrowStateIssue::PendingTransitionUnfinished);
+    assert_eq!(
+        diagnostic.issue,
+        EscrowStateIssue::PendingTransitionUnfinished
+    );
 }
 
 #[test]
@@ -2123,7 +2126,10 @@ fn test_upgrade_requires_compatibility_manifest() {
     });
 
     let result = client.try_execute_upgrade(&wasm_hash);
-    assert!(matches!(result, Err(Ok(Error::UpgradeCompatibilityMissing))));
+    assert!(matches!(
+        result,
+        Err(Ok(Error::UpgradeCompatibilityMissing))
+    ));
 }
 
 #[test]
@@ -2152,9 +2158,7 @@ fn test_upgrade_manifest_is_recorded_and_consumed() {
     client.propose_upgrade_wasm(&admin, &wasm_hash);
     client.submit_compat_manifest(&wasm_hash, &manifest);
     assert_eq!(
-        client
-            .get_upgrade_compat_manifest(&wasm_hash)
-            .unwrap(),
+        client.get_upgrade_compat_manifest(&wasm_hash).unwrap(),
         manifest
     );
 
@@ -2163,16 +2167,11 @@ fn test_upgrade_manifest_is_recorded_and_consumed() {
     });
     client.execute_upgrade(&wasm_hash);
 
-    let record = client
-        .get_upgrade_compat_history()
-        .last()
-        .unwrap();
+    let record = client.get_upgrade_compat_history().last().unwrap();
     assert_eq!(record.from_version, 1);
     assert_eq!(record.to_version, 2);
     assert_eq!(record.state_commitment, commitment);
-    assert!(client
-        .get_upgrade_compat_manifest(&wasm_hash)
-        .is_none());
+    assert!(client.get_upgrade_compat_manifest(&wasm_hash).is_none());
 }
 
 #[test]
@@ -6626,7 +6625,10 @@ mod onboarding_state_consistency {
             &1u32,
             &Some(3600u32),
         );
-        assert!(result.is_ok(), "active users should be allowed to create escrow");
+        assert!(
+            result.is_ok(),
+            "active users should be allowed to create escrow"
+        );
     }
 
     // ── Acceptance criterion 2: deactivated profile blocks escrow creation ─

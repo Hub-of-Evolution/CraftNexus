@@ -1314,6 +1314,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "state_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "status"
                   },
                   "val": {
@@ -1399,7 +1407,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Username too long' from contract function 'Symbol(obj#291)'"
+                  "string": "caught panic 'Username too long' from contract function 'Symbol(obj#293)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"

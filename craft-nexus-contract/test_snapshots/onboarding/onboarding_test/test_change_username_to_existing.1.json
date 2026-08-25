@@ -1661,6 +1661,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "state_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "status"
                   },
                   "val": {
@@ -1844,6 +1852,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "state_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "status"
                   },
                   "val": {
@@ -1929,7 +1945,7 @@
             "data": {
               "vec": [
                 {
-                  "string": "caught panic 'Username already taken' from contract function 'Symbol(obj#449)'"
+                  "string": "caught panic 'Username already taken' from contract function 'Symbol(obj#453)'"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"

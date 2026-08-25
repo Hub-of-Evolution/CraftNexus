@@ -34,9 +34,7 @@ impl ModelEscrowStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            ModelEscrowStatus::Released
-                | ModelEscrowStatus::Refunded
-                | ModelEscrowStatus::Resolved
+            ModelEscrowStatus::Released | ModelEscrowStatus::Refunded | ModelEscrowStatus::Resolved
         )
     }
 }
@@ -386,11 +384,7 @@ impl ModelState {
     }
 
     /// Force-resolve an expired dispute (anyone, after deadline).
-    pub fn resolve_expired_dispute(
-        &mut self,
-        order_id: u32,
-        now: u64,
-    ) -> Result<(), ModelError> {
+    pub fn resolve_expired_dispute(&mut self, order_id: u32, now: u64) -> Result<(), ModelError> {
         let escrow = self
             .escrows
             .get_mut(&order_id)
@@ -551,11 +545,7 @@ impl ModelState {
 
     // ── Onboarding transitions ────────────────────────────────────────────────
 
-    pub fn onboard_user(
-        &mut self,
-        address: String,
-        role: ModelUserRole,
-    ) -> Result<(), ModelError> {
+    pub fn onboard_user(&mut self, address: String, role: ModelUserRole) -> Result<(), ModelError> {
         if self.is_paused {
             return Err(ModelError::ContractPaused);
         }

@@ -1847,6 +1847,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "state_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "status"
                   },
                   "val": {
