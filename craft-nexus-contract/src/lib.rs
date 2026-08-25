@@ -5,8 +5,8 @@
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr,
-    Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
+    Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
 };
 extern crate alloc;
 
@@ -21,13 +21,13 @@ mod expired_dispute_fee_test;
 #[cfg(test)]
 mod min_release_window_test;
 #[cfg(test)]
+mod prop_test;
+#[cfg(test)]
 mod reentrancy_test;
 #[cfg(test)]
 mod scalability_test;
 #[cfg(test)]
 mod test;
-#[cfg(test)]
-mod prop_test;
 
 // Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
 // artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
@@ -2669,11 +2669,7 @@ impl CraftNexusContract {
         ) {
             Ok(Ok(v)) => v,
             _ => {
-                Self::emit_onboarding_call_failed(
-                    env,
-                    active_method,
-                    onboarding_address.clone(),
-                );
+                Self::emit_onboarding_call_failed(env, active_method, onboarding_address.clone());
                 return Err(());
             }
         };
@@ -2688,11 +2684,7 @@ impl CraftNexusContract {
         ) {
             Ok(Ok(v)) => v,
             _ => {
-                Self::emit_onboarding_call_failed(
-                    env,
-                    role_method,
-                    onboarding_address.clone(),
-                );
+                Self::emit_onboarding_call_failed(env, role_method, onboarding_address.clone());
                 return Err(());
             }
         };
@@ -2707,11 +2699,7 @@ impl CraftNexusContract {
         ) {
             Ok(Ok(v)) => v,
             _ => {
-                Self::emit_onboarding_call_failed(
-                    env,
-                    verified_method,
-                    onboarding_address.clone(),
-                );
+                Self::emit_onboarding_call_failed(env, verified_method, onboarding_address.clone());
                 return Err(());
             }
         };
@@ -2726,11 +2714,7 @@ impl CraftNexusContract {
         ) {
             Ok(Ok(v)) => v,
             _ => {
-                Self::emit_onboarding_call_failed(
-                    env,
-                    version_method,
-                    onboarding_address,
-                );
+                Self::emit_onboarding_call_failed(env, version_method, onboarding_address);
                 return Err(());
             }
         };
@@ -3652,7 +3636,9 @@ impl CraftNexusContract {
                 if env
                     .storage()
                     .persistent()
-                    .get::<DataKey, ReconciliationReport>(&DataKey::ReconciliationReport(token.clone()))
+                    .get::<DataKey, ReconciliationReport>(&DataKey::ReconciliationReport(
+                        token.clone(),
+                    ))
                     .is_some_and(|report| report.unresolved)
                 {
                     return Err(Error::ReconciliationRequired);
@@ -4812,7 +4798,10 @@ impl CraftNexusContract {
 
     fn inspect_escrow_state(env: &Env, order_id: u32) -> EscrowStateDiagnostic {
         let key = (ESCROW, order_id);
-        let escrow_opt = env.storage().persistent().get::<(Symbol, u32), Escrow>(&key);
+        let escrow_opt = env
+            .storage()
+            .persistent()
+            .get::<(Symbol, u32), Escrow>(&key);
         if escrow_opt.is_none() {
             return EscrowStateDiagnostic {
                 order_id,
@@ -4830,8 +4819,8 @@ impl CraftNexusContract {
                 | EscrowStatus::DisputePending
                 | EscrowStatus::SettlementPending
         );
-        let missing_dispute_timestamp = escrow.status == EscrowStatus::Disputed
-            && escrow.dispute_initiated_at.is_none();
+        let missing_dispute_timestamp =
+            escrow.status == EscrowStatus::Disputed && escrow.dispute_initiated_at.is_none();
         let terminal_without_receipt = matches!(
             escrow.status,
             EscrowStatus::Released | EscrowStatus::Refunded | EscrowStatus::Resolved
@@ -6208,10 +6197,7 @@ impl CraftNexusContract {
             &DataKey::UpgradeCompatibilityManifest(wasm_hash.clone()),
             &manifest,
         );
-        Self::extend_persistent(
-            &env,
-            &DataKey::UpgradeCompatibilityManifest(wasm_hash),
-        );
+        Self::extend_persistent(&env, &DataKey::UpgradeCompatibilityManifest(wasm_hash));
         Ok(())
     }
 
@@ -6310,7 +6296,9 @@ impl CraftNexusContract {
         let manifest: UpgradeCompatibilityManifest = env
             .storage()
             .persistent()
-            .get(&DataKey::UpgradeCompatibilityManifest(proposal.wasm_hash.clone()))
+            .get(&DataKey::UpgradeCompatibilityManifest(
+                proposal.wasm_hash.clone(),
+            ))
             .ok_or(Error::UpgradeCompatibilityMissing)?;
         Self::validate_compatibility_manifest(&env, &manifest)?;
 
@@ -6356,9 +6344,11 @@ impl CraftNexusContract {
         env.storage()
             .persistent()
             .remove(&DataKey::WasmUpgradeProposal);
-        env.storage().persistent().remove(&DataKey::UpgradeCompatibilityManifest(
-            proposal.wasm_hash.clone(),
-        ));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::UpgradeCompatibilityManifest(
+                proposal.wasm_hash.clone(),
+            ));
 
         Self::emit_upgrade_event(
             &env,
@@ -8653,10 +8643,9 @@ impl CraftNexusContract {
                 .persistent()
                 .get(&DataKey::StakedArtisanCount)
                 .unwrap_or(0);
-            env.storage().persistent().set(
-                &DataKey::StakedArtisanIndexed(count),
-                &artisan,
-            );
+            env.storage()
+                .persistent()
+                .set(&DataKey::StakedArtisanIndexed(count), &artisan);
             env.storage()
                 .persistent()
                 .set(&DataKey::StakedArtisanCount, &(count + 1));
@@ -9641,9 +9630,8 @@ impl CraftNexusContract {
                     .get::<DataKey, RecurringEscrow>(&DataKey::RecurringEscrow(id))
                 {
                     if recurring.token == token && recurring.is_active {
-                        recurring_locked = recurring_locked.saturating_add(
-                            recurring.total_amount - recurring.released_amount,
-                        );
+                        recurring_locked = recurring_locked
+                            .saturating_add(recurring.total_amount - recurring.released_amount);
                     }
                 }
             }
@@ -9711,8 +9699,7 @@ impl CraftNexusContract {
 
         let report = ReconciliationReport {
             token: token.clone(),
-            balance: token::Client::new(&env, &token)
-                .balance(&env.current_contract_address()),
+            balance: token::Client::new(&env, &token).balance(&env.current_contract_address()),
             expected_locked,
             expected_staked,
             tracked_locked: env
@@ -9723,7 +9710,7 @@ impl CraftNexusContract {
             tracked_staked: env
                 .storage()
                 .persistent()
-                .get(&DataKey::TotalStaked(token.clone()) )
+                .get(&DataKey::TotalStaked(token.clone()))
                 .unwrap_or(0),
             scanned_escrows: scanned,
             next_cursor: end,
@@ -9734,7 +9721,10 @@ impl CraftNexusContract {
             let unresolved = report.expected_locked != report.tracked_locked
                 || report.expected_staked != report.tracked_staked
                 || report.balance < report.expected_locked + report.expected_staked;
-            let final_report = ReconciliationReport { unresolved, ..report };
+            let final_report = ReconciliationReport {
+                unresolved,
+                ..report
+            };
             env.storage()
                 .persistent()
                 .set(&DataKey::ReconciliationReport(token), &final_report);
@@ -9743,17 +9733,13 @@ impl CraftNexusContract {
                 .remove(&DataKey::ReconciliationProgress(final_report.token.clone()));
             return Ok(final_report);
         }
-        env.storage().persistent().set(
-            &DataKey::ReconciliationProgress(token),
-            &expected_locked,
-        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReconciliationProgress(token), &expected_locked);
         Ok(report)
     }
 
-    pub fn get_reconciliation_report(
-        env: Env,
-        token: Address,
-    ) -> Option<ReconciliationReport> {
+    pub fn get_reconciliation_report(env: Env, token: Address) -> Option<ReconciliationReport> {
         env.storage()
             .persistent()
             .get(&DataKey::ReconciliationReport(token))

@@ -16,7 +16,10 @@
 #![cfg(test)]
 extern crate alloc;
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, vec as sdk_vec, Address, BytesN, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    vec as sdk_vec, Address, BytesN, Env,
+};
 
 use super::{
     generators::{generate_upgrade_sequence, UpgradeOp},
@@ -184,7 +187,9 @@ fn prop_duplicate_proposal_rejected() {
     let hash2: BytesN<32> = BytesN::from_array(&env, &[5u8; 32]);
     let r = client.try_propose_upgrade_wasm(&admin, &hash2);
     if r.is_ok() && r.unwrap().is_ok() {
-        panic!("[prop_duplicate_proposal_rejected] second proposal accepted while first is pending");
+        panic!(
+            "[prop_duplicate_proposal_rejected] second proposal accepted while first is pending"
+        );
     }
 }
 
@@ -291,18 +296,14 @@ fn prop_multisig_threshold_enforced() {
     client.propose_upgrade_wasm(&admin, &hash);
     let proposal = client.get_upgrade_proposal();
     if proposal.is_some() {
-        panic!(
-            "[prop_multisig_threshold_enforced] proposal committed after only 1 of 2 approvals"
-        );
+        panic!("[prop_multisig_threshold_enforced] proposal committed after only 1 of 2 approvals");
     }
 
     // Even after cooldown, execute should fail since proposal was never committed
     advance_ledger_time(&env, WASM_COOLDOWN + 1);
     let r = client.try_execute_upgrade(&hash);
     if r.is_ok() && r.unwrap().is_ok() {
-        panic!(
-            "[prop_multisig_threshold_enforced] execute succeeded with only 1 of 2 approvals"
-        );
+        panic!("[prop_multisig_threshold_enforced] execute succeeded with only 1 of 2 approvals");
     }
 }
 

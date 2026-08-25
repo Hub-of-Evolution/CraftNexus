@@ -1944,9 +1944,14 @@ impl OnboardingContract {
         cid_bytes
     }
 
-    fn stored_to_public(env: &Env, stored: StoredUserProfile, portfolio_cid: Option<Bytes>) -> UserProfile {
-        let state_version = Self::read_persistent(env, &DataKey::UserStateVersion(stored.address.clone()))
-            .unwrap_or(1);
+    fn stored_to_public(
+        env: &Env,
+        stored: StoredUserProfile,
+        portfolio_cid: Option<Bytes>,
+    ) -> UserProfile {
+        let state_version =
+            Self::read_persistent(env, &DataKey::UserStateVersion(stored.address.clone()))
+                .unwrap_or(1);
         UserProfile {
             version: stored.version,
             address: stored.address,
@@ -2024,7 +2029,9 @@ impl OnboardingContract {
             status: profile.status,
         };
         Self::persist_stored_user_profile(env, user, &stored);
-        env.storage().persistent().set(&DataKey::UserStateVersion(user.clone()), &1u32);
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserStateVersion(user.clone()), &1u32);
         Self::extend_persistent(env, &DataKey::UserStateVersion(user.clone()));
         (stored, true)
     }
@@ -2050,7 +2057,9 @@ impl OnboardingContract {
             status: ProfileStatus::Active,
         };
         Self::persist_stored_user_profile(env, user, &stored);
-        env.storage().persistent().set(&DataKey::UserStateVersion(user.clone()), &1u32);
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserStateVersion(user.clone()), &1u32);
         Self::extend_persistent(env, &DataKey::UserStateVersion(user.clone()));
         stored
     }
