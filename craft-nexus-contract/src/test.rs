@@ -6814,4 +6814,205 @@ mod onboarding_state_consistency {
         );
         assert_panic_contract_error(result, Error::OnboardingProfileInactive);
     }
+
+    #[test]
+    fn test_get_canonical_escrow_state_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+        // Define a list of statuses to test
+        let statuses = vec![
+            &env,
+            EscrowStatus::Active,
+            EscrowStatus::Released,
+            EscrowStatus::Refunded,
+            EscrowStatus::Disputed,
+            EscrowStatus::Resolved,
+            EscrowStatus::ReleasePending,
+            EscrowStatus::RefundPending,
+            EscrowStatus::DisputePending,
+            EscrowStatus::SettlementPending,
+        ];
+
+        for i in 0..statuses.len() {
+            let status = statuses.get(i).unwrap();
+            let order_id = (i + 100) as u32;
+
+            let is_terminal = matches!(
+                status,
+                EscrowStatus::Released | EscrowStatus::Refunded | EscrowStatus::Resolved
+            );
+
+            // Construct escrow manually
+            let escrow = Escrow {
+                version: CURRENT_ESCROW_VERSION,
+                id: order_id as u64,
+                batch_id: None,
+                buyer: buyer.clone(),
+                seller: seller.clone(),
+                token: token_id.clone(),
+                amount: 10_000i128,
+                status: status.clone(),
+                release_window: 3600,
+                created_at: 1000,
+                ipfs_hash: Some(String::from_str(&env, "ipfs")),
+                metadata_hash: Some(Bytes::from_array(&env, &[1; 32])),
+                dispute_reason: if status == EscrowStatus::Disputed {
+                    Some(Symbol::new(&env, "reason"))
+                } else {
+                    None
+                },
+                dispute_initiated_at: if status == EscrowStatus::Disputed {
+                    Some(2000u64)
+                } else {
+                    None
+                },
+                funded: true,
+                funding_deadline: Some(1500u64),
+                service_agreement_hash: Some(Bytes::from_array(&env, &[2; 32])),
+            };
+
+            // Write to storage
+            env.as_contract(&client.address, || {
+                env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+            });
+
+            // Write dispute escalation if needed
+            if status == EscrowStatus::Disputed {
+                let escalation_rec = DisputeEscalationRecord {
+                    order_id,
+                    escalated_by: buyer.clone(),
+                    escalated_at: 2500u64,
+                };
+                env.as_contract(&client.address, || {
+                    env.storage().persistent().set(&DataKey::DisputeEscalation(order_id), &escalation_rec);
+                });
+            }
+
+            // Query state
+            let canonical_state = client.get_canonical_escrow_state(&order_id);
+
+            // Assertions
+            assert_eq!(canonical_state.status, status);
+            assert_eq!(canonical_state.balances.amount, 10_000i128);
+            assert_eq!(canonical_state.balances.token, token_id);
+            assert_eq!(canonical_state.balances.funded, true);
+            assert_eq!(canonical_state.participants.buyer, buyer);
+            assert_eq!(canonical_state.participants.seller, seller);
+            assert_eq!(canonical_state.deadlines.created_at, 1000);
+            assert_eq!(canonical_state.deadlines.release_window, 3600);
+
+            if is_terminal {
+                // Terminal records cannot report active actions or deadlines
+                assert!(canonical_state.deadlines.funding_deadline.is_none());
+                assert!(canonical_state.deadlines.auto_release_at.is_none());
+                assert!(canonical_state.dispute_metadata.is_none());
+            } else {
+                assert_eq!(canonical_state.deadlines.funding_deadline, Some(1500u64));
+                assert_eq!(canonical_state.deadlines.auto_release_at, Some(4600u64));
+
+                if status == EscrowStatus::Disputed {
+                    let disp = canonical_state.dispute_metadata.unwrap();
+                    assert_eq!(disp.dispute_reason, Some(Symbol::new(&env, "reason")));
+                    assert_eq!(disp.dispute_initiated_at, Some(2000u64));
+                    assert_eq!(disp.escalated_by, Some(buyer.clone()));
+                    assert_eq!(disp.escalated_at, Some(2500u64));
+                } else {
+                    assert!(canonical_state.dispute_metadata.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_canonical_escrow_state_legacy() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
+
+        // 1. Test LegacyEscrow (pre-version schemas)
+        let legacy = LegacyEscrow {
+            id: 201,
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token_id.clone(),
+            amount: 50_000i128,
+            status: EscrowStatus::Active,
+            release_window: 1200,
+            created_at: 500,
+            ipfs_hash: Some(String::from_str(&env, "ipfs")),
+            metadata_hash: Some(Bytes::from_array(&env, &[3; 32])),
+            dispute_reason: Some(String::from_str(&env, "legacy_reason")),
+            dispute_initiated_at: None,
+        };
+
+        env.as_contract(&client.address, || {
+            env.storage().persistent().set(&(ESCROW, 201u32), &legacy);
+        });
+
+        let state_legacy = client.get_canonical_escrow_state(&201);
+        assert_eq!(state_legacy.status, EscrowStatus::Active);
+        assert_eq!(state_legacy.balances.amount, 50_000i128);
+        assert_eq!(state_legacy.balances.token, token_id);
+        assert_eq!(state_legacy.balances.funded, true); // Legacy default
+        assert_eq!(state_legacy.deadlines.created_at, 500);
+        assert_eq!(state_legacy.deadlines.release_window, 1200);
+        assert_eq!(state_legacy.deadlines.auto_release_at, Some(1700));
+
+        // 2. Test EscrowWithoutBatch
+        let legacy_nobatch = EscrowWithoutBatch {
+            version: 3,
+            id: 202,
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token_id.clone(),
+            amount: 60_000i128,
+            status: EscrowStatus::Active,
+            release_window: 1500,
+            created_at: 600,
+            ipfs_hash: None,
+            metadata_hash: None,
+            dispute_reason: None,
+            dispute_initiated_at: None,
+        };
+
+        env.as_contract(&client.address, || {
+            env.storage().persistent().set(&(ESCROW, 202u32), &legacy_nobatch);
+        });
+
+        let state_nobatch = client.get_canonical_escrow_state(&202);
+        assert_eq!(state_nobatch.status, EscrowStatus::Active);
+        assert_eq!(state_nobatch.balances.amount, 60_000i128);
+        assert_eq!(state_nobatch.balances.token, token_id);
+
+        // 3. Test EscrowV4
+        let legacy_v4 = EscrowV4 {
+            version: 4,
+            id: 203,
+            batch_id: Some(44u64),
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token_id.clone(),
+            amount: 70_000i128,
+            status: EscrowStatus::Active,
+            release_window: 1800,
+            created_at: 700,
+            ipfs_hash: None,
+            metadata_hash: None,
+            dispute_reason: None,
+            dispute_initiated_at: None,
+            funded: true,
+            funding_deadline: None,
+        };
+
+        env.as_contract(&client.address, || {
+            env.storage().persistent().set(&(ESCROW, 203u32), &legacy_v4);
+        });
+
+        let state_v4 = client.get_canonical_escrow_state(&203);
+        assert_eq!(state_v4.status, EscrowStatus::Active);
+        assert_eq!(state_v4.balances.amount, 70_000i128);
+        assert_eq!(state_v4.balances.token, token_id);
+    }
 }

@@ -1248,6 +1248,54 @@ pub struct EscrowMetadata {
     pub service_agreement_hash: Option<Bytes>,
 }
 
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowBalances {
+    pub amount: i128,
+    pub token: Address,
+    pub funded: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowParticipants {
+    pub buyer: Address,
+    pub seller: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowDeadlines {
+    pub created_at: u32,
+    pub release_window: u32,
+    pub funding_deadline: Option<u64>,
+    pub auto_release_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowDisputeMetadata {
+    pub dispute_reason: Option<Symbol>,
+    pub dispute_initiated_at: Option<u64>,
+    pub escalated_by: Option<Address>,
+    pub escalated_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct CanonicalEscrowState {
+    pub status: EscrowStatus,
+    pub balances: EscrowBalances,
+    pub participants: EscrowParticipants,
+    pub deadlines: EscrowDeadlines,
+    pub dispute_metadata: Option<EscrowDisputeMetadata>,
+}
+
 /// Metadata reveal proof for privacy verification (Issue #122)
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
@@ -6619,6 +6667,76 @@ impl CraftNexusContract {
     /// * `order_id` - Order identifier
     pub fn get_escrow(env: Env, order_id: u32) -> Escrow {
         Self::get_stored_escrow(&env, order_id)
+    }
+
+    /// Get the canonical escrow state containing status, balances, participants, deadlines, and dispute metadata.
+    pub fn get_canonical_escrow_state(env: Env, order_id: u32) -> CanonicalEscrowState {
+        let escrow = Self::try_get_escrow_readonly(&env, order_id);
+
+        let is_terminal = matches!(
+            escrow.status,
+            EscrowStatus::Released | EscrowStatus::Refunded | EscrowStatus::Resolved
+        );
+
+        let balances = EscrowBalances {
+            amount: escrow.amount,
+            token: escrow.token,
+            funded: escrow.funded,
+        };
+
+        let participants = EscrowParticipants {
+            buyer: escrow.buyer,
+            seller: escrow.seller,
+        };
+
+        let (funding_deadline, auto_release_at) = if is_terminal {
+            (None, None)
+        } else {
+            let auto_release = if escrow.funded {
+                Some(escrow.created_at as u64 + escrow.release_window as u64)
+            } else {
+                None
+            };
+            (escrow.funding_deadline, auto_release)
+        };
+
+        let deadlines = EscrowDeadlines {
+            created_at: escrow.created_at,
+            release_window: escrow.release_window,
+            funding_deadline,
+            auto_release_at,
+        };
+
+        let dispute_metadata = if is_terminal {
+            None
+        } else if escrow.status == EscrowStatus::Disputed
+            || escrow.status == EscrowStatus::DisputePending
+            || escrow.status == EscrowStatus::SettlementPending
+            || escrow.dispute_initiated_at.is_some()
+        {
+            let escalation = Self::get_dispute_escalation(env.clone(), order_id);
+            let (escalated_by, escalated_at) = match escalation {
+                Some(record) => (Some(record.escalated_by), Some(record.escalated_at)),
+                None => (None, None),
+            };
+
+            Some(EscrowDisputeMetadata {
+                dispute_reason: escrow.dispute_reason,
+                dispute_initiated_at: escrow.dispute_initiated_at,
+                escalated_by,
+                escalated_at,
+            })
+        } else {
+            None
+        };
+
+        CanonicalEscrowState {
+            status: escrow.status,
+            balances,
+            participants,
+            deadlines,
+            dispute_metadata,
+        }
     }
 
     /// Diagnose the escrow lifecycle for partial-state or orphaned transition issues.
