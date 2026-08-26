@@ -89,11 +89,8 @@ use soroban_sdk::{
     Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
-/// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
-const TTL_THRESHOLD: u32 = 10_000;
-const READ_TTL_THRESHOLD: u32 = 1_000;
-/// Standard TTL extension for persistent storage (approx 30 days)
-const TTL_EXTENSION: u32 = 518_400;
+use crate::ttl::{refresh_persistent, refresh_persistent_if_present, refresh_persistent_read};
+
 const CURRENT_USER_PROFILE_VERSION: u32 = 5;
 
 const BASE58_BTC_CHARSET: [bool; 256] = {
@@ -2150,15 +2147,11 @@ impl OnboardingContract {
     /// markers (`DataKey::VerificationRequest`) use temporary storage and must
     /// not pay for `extend_ttl`; they are cleared on approve/reject/clear.
     fn extend_persistent(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
-        env.storage()
-            .persistent()
-            .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
+        refresh_persistent(env, key);
     }
 
     fn extend_persistent_read(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
-        env.storage()
-            .persistent()
-            .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
+        refresh_persistent_read(env, key);
     }
 
     /// Load a persistent entry and refresh its TTL in a single storage pass
@@ -2239,14 +2232,7 @@ impl OnboardingContract {
     where
         K: soroban_sdk::IntoVal<Env, soroban_sdk::Val> + Clone,
     {
-        if env.storage().persistent().has(key) {
-            env.storage()
-                .persistent()
-                .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
-            true
-        } else {
-            false
-        }
+        refresh_persistent_if_present(env, key)
     }
 
     fn require_ttl_bump_auth(config: &OnboardingConfig) {

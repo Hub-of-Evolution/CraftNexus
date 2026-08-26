@@ -5506,6 +5506,33 @@ fn test_platform_config_ttl_extension_on_read() {
     assert_eq!(config.admin, config_after.admin);
 }
 
+#[test]
+fn test_shared_ttl_refresh_helper_refreshes_active_persistent_entry() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let key = DataKey::Escrow(1);
+
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(&key, &true);
+        super::ttl::refresh_persistent(&env, &key);
+        assert!(
+            env.storage().persistent().get_ttl(&key) >= super::ttl::TTL_EXTENSION
+        );
+    });
+}
+
+#[test]
+fn test_shared_ttl_refresh_helper_does_not_refresh_missing_entry() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let key = DataKey::Escrow(1);
+
+    env.as_contract(&contract_id, || {
+        assert!(!super::ttl::refresh_persistent_if_present(&env, &key));
+        assert!(!env.storage().persistent().has(&key));
+    });
+}
+
 // ===== Issue #656: funding_deadline / cancel_unfunded_escrow / auto_cancel_unfunded =====
 
 /// Helper: create an unfunded escrow and return the escrow struct.
