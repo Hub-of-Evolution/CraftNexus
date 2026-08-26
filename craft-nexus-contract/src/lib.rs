@@ -10,6 +10,8 @@ use soroban_sdk::{
 };
 extern crate alloc;
 
+mod ttl;
+
 #[cfg(test)]
 mod arbitration_escalation_test;
 #[cfg(test)]
@@ -317,13 +319,9 @@ const BASE58_BTC_CHARSET: [bool; 256] = {
 };
 const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
 
-/// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
-const TTL_THRESHOLD: u32 = 10_000;
-/// Lower TTL threshold used for hot index reads to reduce the cost of frequent
-/// TTL refresh calls (Issue #533).
-const READ_TTL_THRESHOLD: u32 = 1_000;
-/// Standard TTL extension for persistent storage (approx 30 days)
-const TTL_EXTENSION: u32 = 518_400;
+use ttl::{
+    refresh_instance, refresh_persistent, refresh_persistent_read,
+};
 
 // Default configuration constants (can be overridden via PlatformConfig)
 /// Default grace period for WASM upgrades (7 days in seconds)
@@ -2369,16 +2367,12 @@ impl CraftNexusContract {
     /// Extend the TTL of a persistent storage entry using standardized values.
     #[inline(always)]
     fn extend_persistent(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
-        env.storage()
-            .persistent()
-            .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
+        refresh_persistent(env, key);
     }
 
     #[inline(always)]
     fn extend_persistent_read(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
-        env.storage()
-            .persistent()
-            .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
+        refresh_persistent_read(env, key);
     }
 
     /// Read a persistent `u32` and extend its TTL when the key exists (#515).
@@ -4614,9 +4608,7 @@ impl CraftNexusContract {
             .unwrap_or_else(|| env.panic_with_error(crate::Error::PlatformNotInitialized));
 
         let config = PlatformConfig::try_from_val(env, &stored).expect("Corrupted PlatformConfig");
-        env.storage()
-            .instance()
-            .extend_ttl(TTL_THRESHOLD, TTL_EXTENSION);
+        refresh_instance(env);
         config
     }
 
