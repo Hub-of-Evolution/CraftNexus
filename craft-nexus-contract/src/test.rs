@@ -4457,6 +4457,105 @@ fn test_set_paused_emits_platform_status_events() {
     assert_eq!(unpaused_event.timestamp, 1711368000);
 }
 
+#[test]
+fn test_sweep_unallocated_funds_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, platform_wallet, admin) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &100_000, &1, &Some(3600));
+    token_admin.mint(&client.address, &25_000);
+
+    let swept = client.sweep_unallocated_funds(&token_id, &platform_wallet);
+    assert_eq!(swept, 25_000);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        last_event.1,
+        vec![
+            &env,
+            Symbol::new(&env, "admin_sweep_unallocated").into_val(&env),
+        ]
+    );
+
+    let sweep_event: SweepUnallocatedFundsEvent = last_event.2.try_into_val(&env).unwrap();
+    assert_eq!(sweep_event.actor, admin);
+    assert_eq!(sweep_event.token, token_id);
+    assert_eq!(sweep_event.destination, platform_wallet);
+    assert_eq!(sweep_event.amount, 25_000);
+}
+
+#[test]
+fn test_sweep_unallocated_funds_rejected_no_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _buyer, _seller, token_id, token_admin, wallet, _admin) = setup_test(&env, true);
+
+    token_admin.mint(&client.address, &10_000);
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReconciliationReport(token_id.clone()), &ReconciliationReport {
+                token: token_id.clone(),
+                balance: 10_000,
+                expected_locked: 0,
+                expected_staked: 0,
+                tracked_locked: 0,
+                tracked_staked: 0,
+                scanned_escrows: 0,
+                next_cursor: 0,
+                complete: false,
+                unresolved: true,
+            });
+    });
+
+    let events_before = env.events().all().len();
+    let sweep = client.try_sweep_unallocated_funds(&token_id, &wallet);
+    assert!(matches!(sweep, Err(Ok(Error::ReconciliationRequired))));
+    let events_after = env.events().all().len();
+    assert_eq!(events_after, events_before);
+}
+
+#[test]
+fn test_set_fee_token_config_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
+
+    client.set_fee_token_config(&token_id, &false, &Some(300));
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        last_event.1,
+        vec![
+            &env,
+            Symbol::new(&env, "admin_fee_token_config_updated").into_val(&env),
+            token_id.clone().into_val(&env),
+        ]
+    );
+
+    let config_event: FeeTokenConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
+    assert_eq!(config_event.token, token_id);
+    assert_eq!(config_event.active, false);
+    assert_eq!(config_event.custom_fee_bps, Some(300));
+}
+
+#[test]
+fn test_set_fee_token_config_rejected_no_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
+
+    let events_before = env.events().all().len();
+    let result = client.try_set_fee_token_config(&token_id, &true, &Some(20_000));
+    assert!(matches!(result, Err(Ok(Error::InvalidFee))));
+    let events_after = env.events().all().len();
+    assert_eq!(events_after, events_before);
+}
+
 /// Test metadata reveal verification with invalid content (Issue #122)
 #[test]
 fn test_verify_metadata_reveal_invalid_content() {

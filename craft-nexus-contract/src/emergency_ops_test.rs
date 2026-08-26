@@ -2,7 +2,7 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token, Address, BytesN, Env, Symbol,
 };
 
@@ -330,3 +330,58 @@ fn test_cancel_upgrade_clears_conflict_for_recovery() {
     assert_eq!(op.kind, EmergencyOpKind::AdminRecovery);
     assert_eq!(op.phase, EmergencyOpPhase::Executing);
 }
+
+#[test]
+fn test_sweep_unallocated_funds_emits_event() {
+    let (env, client, buyer, seller, token, token_admin, platform_wallet, admin) =
+        setup_emergency_env();
+
+    token_admin.mint(&buyer, &1_000_000);
+    client.create_escrow(&buyer, &seller, &token, &100_000, &1, &Some(3600));
+    token_admin.mint(&client.address, &25_000);
+
+    let swept = client.sweep_unallocated_funds(&token, &platform_wallet);
+    assert_eq!(swept, 25_000);
+
+    let events = env.events().all();
+    let last_event = events.last().unwrap();
+    assert_eq!(
+        last_event.1,
+        vec![
+            &env,
+            Symbol::new(&env, "admin_sweep_unallocated").into_val(&env),
+        ]
+    );
+
+    let sweep_event: SweepUnallocatedFundsEvent = last_event.2.try_into_val(&env).unwrap();
+    assert_eq!(sweep_event.actor, admin);
+    assert_eq!(sweep_event.token, token);
+    assert_eq!(sweep_event.destination, platform_wallet);
+    assert_eq!(sweep_event.amount, 25_000);
+}
+
+#[test]
+fn test_sweep_unallocated_funds_rejected_no_event() {
+    let (env, client, _buyer, _seller, token, token_admin, wallet, _admin) =
+        setup_emergency_env();
+
+    token_admin.mint(&client.address, &10_000);
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReconciliationReport(token.clone()), &ReconciliationReport {
+                token: token.clone(),
+                total_locked: 10_000,
+                total_staked: 0,
+                contract_balance: 10_000,
+                unresolved: true,
+            });
+    });
+
+    let sweep = client.try_sweep_unallocated_funds(&token, &wallet);
+    assert!(matches!(sweep, Err(Ok(Error::ReconciliationRequired))));
+
+    let events = env.events().all();
+    assert!(events.is_empty() || events.last().unwrap().1[1] != Symbol::new(&env, "admin_sweep_unallocated").into_val(&env));
+}
+

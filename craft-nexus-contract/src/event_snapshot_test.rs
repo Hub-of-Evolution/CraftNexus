@@ -5,8 +5,9 @@ use core::mem::offset_of;
 use crate::onboarding::UserOnboardedEvent;
 use crate::{
     ArtisanFeeTierUpdatedEvent, ConfigUpdatedEvent, EscrowEvent, EscrowResolvedEvent,
-    MetadataVerifiedEvent, PlatformPausedEvent, PlatformUnpausedEvent, RecurringEscrowEvent,
-    ReputationUpdateEvent, TokensStakedEvent, TokensUnstakedEvent, UpgradeProposalEvent,
+    FeeTokenConfigUpdatedEvent, MetadataVerifiedEvent, PlatformPausedEvent, PlatformUnpausedEvent,
+    RecurringEscrowEvent, ReputationUpdateEvent, SweepUnallocatedFundsEvent, TokensStakedEvent,
+    TokensUnstakedEvent, UpgradeProposalEvent,
 };
 
 /// Verifies each expected field exists on the struct. If a field is renamed or
@@ -100,6 +101,19 @@ fn snapshot_platform_paused_event() {
 #[test]
 fn snapshot_platform_unpaused_event() {
     check_fields!(PlatformUnpausedEvent, [initiator, timestamp]);
+}
+
+#[test]
+fn snapshot_sweep_unallocated_funds_event() {
+    check_fields!(
+        SweepUnallocatedFundsEvent,
+        [actor, token, destination, amount]
+    );
+}
+
+#[test]
+fn snapshot_fee_token_config_updated_event() {
+    check_fields!(FeeTokenConfigUpdatedEvent, [token, active, custom_fee_bps]);
 }
 
 #[test]

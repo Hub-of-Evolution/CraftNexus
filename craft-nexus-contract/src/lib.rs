@@ -1242,6 +1242,25 @@ pub struct PlatformUnpausedEvent {
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct SweepUnallocatedFundsEvent {
+    pub actor: Address,
+    pub token: Address,
+    pub destination: Address,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeTokenConfigUpdatedEvent {
+    pub token: Address,
+    pub active: bool,
+    pub custom_fee_bps: Option<u32>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct EscrowMetadata {
     pub ipfs_hash: Option<String>,
     pub metadata_hash: Option<Bytes>,
@@ -2164,6 +2183,40 @@ impl CraftNexusContract {
         );
     }
 
+    fn emit_sweep_unallocated_funds(
+        env: &Env,
+        actor: Address,
+        token: Address,
+        destination: Address,
+        amount: i128,
+    ) {
+        env.events().publish(
+            (Symbol::new(env, "admin_sweep_unallocated"),),
+            SweepUnallocatedFundsEvent {
+                actor,
+                token,
+                destination,
+                amount,
+            },
+        );
+    }
+
+    fn emit_fee_token_config_updated(
+        env: &Env,
+        token: Address,
+        active: bool,
+        custom_fee_bps: Option<u32>,
+    ) {
+        env.events().publish(
+            (Symbol::new(env, "admin_fee_token_config_updated"), token.clone()),
+            FeeTokenConfigUpdatedEvent {
+                token,
+                active,
+                custom_fee_bps,
+            },
+        );
+    }
+
     /// Atomically appends one escrow ID to the indexed global registry and
     /// increments `EscrowCount` (#515 / Issue #226).
     fn update_escrow_indices_atomic(env: &Env, order_id: u32) {
@@ -2821,9 +2874,21 @@ impl CraftNexusContract {
         if max_window > ABSOLUTE_MAX_RELEASE_WINDOW {
             env.panic_with_error(crate::Error::ReleaseWindowTooLong);
         }
+        let old_value: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MaxReleaseWindow)
+            .unwrap_or(MAX_TOTAL_RELEASE_WINDOW);
         env.storage()
             .persistent()
             .set(&DataKey::MaxReleaseWindow, &max_window);
+        Self::extend_persistent(&env, &DataKey::MaxReleaseWindow);
+        Self::emit_config_updated(
+            &env,
+            "max_release_window",
+            ConfigValue::U32(old_value),
+            ConfigValue::U32(max_window),
+        );
     }
 
     /// Set the minimum release window to prevent "flash" auto-releases (admin only).
@@ -3356,6 +3421,7 @@ impl CraftNexusContract {
     /// Cancel an in-progress two-step admin transfer (current admin only).
     pub fn cancel_admin_transfer(env: Env) -> Result<(), Error> {
         let mut config = Self::get_platform_config_internal(&env);
+        let admin = config.admin.clone();
         config.admin.require_auth();
 
         if config.pending_admin.is_none() {
@@ -3366,6 +3432,12 @@ impl CraftNexusContract {
         env.storage()
             .instance()
             .set(&DataKey::PlatformConfig, &config);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin_transfer_cancelled"),),
+            admin,
+        );
+
         Ok(())
     }
 
@@ -3424,6 +3496,12 @@ impl CraftNexusContract {
     pub fn set_admin_action_signers(env: Env, signers: Vec<Address>) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
+        let old_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&AdminActionDataKey::AdminActionSigners)
+            .map(|s: Vec<Address>| s.len() as u32)
+            .unwrap_or(0);
         if signers.is_empty() {
             env.storage()
                 .persistent()
@@ -3434,6 +3512,15 @@ impl CraftNexusContract {
                 .set(&AdminActionDataKey::AdminActionSigners, &signers);
             Self::extend_persistent(&env, &AdminActionDataKey::AdminActionSigners);
         }
+        let new_count = signers.len() as u32;
+        env.events().publish(
+            (Symbol::new(&env, "admin_config_updated"), Symbol::new(&env, "admin_action_signers")),
+            ConfigUpdatedEvent {
+                field_name: Symbol::new(&env, "admin_action_signers"),
+                old_value: ConfigValue::U32(old_count),
+                new_value: ConfigValue::U32(new_count),
+            },
+        );
         Ok(())
     }
 
@@ -3444,9 +3531,20 @@ impl CraftNexusContract {
         }
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
+        let old_threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&AdminActionDataKey::AdminActionThreshold)
+            .unwrap_or(1);
         env.storage()
             .instance()
             .set(&AdminActionDataKey::AdminActionThreshold, &threshold);
+        Self::emit_config_updated(
+            &env,
+            "admin_action_threshold",
+            ConfigValue::U32(old_threshold),
+            ConfigValue::U32(threshold),
+        );
         Ok(())
     }
 
@@ -3454,9 +3552,20 @@ impl CraftNexusContract {
     pub fn set_admin_action_timelock_delay(env: Env, delay_seconds: u64) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
+        let old_delay: u64 = env
+            .storage()
+            .instance()
+            .get(&AdminActionDataKey::AdminActionTimelockDelay)
+            .unwrap_or(DEFAULT_ADMIN_ACTION_TIMELOCK_DELAY);
         env.storage().instance().set(
             &AdminActionDataKey::AdminActionTimelockDelay,
             &delay_seconds,
+        );
+        Self::emit_config_updated(
+            &env,
+            "admin_action_timelock_delay",
+            ConfigValue::I128(old_delay as i128),
+            ConfigValue::I128(delay_seconds as i128),
         );
         Ok(())
     }
@@ -3484,7 +3593,7 @@ impl CraftNexusContract {
 
         let proposal = AdminActionProposal {
             id: next_id,
-            kind: action,
+            kind: action.clone(),
             proposer: proposer.clone(),
             approvals,
             threshold,
@@ -3500,6 +3609,11 @@ impl CraftNexusContract {
             .set(&AdminActionDataKey::NextAdminActionId, &(next_id + 1));
         Self::extend_persistent(&env, &AdminActionDataKey::NextAdminActionId);
         Self::persist_admin_action(&env, &proposal);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin_action_proposed"),),
+            (proposer.clone(), next_id, action),
+        );
 
         Ok(proposal)
     }
@@ -3527,8 +3641,14 @@ impl CraftNexusContract {
             return Err(Error::AlreadyApproved);
         }
 
-        action.approvals.push_back(signer);
+        action.approvals.push_back(signer.clone());
         Self::persist_admin_action(&env, &action);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin_action_approved"),),
+            (signer, action_id, action.approvals.len()),
+        );
+
         Ok(action)
     }
 
@@ -3548,6 +3668,12 @@ impl CraftNexusContract {
 
         action.cancelled = true;
         Self::persist_admin_action(&env, &action);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin_action_cancelled"),),
+            (admin, action_id),
+        );
+
         Ok(action)
     }
 
@@ -3572,6 +3698,12 @@ impl CraftNexusContract {
         Self::apply_admin_action(&env, &persisted)?;
         persisted.executed = true;
         Self::persist_admin_action(&env, &persisted);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin_action_executed"),),
+            (action_id, persisted.kind),
+        );
+
         Ok(())
     }
 
@@ -3642,10 +3774,17 @@ impl CraftNexusContract {
             }
             AdminActionKind::SetMinStakeRequired(min_stake) => {
                 let mut config = Self::get_platform_config_internal(env);
+                let old_value = config.min_stake_required;
                 config.min_stake_required = *min_stake;
                 env.storage()
                     .instance()
                     .set(&DataKey::PlatformConfig, &config);
+                Self::emit_config_updated(
+                    env,
+                    "min_stake_required",
+                    ConfigValue::I128(old_value),
+                    ConfigValue::I128(*min_stake),
+                );
                 Ok(())
             }
             AdminActionKind::SweepUnallocatedFunds(token, destination) => {
@@ -3674,6 +3813,10 @@ impl CraftNexusContract {
                         unallocated,
                     );
                 }
+                env.events().publish(
+                    (Symbol::new(env, "admin_sweep_completed"),),
+                    (token.clone(), destination.clone(), unallocated),
+                );
                 Ok(())
             }
             AdminActionKind::ExecuteUpgrade(expected_wasm_hash) => {
@@ -3792,10 +3935,26 @@ impl CraftNexusContract {
             AdminActionKind::SetOnboardingContract(address) => {
                 let admin = Self::get_admin(env)?;
                 admin.require_auth();
+                let previous = env
+                    .storage()
+                    .persistent()
+                    .get::<DataKey, Address>(&DataKey::OnboardingContractAddress);
                 env.storage()
                     .instance()
                     .set(&DataKey::OnboardingContractAddress, address);
                 Self::extend_persistent(env, &DataKey::OnboardingContractAddress);
+                env.events().publish(
+                    (Symbol::new(env, "admin_config_updated"), Symbol::new(env, "onboarding_contract")),
+                    ConfigUpdatedEvent {
+                        field_name: Symbol::new(env, "onboarding_contract"),
+                        old_value: if let Some(a) = previous {
+                            ConfigValue::Address(a)
+                        } else {
+                            ConfigValue::String(String::from_str(env, "unset"))
+                        },
+                        new_value: ConfigValue::Address(address.clone()),
+                    },
+                );
                 Ok(())
             }
             AdminActionKind::SetExpiredDisputePolicy(policy) => {
@@ -3814,7 +3973,12 @@ impl CraftNexusContract {
                 Ok(())
             }
             AdminActionKind::ApplyReconciliationRepair(plan_id) => {
-                Self::apply_reconciliation_repair(env, *plan_id)
+                let result = Self::apply_reconciliation_repair(env, *plan_id);
+                env.events().publish(
+                    (Symbol::new(env, "admin_reconciliation_repair_applied"),),
+                    (*plan_id,),
+                );
+                result
             }
         }
     }
@@ -5436,6 +5600,7 @@ impl CraftNexusContract {
         };
         env.storage().persistent().set(&cfg_key, &info);
         Self::extend_persistent(&env, &cfg_key);
+        Self::emit_fee_token_config_updated(&env, token, active, custom_fee_bps);
         Ok(())
     }
 
@@ -6065,9 +6230,20 @@ impl CraftNexusContract {
         }
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
+        let old_threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeThreshold)
+            .unwrap_or(1);
         env.storage()
             .instance()
             .set(&DataKey::UpgradeThreshold, &threshold);
+        Self::emit_config_updated(
+            &env,
+            "upgrade_threshold",
+            ConfigValue::U32(old_threshold),
+            ConfigValue::U32(threshold),
+        );
         Ok(())
     }
 
@@ -6076,6 +6252,12 @@ impl CraftNexusContract {
     pub fn set_upgrade_signers(env: Env, signers: Vec<Address>) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
+        let old_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UpgradeSigners)
+            .map(|s: Vec<Address>| s.len() as u32)
+            .unwrap_or(0);
         if signers.is_empty() {
             env.storage().persistent().remove(&DataKey::UpgradeSigners);
         } else {
@@ -6084,6 +6266,15 @@ impl CraftNexusContract {
                 .set(&DataKey::UpgradeSigners, &signers);
             Self::extend_persistent(&env, &DataKey::UpgradeSigners);
         }
+        let new_count = signers.len() as u32;
+        env.events().publish(
+            (Symbol::new(&env, "admin_config_updated"), Symbol::new(&env, "upgrade_signers")),
+            ConfigUpdatedEvent {
+                field_name: Symbol::new(&env, "upgrade_signers"),
+                old_value: ConfigValue::U32(old_count),
+                new_value: ConfigValue::U32(new_count),
+            },
+        );
         Ok(())
     }
 
@@ -7371,29 +7562,65 @@ impl CraftNexusContract {
     pub fn set_dispute_escalation_window(env: Env, window: u32) {
         let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
+        let old_value = config.dispute_escalation_window;
         config.dispute_escalation_window = window;
         env.storage()
             .instance()
             .set(&DataKey::PlatformConfig, &config);
+        Self::emit_config_updated(
+            &env,
+            "dispute_escalation_window",
+            ConfigValue::U32(old_value),
+            ConfigValue::U32(window),
+        );
     }
 
     pub fn set_evidence_challenge_window(env: Env, window: u32) {
         let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
+        let old_value = config.evidence_challenge_window;
         config.evidence_challenge_window = window;
         env.storage()
             .instance()
             .set(&DataKey::PlatformConfig, &config);
+        Self::emit_config_updated(
+            &env,
+            "evidence_challenge_window",
+            ConfigValue::U32(old_value),
+            ConfigValue::U32(window),
+        );
     }
 
     /// Set rate limit configuration (admin only) (#943).
     pub fn set_rate_limit_config(env: Env, max_calls: u32, window: u32) {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
+        let old_config: Option<RateLimitConfig> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RateLimitConfig);
         let rate_config = RateLimitConfig { max_calls, window };
         env.storage()
             .persistent()
             .set(&DataKey::RateLimitConfig, &rate_config);
+        let old_max_calls = old_config.as_ref().map(|c| c.max_calls).unwrap_or(0);
+        let old_window = old_config.as_ref().map(|c| c.window).unwrap_or(0);
+        env.events().publish(
+            (Symbol::new(&env, "admin_config_updated"), Symbol::new(&env, "rate_limit_max_calls")),
+            ConfigUpdatedEvent {
+                field_name: Symbol::new(&env, "rate_limit_max_calls"),
+                old_value: ConfigValue::U32(old_max_calls),
+                new_value: ConfigValue::U32(max_calls),
+            },
+        );
+        env.events().publish(
+            (Symbol::new(&env, "admin_config_updated"), Symbol::new(&env, "rate_limit_window")),
+            ConfigUpdatedEvent {
+                field_name: Symbol::new(&env, "rate_limit_window"),
+                old_value: ConfigValue::U32(old_window),
+                new_value: ConfigValue::U32(window),
+            },
+        );
     }
 
     fn emit_dispute_escalated(env: &Env, order_id: u32) {
@@ -8975,10 +9202,17 @@ impl CraftNexusContract {
         admin.require_auth();
 
         let mut config = Self::get_platform_config_internal(&env);
+        let old_value = config.min_stake_required;
         config.min_stake_required = min_stake;
         env.storage()
             .instance()
             .set(&DataKey::PlatformConfig, &config);
+        Self::emit_config_updated(
+            &env,
+            "min_stake_required",
+            ConfigValue::I128(old_value),
+            ConfigValue::I128(min_stake),
+        );
         Ok(())
     }
 
@@ -9851,6 +10085,8 @@ impl CraftNexusContract {
                 unallocated,
             );
         }
+
+        Self::emit_sweep_unallocated_funds(&env, admin, token, destination, unallocated);
 
         Ok(unallocated)
     }
