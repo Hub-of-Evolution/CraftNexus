@@ -940,3 +940,204 @@ fn test_escrow_counters_stay_in_sync_at_scale() {
         100
     );
 }
+
+// ── Scalability boundary tests ────────────────────────────────────────────────
+// These tests validate that batch and pagination operations fail with explicit,
+// actionable errors rather than silently misbehaving or exhausting ledger budget.
+
+/// release_batch_funds must reject a Vec longer than MAX_BATCH_SIZE=20.
+#[test]
+#[should_panic]
+fn test_release_batch_funds_oversized_batch_rejected() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+
+    // Create 21 Active escrows (create_escrow sets status=Active, funded=false;
+    // release_batch_funds only checks status, so no separate funding step needed).
+    for i in 1u32..=21 {
+        client.create_escrow(&buyer, &seller, &token, &1000, &i, &Some(604800));
+    }
+
+    let mut ids = soroban_sdk::Vec::new(&env);
+    for i in 1u32..=21 {
+        ids.push_back(i);
+    }
+
+    // 21 > MAX_BATCH_SIZE=20 — must panic with BatchLimitExceeded.
+    let _ = client.release_batch_funds(&1u64, &ids, &buyer);
+}
+
+/// release_batch_funds must succeed with exactly MAX_BATCH_SIZE=20 entries.
+#[test]
+fn test_release_batch_funds_at_max_batch_size_succeeds() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+    env.budget().reset_unlimited();
+
+    for i in 1u32..=20 {
+        client.create_escrow(&buyer, &seller, &token, &1000, &i, &Some(604800));
+    }
+
+    let mut ids = soroban_sdk::Vec::new(&env);
+    for i in 1u32..=20 {
+        ids.push_back(i);
+    }
+
+    let results = client.release_batch_funds(&1u64, &ids, &buyer);
+    assert_eq!(results.len(), 20);
+}
+
+/// auto_cancel_unfunded must reject a Vec longer than MAX_BATCH_SIZE=20.
+#[test]
+#[should_panic]
+fn test_auto_cancel_unfunded_oversized_batch_rejected() {
+    let (env, client, buyer, seller, token, admin, _, _) = setup_test();
+
+    // Create 21 unfunded escrows
+    for i in 1u32..=21 {
+        client.create_escrow(&buyer, &seller, &token, &1000, &i, &Some(604800));
+    }
+
+    // Advance time past funding deadline
+    env.ledger().with_mut(|li| {
+        li.timestamp += 2 * 24 * 60 * 60; // 2 days
+    });
+
+    let mut ids = soroban_sdk::Vec::new(&env);
+    for i in 1u32..=21 {
+        ids.push_back(i);
+    }
+
+    let _ = client.auto_cancel_unfunded(&admin, &ids);
+}
+
+/// auto_cancel_unfunded must succeed with exactly MAX_BATCH_SIZE=20 entries.
+#[test]
+fn test_auto_cancel_unfunded_at_max_batch_size_succeeds() {
+    let (env, client, buyer, seller, token, admin, _, _) = setup_test();
+    env.budget().reset_unlimited();
+
+    for i in 1u32..=20 {
+        client.create_escrow(&buyer, &seller, &token, &1000, &i, &Some(604800));
+    }
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += 2 * 24 * 60 * 60;
+    });
+
+    let mut ids = soroban_sdk::Vec::new(&env);
+    for i in 1u32..=20 {
+        ids.push_back(i);
+    }
+
+    let cancelled = client.auto_cancel_unfunded(&admin, &ids);
+    assert_eq!(cancelled, 20);
+}
+
+/// Pagination with page=0 should always work regardless of page_size value.
+#[test]
+fn test_pagination_page_zero_always_valid() {
+    let (_, client, buyer, seller, token, _, _, _) = setup_test();
+
+    client.create_escrow(&buyer, &seller, &token, &1000, &1, &Some(604800));
+
+    // page=0 with various page sizes must not overflow
+    let r1 = client.get_escrows_by_buyer(&buyer, &0, &100, &false);
+    assert_eq!(r1.len(), 1);
+    let r2 = client.get_escrows_by_seller(&seller, &0, &100, &false);
+    assert_eq!(r2.len(), 1);
+}
+
+/// get_escrows_by_buyer: page * page_size overflow must return PageSizeTooLarge error.
+#[test]
+#[should_panic]
+fn test_get_escrows_by_buyer_page_overflow_returns_error() {
+    let (_, client, buyer, _, _, _, _, _) = setup_test();
+
+    // page=u32::MAX with page_size=100: u32::MAX * 100 overflows u32
+    let _ = client.get_escrows_by_buyer(&buyer, &u32::MAX, &100, &false);
+}
+
+/// get_escrows_by_seller: page * page_size overflow must return PageSizeTooLarge error.
+#[test]
+#[should_panic]
+fn test_get_escrows_by_seller_page_overflow_returns_error() {
+    let (_, client, _, seller, _, _, _, _) = setup_test();
+
+    let _ = client.get_escrows_by_seller(&seller, &u32::MAX, &100, &false);
+}
+
+/// get_all_escrow_ids_iterative: page overflow silently returns empty Vec (safe fallback).
+#[test]
+fn test_get_all_escrow_ids_iterative_page_overflow_returns_empty() {
+    let (_, client, buyer, seller, token, _, _, _) = setup_test();
+    client.create_escrow(&buyer, &seller, &token, &1000, &1, &Some(604800));
+
+    // page=u32::MAX with limit=20 overflows; must return empty rather than panic
+    let result = client.get_all_escrow_ids_iterative(&u32::MAX, &20);
+    assert_eq!(result.len(), 0);
+}
+
+/// Pagination of get_escrows_by_buyer remains deterministic: same page always returns same results.
+#[test]
+fn test_pagination_deterministic_across_repeated_reads() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+    env.budget().reset_unlimited();
+
+    for i in 1u32..=50 {
+        client.create_escrow(&buyer, &seller, &token, &1000, &i, &Some(604800));
+    }
+
+    let first_read = client.get_escrows_by_buyer(&buyer, &2, &10, &false);
+    let second_read = client.get_escrows_by_buyer(&buyer, &2, &10, &false);
+
+    assert_eq!(first_read.len(), 10);
+    assert_eq!(second_read.len(), 10);
+    for i in 0..10 {
+        assert_eq!(
+            first_read.get_unchecked(i),
+            second_read.get_unchecked(i),
+            "page 2 result at index {} must be identical across reads",
+            i
+        );
+    }
+}
+
+/// Chunked batch via continue_batch_escrow: partial advances do not leave inconsistent state.
+#[test]
+fn test_continue_batch_escrow_partial_advance_is_consistent() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+    env.budget().reset_unlimited();
+
+    let mut params = soroban_sdk::Vec::new(&env);
+    for i in 0u32..10 {
+        params.push_back(EscrowCreateParams {
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token.clone(),
+            amount: 1_000,
+            order_id: 2000 + i,
+            release_window: Some(3600),
+            ipfs_hash: None,
+            metadata_hash: None,
+            service_agreement_hash: None,
+        });
+    }
+
+    // Schedule the full batch (10 items)
+    let job_id = client.schedule_batch_escrow(&buyer, &params);
+
+    // Advance by 5 (work_limit = MAX_SCHEDULED_BATCH_WORK = 5)
+    let progress = client.continue_batch_escrow(&job_id, &buyer, &5);
+    assert_eq!(progress.next_index, 5);
+    assert_eq!(progress.total, 10);
+    // Job is not yet complete — state must remain Pending
+    assert!(matches!(progress.status, BatchJobStatus::Pending));
+
+    // Advance the remaining 5
+    let progress2 = client.continue_batch_escrow(&job_id, &buyer, &5);
+    assert_eq!(progress2.next_index, 10);
+    assert!(matches!(progress2.status, BatchJobStatus::Completed));
+
+    // Confirm 10 escrows were created
+    let buyer_count = client.get_escrows_by_buyer(&buyer, &0, &100, &false);
+    assert_eq!(buyer_count.len(), 10);
+}

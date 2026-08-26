@@ -241,6 +241,12 @@ pub enum Error {
     OnboardingProfileStale = 78,
     /// The user's verification status has been revoked or is not current.
     OnboardingVerificationRevoked = 79,
+    /// The requested page size or page offset would exceed the platform's
+    /// safe pagination limits. Reduce page_size or use a smaller page index.
+    PageSizeTooLarge = 80,
+    /// The operation would exceed the ledger's instruction or read/write
+    /// budget for a single transaction. Split the request into smaller chunks.
+    ResourceBudgetExceeded = 81,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -4406,6 +4412,12 @@ impl CraftNexusContract {
         }
         admin.require_auth();
 
+        // Issue scalability: reject oversized batches before any storage reads
+        // to prevent ledger instruction/read-write budget exhaustion.
+        if order_ids.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchLimitExceeded);
+        }
+
         let current_time = env.ledger().timestamp();
         let mut cancelled_count: u32 = 0;
 
@@ -4461,17 +4473,25 @@ impl CraftNexusContract {
             return Ok(result);
         }
 
+        // Issue scalability: guard against page * page_size overflow which would
+        // silently wrap and return a wrong (or empty) page on large datasets.
+        let start = page
+            .checked_mul(page_size)
+            .ok_or(Error::PageSizeTooLarge)?;
+        let end = start
+            .checked_add(page_size)
+            .ok_or(Error::PageSizeTooLarge)?;
+
         // Try new indexed storage first
         let count_key = DataKey::BuyerEscrowCount(buyer.clone());
         if env.storage().persistent().has(&count_key) {
             let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0u32);
-            let start = page * page_size;
 
             if start >= total_count {
                 return Ok(result);
             }
 
-            let end = (start + page_size).min(total_count);
+            let end = end.min(total_count);
 
             for position in start..end {
                 let storage_index = if reverse {
@@ -4502,14 +4522,13 @@ impl CraftNexusContract {
             Self::extend_persistent_read(&env, &legacy_key);
         }
 
-        let start = page * page_size;
         let len = escrow_ids.len();
 
         if start >= len {
             return Ok(result);
         }
 
-        let end = (start + page_size).min(len);
+        let end = end.min(len);
         if reverse {
             for position in start..end {
                 if let Some(escrow_id) = escrow_ids.get(len - 1 - position) {
@@ -4539,17 +4558,25 @@ impl CraftNexusContract {
             return Ok(result);
         }
 
+        // Issue scalability: guard against page * page_size overflow which would
+        // silently wrap and return a wrong (or empty) page on large datasets.
+        let start = page
+            .checked_mul(page_size)
+            .ok_or(Error::PageSizeTooLarge)?;
+        let end = start
+            .checked_add(page_size)
+            .ok_or(Error::PageSizeTooLarge)?;
+
         // Try new indexed storage first
         let count_key = DataKey::SellerEscrowCount(seller.clone());
         if env.storage().persistent().has(&count_key) {
             let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0u32);
-            let start = page * page_size;
 
             if start >= total_count {
                 return Ok(result);
             }
 
-            let end = (start + page_size).min(total_count);
+            let end = end.min(total_count);
 
             for position in start..end {
                 let storage_index = if reverse {
@@ -4580,14 +4607,13 @@ impl CraftNexusContract {
             Self::extend_persistent_read(&env, &legacy_key);
         }
 
-        let start = page * page_size;
         let len = escrow_ids.len();
 
         if start >= len {
             return Ok(result);
         }
 
-        let end = (start + page_size).min(len);
+        let end = end.min(len);
         if reverse {
             for position in start..end {
                 if let Some(escrow_id) = escrow_ids.get(len - 1 - position) {
@@ -8345,6 +8371,12 @@ impl CraftNexusContract {
         let _guard = ReentryGuardScope::new(&env);
         authorized_address.require_auth();
 
+        // Issue scalability: reject oversized batches before any storage reads
+        // to prevent ledger instruction/read-write budget exhaustion.
+        if order_ids.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchLimitExceeded);
+        }
+
         let mut results = soroban_sdk::Vec::new(&env);
 
         // Validate all escrows first
@@ -8370,6 +8402,13 @@ impl CraftNexusContract {
             }
         }
 
+        // Issue scalability: read platform config once outside the loop.
+        // get_platform_config_internal hits instance storage every call; reading
+        // it up to MAX_BATCH_SIZE times (20×) per transaction is unnecessary.
+        // Seller-specific fee tiers still require a per-iteration lookup via
+        // get_effective_fee_bps because each escrow may have a different seller.
+        let config = Self::get_platform_config_internal(&env);
+
         // Then process all releases
         for i in 0..order_ids.len() {
             if let Some(order_id) = order_ids.get(i) {
@@ -8380,8 +8419,6 @@ impl CraftNexusContract {
                 }
 
                 if let Some(mut escrow) = escrow_opt {
-                    // Get platform config
-                    let config = Self::get_platform_config_internal(&env);
 
                     // Deterministic fee allocation via the central FeePolicy engine.
                     let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
@@ -9177,6 +9214,14 @@ impl CraftNexusContract {
         let limit = limit.min(MAX_BATCH_SIZE);
         if limit == 0 {
             return soroban_sdk::Vec::new(&env);
+        }
+
+        // Issue scalability: guard against page * limit u32 overflow which would
+        // produce a silently incorrect start offset on very large page numbers.
+        if page > 0 {
+            if page.checked_mul(limit).is_none() {
+                return soroban_sdk::Vec::new(&env);
+            }
         }
 
         Self::migrate_legacy_all_escrow_ids(&env);
