@@ -178,6 +178,94 @@ fn test_onboard_duplicate_user() {
 }
 
 #[test]
+fn test_repeated_identical_onboarding_is_idempotent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "retry_user");
+
+    let before = client.get_active_user_count();
+    let first = client.onboard_user(&user, &username, &UserRole::Artisan);
+    let after_first = client.get_active_user_count();
+    let retried = client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    assert_eq!(retried, first);
+    assert_eq!(after_first, before + 1);
+    assert_eq!(client.get_active_user_count(), after_first);
+    assert_eq!(client.get_user_by_username(&username).address, user);
+}
+
+#[test]
+fn test_idempotent_retry_repairs_missing_secondary_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "repair_user");
+    let original = client.onboard_user(&user, &username, &UserRole::Buyer);
+    let active_count = client.get_active_user_count();
+    let normalized = normalize_username(&env, &username);
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Username(normalized.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::UserStateVersion(user.clone()));
+    });
+
+    let recovered = client.onboard_user(&user, &username, &UserRole::Buyer);
+    assert_eq!(recovered.address, original.address);
+    assert_eq!(recovered.registered_at, original.registered_at);
+    assert_eq!(recovered.state_version, 1);
+    assert_eq!(client.get_active_user_count(), active_count);
+    assert_eq!(client.get_user_by_username(&username).address, user);
+}
+
+#[test]
+fn test_explicit_recovery_restores_profile_indexes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "explicit_repair");
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+    let normalized = normalize_username(&env, &username);
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Username(normalized.clone()));
+    });
+
+    let recovered = client.recover_onboarding_profile(&user, &username);
+    assert_eq!(recovered.address, user);
+    assert_eq!(client.get_user_by_username(&username).address, user);
+}
+
+#[test]
+fn test_same_account_username_reservation_is_retryable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "reserved_retry");
+    let normalized = normalize_username(&env, &username);
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Username(normalized), &user);
+    });
+
+    let profile = client.onboard_user(&user, &username, &UserRole::Buyer);
+    assert_eq!(profile.address, user);
+    assert_eq!(client.get_user_by_username(&username).address, user);
+}
+
+#[test]
 fn test_onboard_username_too_short() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1093,6 +1181,133 @@ fn test_reputation_policy_defaults_on_initialize() {
         policy.max_successful_per_window,
         DEFAULT_MAX_SUCCESSFUL_PER_WINDOW
     );
+    assert_eq!(
+        client.get_min_reputation_settlement(),
+        DEFAULT_MIN_REPUTATION_SETTLEMENT
+    );
+}
+
+/// Low-value completions are audited without changing score or consuming limits.
+#[test]
+fn test_reputation_requires_meaningful_completed_settlement() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 2_000);
+
+    let (client, _) = setup_test(&env);
+    client.set_reputation_policy(&1_000_000u64, &0u32, &3_600u64, &86_400u64, &2u32);
+    client.set_min_reputation_settlement(&10_000_000i128);
+
+    let token = register_decimal_test_token(&env, 7);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "settle1"),
+        &UserRole::Artisan,
+    );
+
+    // Repeated dust settlements never gain trust or consume the account cap.
+    for _ in 0..3 {
+        client.update_reputation_for_settlement(&user, &1u32, &0u32, &9_999_999i128, &token);
+    }
+    assert_eq!(client.get_trust_score(&user), 0);
+    assert_eq!(client.get_user_reputation(&user), (0, 0));
+    assert_eq!(
+        client.get_reputation_state(&user).window_successful_applied,
+        0
+    );
+
+    // A meaningful completion at the same timestamp still receives its score.
+    client.update_reputation_for_settlement(&user, &1u32, &0u32, &10_000_000i128, &token);
+    assert_eq!(client.get_trust_score(&user), 1);
+    assert_eq!(client.get_user_reputation(&user), (1, 0));
+
+    // A second qualifying completion is still subject to the normal cooldown.
+    client.update_reputation_for_settlement(&user, &1u32, &0u32, &10_000_000i128, &token);
+    assert_eq!(client.get_trust_score(&user), 1);
+    assert_eq!(client.get_user_reputation(&user), (1, 0));
+
+    let history = client.get_reputation_history(&user);
+    assert_eq!(history.len(), 5);
+    for index in 0..3 {
+        let entry = history.get(index).unwrap();
+        assert_eq!(entry.reason, Symbol::new(&env, "below_minimum_settlement"));
+        assert_eq!(entry.successful_requested, 1);
+        assert_eq!(entry.successful_applied, 0);
+        assert_eq!(entry.trust_score_after, 0);
+    }
+    assert_eq!(history.get(3).unwrap().reason, Symbol::new(&env, "applied"));
+    assert_eq!(
+        history.get(4).unwrap().reason,
+        Symbol::new(&env, "cooldown_blocked")
+    );
+}
+
+/// Settlement thresholds compare normalized values across token decimals.
+#[test]
+fn test_reputation_minimum_settlement_normalizes_token_decimals() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+    client.set_min_reputation_settlement(&10_000_000i128);
+
+    let six_decimal_token = register_decimal_test_token(&env, 6);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "settle2"),
+        &UserRole::Artisan,
+    );
+
+    // One whole 6-decimal token normalizes to one whole 7-decimal token.
+    client.update_reputation_for_settlement(
+        &user,
+        &1u32,
+        &0u32,
+        &1_000_000i128,
+        &six_decimal_token,
+    );
+    assert_eq!(client.get_trust_score(&user), 1);
+}
+
+/// Adverse outcomes cannot be hidden behind the minimum-settlement gate.
+#[test]
+fn test_reputation_low_value_settlement_still_applies_dispute() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+    let token = register_decimal_test_token(&env, 7);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "settle3"),
+        &UserRole::Artisan,
+    );
+
+    client.update_reputation(&user, &2u32, &0u32);
+    client.update_reputation_for_settlement(&user, &1u32, &1u32, &1i128, &token);
+
+    assert_eq!(client.get_trust_score(&user), 1);
+    assert_eq!(client.get_user_reputation(&user), (2, 1));
+    let history = client.get_reputation_history(&user);
+    let last = history.get(history.len() - 1).unwrap();
+    assert_eq!(last.successful_applied, 0);
+    assert_eq!(last.disputed_applied, 1);
+    assert_eq!(last.reason, Symbol::new(&env, "below_minimum_settlement"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_minimum_reputation_settlement_rejects_negative_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    client.set_min_reputation_settlement(&-1i128);
 }
 
 /// Successful reputation gains are blocked by the update cooldown.
@@ -3020,6 +3235,102 @@ fn test_sybil_config_management() {
     assert!(client.get_poh_verifier().is_none());
 }
 
+// ── Issue #1084: Onboarding and verification attempt windows ────────────────
+
+#[test]
+fn test_attempt_rate_policy_revision_advances() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+
+    assert_eq!(client.get_attempt_rate_policy().revision, 1);
+    let updated = client.set_attempt_rate_policy(
+        &60u64, &2u32, &10u32, &120u64, &3u32, &20u32,
+    );
+    assert_eq!(updated.revision, 2);
+    assert_eq!(client.get_attempt_rate_policy(), updated);
+}
+
+#[test]
+fn test_global_onboarding_limit_resets_after_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+    let (client, _) = setup_test(&env);
+    client.set_attempt_rate_policy(&60u64, &3u32, &1u32, &60u64, &3u32, &10u32);
+
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    client.onboard_user(
+        &first,
+        &String::from_str(&env, "rate_first"),
+        &UserRole::Buyer,
+    );
+
+    let limited = client.try_onboard_user(
+        &second,
+        &String::from_str(&env, "rate_second"),
+        &UserRole::Artisan,
+    );
+    assert!(limited.is_err());
+    assert!(!client.is_onboarded(&second));
+
+    env.ledger().with_mut(|li| li.timestamp = 1_061);
+    let profile = client.onboard_user(
+        &second,
+        &String::from_str(&env, "rate_second"),
+        &UserRole::Artisan,
+    );
+    assert_eq!(profile.address, second);
+}
+
+#[test]
+fn test_verification_limits_do_not_duplicate_queue_records() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 2_000);
+    let (client, _) = setup_test(&env);
+    client.set_sybil_config(&3_600u64, &10u32, &0u64, &false, &None);
+    client.set_attempt_rate_policy(&60u64, &10u32, &10u32, &60u64, &1u32, &1u32);
+
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    client.onboard_user(
+        &first,
+        &String::from_str(&env, "verify_one"),
+        &UserRole::Artisan,
+    );
+    client.onboard_user(
+        &second,
+        &String::from_str(&env, "verify_two"),
+        &UserRole::Artisan,
+    );
+
+    client.request_verification(&first);
+    // A repeated pending request is an idempotent no-op and does not add a slot.
+    client.request_verification(&first);
+    assert_eq!(client.get_verification_queue().len(), 1);
+
+    let limited = client.try_request_verification(&second);
+    assert!(limited.is_err());
+    assert!(!client.is_verification_pending(&second));
+    assert_eq!(client.get_verification_queue().len(), 1);
+
+    env.ledger().with_mut(|li| li.timestamp = 2_061);
+    client.request_verification(&second);
+    assert!(client.is_verification_pending(&second));
+    assert_eq!(client.get_verification_queue().len(), 2);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #27)")]
+fn test_attempt_rate_policy_rejects_zero_active_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    client.set_attempt_rate_policy(&0u64, &1u32, &1u32, &60u64, &1u32, &1u32);
+}
+
 #[test]
 fn test_proof_of_humanity_credential_registration_and_validation() {
     let env = Env::default();
@@ -3159,4 +3470,139 @@ fn test_suspicious_profile_flagging_and_review_queue_workflow() {
     let restored_profile = client.get_user(&user);
     assert_eq!(restored_profile.status, ProfileStatus::Active);
     assert!(client.get_suspicious_flag(&user).is_none());
+}
+
+#[test]
+fn test_revision_bound_sybil_review_restricts_then_restores_access() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let reviewer = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "review_bound"),
+        &UserRole::Buyer,
+    );
+    client.set_sybil_reviewer(&reviewer, &true);
+    client.flag_suspicious_profile(&user, &701u32, &600u64);
+
+    let review = client.get_sybil_review(&user).expect("review case");
+    assert_eq!(review.status, SybilReviewStatus::ReviewRequired);
+    assert_eq!(
+        review.profile_revision,
+        client.get_user(&user).state_version
+    );
+    assert!(client
+        .try_update_user_role(&user, &UserRole::Artisan)
+        .is_err());
+
+    client.decide_sybil_review(&reviewer, &user, &review.profile_revision, &true);
+    assert_eq!(client.get_user(&user).status, ProfileStatus::Active);
+    assert_eq!(
+        client.get_sybil_review(&user).unwrap().status,
+        SybilReviewStatus::Approved
+    );
+    assert_eq!(
+        client.update_user_role(&user, &UserRole::Artisan).role,
+        UserRole::Artisan
+    );
+}
+
+#[test]
+fn test_sybil_review_rejects_unauthorized_and_stale_decisions() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 2_000);
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let unauthorized = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "review_stale"),
+        &UserRole::Artisan,
+    );
+    client.flag_suspicious_profile(&user, &702u32, &600u64);
+    let review = client.get_sybil_review(&user).unwrap();
+
+    assert!(client
+        .try_decide_sybil_review(
+            &unauthorized,
+            &user,
+            &review.profile_revision,
+            &true,
+        )
+        .is_err());
+    assert!(client
+        .try_process_review(&user, &true)
+        .is_ok());
+    assert_eq!(client.get_user(&user).status, ProfileStatus::Active);
+
+    client.flag_suspicious_profile(&user, &703u32, &600u64);
+    let current = client.get_sybil_review(&user).unwrap();
+    assert!(client
+        .try_decide_sybil_review(
+            &client.get_config().platform_admin,
+            &user,
+            &(current.profile_revision - 1),
+            &true,
+        )
+        .is_err());
+    assert_eq!(client.get_user(&user).status, ProfileStatus::UnderReview);
+}
+
+#[test]
+fn test_sybil_rejection_appeal_and_expiry_remain_restricted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 3_000);
+    let (client, admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "review_appeal"),
+        &UserRole::Artisan,
+    );
+    client.flag_suspicious_profile(&user, &704u32, &10u64);
+    let opened = client.get_sybil_review(&user).unwrap();
+    client.decide_sybil_review(&admin, &user, &opened.profile_revision, &false);
+    assert_eq!(client.get_user(&user).status, ProfileStatus::Flagged);
+
+    let rejected_revision = client.get_user(&user).state_version;
+    client.appeal_sybil_review(&user, &rejected_revision);
+    let appealed = client.get_sybil_review(&user).unwrap();
+    assert_eq!(appealed.status, SybilReviewStatus::Appealed);
+    assert_eq!(appealed.appeal_count, 1);
+    assert!(client.try_request_verification(&user).is_err());
+
+    env.ledger().with_mut(|li| li.timestamp = appealed.expires_at);
+    client.expire_sybil_review(&user, &appealed.profile_revision);
+    assert_eq!(client.get_user(&user).status, ProfileStatus::Flagged);
+    assert_eq!(
+        client.get_sybil_review(&user).unwrap().status,
+        SybilReviewStatus::Expired
+    );
+}
+
+#[test]
+fn test_normal_verified_profile_is_unaffected_by_review_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "normal_verified"),
+        &UserRole::Buyer,
+    );
+    let verified = client.verify_user(&user);
+
+    assert!(verified.is_verified);
+    assert_eq!(verified.status, ProfileStatus::Active);
+    assert!(client.get_sybil_review(&user).is_none());
+    assert_eq!(
+        client.update_user_role(&user, &UserRole::Artisan).role,
+        UserRole::Artisan
+    );
 }
