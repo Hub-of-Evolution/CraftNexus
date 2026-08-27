@@ -21,6 +21,7 @@ This document catalogs all public contract errors, their meanings, triggering co
 | Storage & Upgrades | 30, 32-38, 43, 45-48 | Upgrade and storage errors |
 | Batch Operations | 27, 29, 57-60 | Batch and job errors |
 | Staking & Tokens | 16-17, 24, 56 | Token and staking errors |
+| Price Oracle & Conversion | 82-85 | Oracle guardrail violations (feeds, conversion bounds) |
 
 ---
 
@@ -781,6 +782,64 @@ This document catalogs all public contract errors, their meanings, triggering co
 
 ---
 
+### Price Oracle & Conversion Errors
+
+#### Error 82: PriceFeedNotFound
+**Description**: No price feed is configured for the requested token.
+
+**Triggering Conditions**:
+- Oracle-backed conversion or fee quote references a token without `set_price_feed`
+- Feed was removed via `remove_price_feed`
+
+**Suggested Client Action**:
+1. Check configured feeds: `get_price_feed(token)`
+2. Contact admin to publish a feed
+3. Retry once the feed exists
+
+---
+
+#### Error 83: StalePriceData
+**Description**: The price feed is stale (older than `max_staleness`) or carries a future timestamp. **Retryable** — refresh the feed and retry.
+
+**Triggering Conditions**:
+- `now - feed.timestamp > max_staleness`
+- `feed.timestamp > now` (malformed clock data)
+
+**Suggested Client Action**:
+1. Refresh the feed via `set_price_feed`
+2. Retry the operation
+
+---
+
+#### Error 84: InvalidPriceData
+**Description**: The price feed is malformed or an oracle configuration value is invalid.
+
+**Triggering Conditions**:
+- Zero/negative feed price
+- Feed decimals outside 0–18
+- `set_oracle_config` with `max_staleness == 0` or `max_deviation_bps > 10000`
+
+**Suggested Client Action**:
+1. Contact admin to fix the feed or configuration
+2. No retry will succeed until the data is corrected
+
+---
+
+#### Error 85: ConversionOutOfBounds
+**Description**: An oracle-backed conversion or fee quote fell outside the configured deviation band, or its arithmetic overflowed.
+
+**Triggering Conditions**:
+- Observed rate deviates from the oracle reference by more than `max_deviation_bps`
+- Fee-quote round trip drifts beyond the band
+- Intermediate arithmetic overflow (rejected rather than truncated)
+
+**Suggested Client Action**:
+1. Re-check the observed rate against `get_oracle_config().max_deviation_bps`
+2. Retry with a rate closer to the oracle reference
+3. Refresh feeds if the market moved
+
+---
+
 ## Error Codes Quick Reference
 
 | Code | Error Name | Code | Error Name |
@@ -815,6 +874,13 @@ This document catalogs all public contract errors, their meanings, triggering co
 | 28 | AdminRecoveryFailed | 58 | BatchJobCancelled |
 | 29 | BatchLimitExceeded | 59 | BatchJobNotFound |
 | 30 | DeprecatedFunction | 60 | BatchJobUnauthorized |
+| 80 | PaginationLimitZero | 82 | PriceFeedNotFound |
+| 81 | PaginationCursorInvalid | 83 | StalePriceData |
+| 86 | EscrowAlreadyExists | 84 | InvalidPriceData |
+| — | — | 85 | ConversionOutOfBounds |
+
+> **Note**: `EscrowAlreadyExists` was renumbered from `80` to `86` to resolve a
+> duplicate discriminant with `PaginationLimitZero` (Issue #1045).
 
 ---
 
@@ -858,6 +924,7 @@ function parseContractError(error: any): number {
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0 | 2026-08-25 | Initial catalog creation from error enum |
+| 1.1 | 2026-08-27 | Added price-oracle errors 82–85 (Issue #1044); documented `EscrowAlreadyExists` renumber 80→86 (Issue #1045) |
 
 ---
 

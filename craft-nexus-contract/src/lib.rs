@@ -13,6 +13,9 @@ extern crate alloc;
 /// Centralised time-boundary policy for the contract.
 pub mod time_policy;
 
+/// Price-oracle validation and currency-conversion guardrails (Issue #1044).
+pub mod price_oracle;
+
 #[cfg(test)]
 mod arbitration_escalation_test;
 #[cfg(test)]
@@ -33,6 +36,8 @@ mod time_boundary_test;
 mod test;
 #[cfg(test)]
 mod pagination_boundary_test;
+#[cfg(test)]
+mod price_oracle_test;
 #[cfg(test)]
 mod prop_test;
 
@@ -258,7 +263,26 @@ pub enum Error {
     /// An escrow with this order ID already exists. Duplicate escrow
     /// identifiers are rejected so a retry (or a conflicting external
     /// reference) can never overwrite an existing escrow's state.
-    EscrowAlreadyExists = 80,
+    /// (#1045) Renumbered from the colliding `80` to `86` so the discriminant
+    /// is unique again — `PaginationLimitZero` keeps `80`.
+    EscrowAlreadyExists = 86,
+    // â”€â”€ Price Oracle / Conversion (82â€“85): guardrail violations â”€â”€
+    /// No price feed is configured for the requested token. An admin must
+    /// call set_price_feed before any oracle-backed conversion or fee quote
+    /// involving this token can succeed.
+    PriceFeedNotFound = 82,
+    /// The price feed is stale (older than max_staleness) or carries a future
+    /// timestamp. The feed publisher must refresh it before the operation can
+    /// be retried; this error is retryable.
+    StalePriceData = 83,
+    /// The price feed is malformed (zero/negative price, unsupported decimal
+    /// scale) or an oracle configuration value is invalid. An admin must fix
+    /// the feed or configuration before the operation can succeed.
+    InvalidPriceData = 84,
+    /// An oracle-backed conversion or fee quote fell outside the configured
+    /// deviation band, or its intermediate arithmetic overflowed. The
+    /// calculation is rejected rather than executed with an unbounded value.
+    ConversionOutOfBounds = 85,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -284,6 +308,7 @@ pub fn is_retryable(error: Error) -> bool {
             | Error::ChallengeWindowActive
             | Error::EscalationWindowActive
             | Error::ArbitratorDeadlineExceeded
+            | Error::StalePriceData
     )
 }
 
@@ -651,6 +676,10 @@ pub enum DataKey {
     RateLimitCount(Address, u64),
     /// Platform rate limit configuration (max_calls, window) (#943)
     RateLimitConfig,
+    /// Price feed for a token (Issue #1044).
+    PriceFeed(Address),
+    /// Guardrail configuration for oracle-backed conversions (Issue #1044).
+    OracleConfig,
 }
 
 #[contracttype]
@@ -1139,6 +1168,56 @@ pub struct ConfigUpdatedEvent {
 pub struct ArtisanFeeTierUpdatedEvent {
     pub artisan: Address,
     pub fee_bps: u32,
+}
+
+/// Emitted when an admin publishes or updates a token price feed.
+///
+/// # Topics
+///
+/// Published under `(symbol "price_feed_updated", address token)`.
+///
+/// # Payload
+///
+/// * `token` — the token whose feed was written.
+/// * `price` — new price in `decimals`-scaled reference units.
+/// * `decimals` — decimal scale of `price`.
+/// * `timestamp` — ledger timestamp stamped by the contract (freshness anchor).
+/// * `source` — publishing admin address.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PriceFeedUpdatedEvent {
+    pub token: Address,
+    pub price: i128,
+    pub decimals: u32,
+    pub timestamp: u64,
+    pub source: Address,
+}
+
+/// Emitted when an admin removes a token price feed.
+///
+/// # Topics
+///
+/// Published under `(symbol "price_feed_removed", address token)`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PriceFeedRemovedEvent {
+    pub token: Address,
+    pub source: Address,
+}
+
+/// Emitted when an admin updates the oracle guardrail configuration.
+///
+/// # Topics
+///
+/// Published under `(symbol "oracle_config_updated",)`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct OracleConfigUpdatedEvent {
+    pub max_staleness: u64,
+    pub max_deviation_bps: u32,
 }
 
 /// Emitted when an artisan stakes collateral tokens into the platform.
@@ -1653,6 +1732,66 @@ pub struct DisputeEscalationRecord {
 pub struct RateLimitConfig {
     pub max_calls: u32,
     pub window: u32,
+}
+
+/// A price feed for a token, priced in the platform's reference currency
+/// (e.g. USD). Guardrails for oracle-backed fee and settlement calculations
+/// (Issue #1044).
+///
+/// # Freshness
+///
+/// `timestamp` is stamped by the contract itself when the feed is published,
+/// so a feed can never claim a freshness it did not actually have. A feed is
+/// rejected once `now - timestamp > max_staleness` or when `timestamp` is in
+/// the future (malformed clock data).
+///
+/// # Pricing model
+///
+/// `price` is the value of **one whole token** in reference units, scaled by
+/// `decimals` (0–18), where `decimals` also denotes the token's own decimal
+/// scale: `one_whole_token = price / 10^decimals`. So a token priced `1.0` at
+/// `decimals = 8` has `price = 100_000_000`. Prices must be strictly positive;
+/// zero/negative feeds are malformed.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PriceFeed {
+    /// Price of one token in `decimals`-scaled reference units.
+    pub price: i128,
+    /// Decimal scale of `price` (0–18).
+    pub decimals: u32,
+    /// Ledger timestamp when the feed was published (stamped by the contract).
+    pub timestamp: u64,
+    /// Address that published the feed (admin for auditability).
+    pub source: Address,
+}
+
+/// Guardrail configuration for oracle-backed conversions and fee quotes.
+///
+/// * `max_staleness` — feeds older than this many seconds are rejected
+///   ([`Error::StalePriceData`]).
+/// * `max_deviation_bps` — observed conversions must stay within this many
+///   basis points of the oracle reference ([`Error::ConversionOutOfBounds`]).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct OracleConfig {
+    pub max_staleness: u64,
+    pub max_deviation_bps: u32,
+}
+
+/// Result of quoting a platform fee in a second (quote) token.
+///
+/// `fee_in_token` is the deterministic nominal fee in the payment token
+/// (`amount * fee_bps / 10_000`); `fee_in_quote_token` is its oracle-backed
+/// conversion into the quote token, guaranteed to round-trip back within the
+/// configured deviation band.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeQuote {
+    pub fee_in_token: i128,
+    pub fee_in_quote_token: i128,
 }
 
 /// Partial refund proposal created during a dispute (Issue #101)
@@ -8624,6 +8763,330 @@ impl CraftNexusContract {
             let config = Self::get_platform_config_internal(&env);
             config.platform_fee_bps
         }
+    }
+
+    // ── Price Oracle & Conversion Guardrails (#1044) ──────────────────────────
+
+    /// Publish or update a price feed for a token (admin only).
+    ///
+    /// `price` is the value of one whole token in reference units, scaled by
+    /// `decimals` (so 1.0 at `decimals = 8` is `100_000_000`), where
+    /// `decimals` also denotes the token's own decimal scale. The contract
+    /// stamps `timestamp` itself, so a feed can never claim a freshness it did
+    /// not actually have.
+    ///
+    /// # Guardrails
+    ///
+    /// * Malformed feeds — zero/negative `price` or `decimals > 18` — are
+    ///   rejected with [`Error::InvalidPriceData`] before any storage write.
+    ///
+    /// # Errors
+    /// * [`Error::Unauthorized`] — caller is not the platform admin.
+    /// * [`Error::InvalidPriceData`] — malformed price feed.
+    pub fn set_price_feed(env: Env, token: Address, price: i128, decimals: u32) -> Result<(), Error> {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if price_oracle::validate_price_feed(price, decimals).is_err() {
+            return Err(Error::InvalidPriceData);
+        }
+
+        let feed = PriceFeed {
+            price,
+            decimals,
+            timestamp: env.ledger().timestamp(),
+            source: config.admin.clone(),
+        };
+        let key = DataKey::PriceFeed(token.clone());
+        env.storage().persistent().set(&key, &feed);
+        Self::extend_persistent(&env, &key);
+
+        env.events().publish(
+            (Symbol::new(&env, "price_feed_updated"), token.clone()),
+            PriceFeedUpdatedEvent {
+                token,
+                price,
+                decimals,
+                timestamp: feed.timestamp,
+                source: feed.source,
+            },
+        );
+        Ok(())
+    }
+
+    /// Remove the price feed for a token (admin only).
+    ///
+    /// After removal, any oracle-backed conversion or fee quote involving this
+    /// token fails with [`Error::PriceFeedNotFound`] until a fresh feed is
+    /// published again.
+    ///
+    /// # Errors
+    /// * [`Error::Unauthorized`] — caller is not the platform admin.
+    /// * [`Error::PriceFeedNotFound`] — no feed exists for `token`.
+    pub fn remove_price_feed(env: Env, token: Address) -> Result<(), Error> {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let key = DataKey::PriceFeed(token.clone());
+        if !env.storage().persistent().has(&key) {
+            return Err(Error::PriceFeedNotFound);
+        }
+        env.storage().persistent().remove(&key);
+
+        env.events().publish(
+            (Symbol::new(&env, "price_feed_removed"), token.clone()),
+            PriceFeedRemovedEvent {
+                token,
+                source: config.admin,
+            },
+        );
+        Ok(())
+    }
+
+    /// View: get the current price feed for a token, if one is published.
+    ///
+    /// The raw feed is returned as stored; callers that need a *usable* price
+    /// must go through the guarded [`Self::convert_amount`] /
+    /// [`Self::convert_with_observed_rate`] / [`Self::quote_fee_for_amount`]
+    /// paths, which reject missing, malformed, and stale feeds.
+    pub fn get_price_feed(env: Env, token: Address) -> Option<PriceFeed> {
+        let key = DataKey::PriceFeed(token);
+        let feed: Option<PriceFeed> = env.storage().persistent().get(&key);
+        if feed.is_some() {
+            Self::extend_persistent_read(&env, &key);
+        }
+        feed
+    }
+
+    /// Configure the oracle guardrails (admin only).
+    ///
+    /// # Guardrails
+    ///
+    /// * `max_staleness` must be non-zero (a zero window would reject every
+    ///   feed immediately).
+    /// * `max_deviation_bps` must not exceed
+    ///   [`price_oracle::MAX_DEVIATION_BPS_CEILING`] (10_000 bps = 100%),
+    ///   beyond which the band is meaningless.
+    ///
+    /// # Errors
+    /// * [`Error::Unauthorized`] — caller is not the platform admin.
+    /// * [`Error::InvalidPriceData`] — invalid guardrail values.
+    pub fn set_oracle_config(
+        env: Env,
+        max_staleness: u64,
+        max_deviation_bps: u32,
+    ) -> Result<(), Error> {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if max_staleness == 0 {
+            return Err(Error::InvalidPriceData);
+        }
+        if max_deviation_bps > price_oracle::MAX_DEVIATION_BPS_CEILING {
+            return Err(Error::InvalidPriceData);
+        }
+
+        let oracle_config = OracleConfig {
+            max_staleness,
+            max_deviation_bps,
+        };
+        let key = DataKey::OracleConfig;
+        env.storage().persistent().set(&key, &oracle_config);
+        Self::extend_persistent(&env, &key);
+
+        env.events().publish(
+            (Symbol::new(&env, "oracle_config_updated"),),
+            OracleConfigUpdatedEvent {
+                max_staleness,
+                max_deviation_bps,
+            },
+        );
+        Ok(())
+    }
+
+    /// View: get the current oracle guardrail configuration.
+    ///
+    /// Returns the safe defaults (1-hour staleness, 5% deviation band) until
+    /// the admin overrides them via [`Self::set_oracle_config`].
+    pub fn get_oracle_config(env: Env) -> OracleConfig {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OracleConfig)
+            .unwrap_or(OracleConfig {
+                max_staleness: price_oracle::DEFAULT_MAX_STALENESS,
+                max_deviation_bps: price_oracle::DEFAULT_MAX_DEVIATION_BPS,
+            })
+    }
+
+    /// Load a price feed and enforce the malformed + stale guardrails.
+    ///
+    /// # Errors
+    /// * [`Error::PriceFeedNotFound`] — no feed configured for `token`.
+    /// * [`Error::InvalidPriceData`] — feed is malformed (zero/negative price,
+    ///   unsupported decimals).
+    /// * [`Error::StalePriceData`] — feed is older than `max_staleness` or
+    ///   carries a future timestamp.
+    fn load_validated_feed(env: &Env, token: &Address, config: &OracleConfig) -> Result<PriceFeed, Error> {
+        let key = DataKey::PriceFeed(token.clone());
+        let feed: Option<PriceFeed> = env.storage().persistent().get(&key);
+        let Some(feed) = feed else {
+            return Err(Error::PriceFeedNotFound);
+        };
+        Self::extend_persistent_read(env, &key);
+
+        if price_oracle::validate_price_feed(feed.price, feed.decimals).is_err() {
+            return Err(Error::InvalidPriceData);
+        }
+        let now = env.ledger().timestamp();
+        if price_oracle::is_price_stale(now, feed.timestamp, config.max_staleness) {
+            return Err(Error::StalePriceData);
+        }
+        Ok(feed)
+    }
+
+    /// Oracle-backed currency conversion with full guardrails.
+    ///
+    /// Converts `amount` (in `from_token` smallest units) into `to_token`
+    /// smallest units using the published feeds, rejecting missing
+    /// ([`Error::PriceFeedNotFound`]), malformed ([`Error::InvalidPriceData`]),
+    /// or stale ([`Error::StalePriceData`]) feeds and arithmetic overflow
+    /// ([`Error::ConversionOutOfBounds`]). The output is deterministic for the
+    /// same contract state.
+    pub fn convert_amount(
+        env: Env,
+        from_token: Address,
+        to_token: Address,
+        amount: i128,
+    ) -> Result<i128, Error> {
+        let config = Self::get_oracle_config(env.clone());
+        let from_feed = Self::load_validated_feed(&env, &from_token, &config)?;
+        let to_feed = Self::load_validated_feed(&env, &to_token, &config)?;
+        price_oracle::convert_amount(
+            amount,
+            from_feed.price,
+            from_feed.decimals,
+            to_feed.price,
+            to_feed.decimals,
+        )
+        .ok_or(Error::ConversionOutOfBounds)
+    }
+
+    /// Guarded conversion against an externally observed rate.
+    ///
+    /// Use this when a settlement integrator supplies a market/DEX execution
+    /// rate: **one whole `from_token` equals `observed_price / 10^observed_decimals`
+    /// whole `to_token`s**. The observed output must stay within the configured
+    /// `max_deviation_bps` band of the oracle reference conversion; otherwise
+    /// the calculation is rejected with [`Error::ConversionOutOfBounds`] so
+    /// users are never charged at an unbounded or manipulated rate.
+    ///
+    /// # Errors
+    /// [`Error::PriceFeedNotFound`], [`Error::InvalidPriceData`],
+    /// [`Error::StalePriceData`], [`Error::ConversionOutOfBounds`].
+    pub fn convert_with_observed_rate(
+        env: Env,
+        from_token: Address,
+        to_token: Address,
+        amount: i128,
+        observed_price: i128,
+        observed_decimals: u32,
+    ) -> Result<i128, Error> {
+        if price_oracle::validate_price_feed(observed_price, observed_decimals).is_err() {
+            return Err(Error::InvalidPriceData);
+        }
+
+        let config = Self::get_oracle_config(env.clone());
+        let from_feed = Self::load_validated_feed(&env, &from_token, &config)?;
+        let to_feed = Self::load_validated_feed(&env, &to_token, &config)?;
+
+        // Oracle reference conversion (deterministic).
+        let reference = price_oracle::convert_amount(
+            amount,
+            from_feed.price,
+            from_feed.decimals,
+            to_feed.price,
+            to_feed.decimals,
+        )
+        .ok_or(Error::ConversionOutOfBounds)?;
+
+        // Observed output from the caller-supplied rate, expressed in the
+        // to-token's smallest units.
+        let observed = price_oracle::convert_with_rate(
+            amount,
+            from_feed.decimals,
+            observed_price,
+            observed_decimals,
+            to_feed.decimals,
+        )
+        .ok_or(Error::ConversionOutOfBounds)?;
+
+        if !price_oracle::within_deviation(observed, reference, config.max_deviation_bps) {
+            return Err(Error::ConversionOutOfBounds);
+        }
+        Ok(observed)
+    }
+
+    /// Deterministically quote a platform fee in a second (quote) token.
+    ///
+    /// The nominal fee `fee_in_token` is computed with the same integer bps
+    /// math used by every settlement path (`amount * fee_bps / 10_000`) — it
+    /// never consults external pricing. The quote-token amount is derived
+    /// through the guarded oracle conversion and must round-trip back within
+    /// the configured `max_deviation_bps` band of the nominal fee, bounding
+    /// the settlement value exposed to market volatility.
+    ///
+    /// The result is deterministic for the same contract state: identical
+    /// feeds, `fee_bps`, and `amount` always produce identical quotes.
+    ///
+    /// # Errors
+    /// * [`Error::InvalidFee`] — `fee_bps` exceeds [`MAX_PLATFORM_FEE_BPS`].
+    /// * [`Error::PriceFeedNotFound`], [`Error::InvalidPriceData`],
+    ///   [`Error::StalePriceData`] — oracle guardrail violations.
+    /// * [`Error::ConversionOutOfBounds`] — conversion or round-trip deviates
+    ///   beyond the configured band.
+    pub fn quote_fee_for_amount(
+        env: Env,
+        payment_token: Address,
+        amount: i128,
+        fee_bps: u32,
+        quote_token: Address,
+    ) -> Result<FeeQuote, Error> {
+        if fee_bps > MAX_PLATFORM_FEE_BPS {
+            return Err(Error::InvalidFee);
+        }
+        let fee_in_token = Self::try_calculate_fee(amount, fee_bps)?;
+
+        let config = Self::get_oracle_config(env.clone());
+        let from_feed = Self::load_validated_feed(&env, &payment_token, &config)?;
+        let to_feed = Self::load_validated_feed(&env, &quote_token, &config)?;
+
+        let fee_in_quote_token = price_oracle::convert_amount(
+            fee_in_token,
+            from_feed.price,
+            from_feed.decimals,
+            to_feed.price,
+            to_feed.decimals,
+        )
+        .ok_or(Error::ConversionOutOfBounds)?;
+
+        // Round-trip bound: converting the quote back into the payment token
+        // must land within max_deviation_bps of the nominal fee.
+        let round_trip = price_oracle::convert_amount(
+            fee_in_quote_token,
+            to_feed.price,
+            to_feed.decimals,
+            from_feed.price,
+            from_feed.decimals,
+        )
+        .ok_or(Error::ConversionOutOfBounds)?;
+        if !price_oracle::within_deviation(round_trip, fee_in_token, config.max_deviation_bps) {
+            return Err(Error::ConversionOutOfBounds);
+        }
+
+        Ok(FeeQuote {
+            fee_in_token,
+            fee_in_quote_token,
+        })
     }
 
     // â”€â”€ Dispute Resolution Deadline (#93) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
