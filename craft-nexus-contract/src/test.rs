@@ -6815,3 +6815,215 @@ mod onboarding_state_consistency {
         assert_panic_contract_error(result, Error::OnboardingProfileInactive);
     }
 }
+
+// ===== Terminal-State Guard Regression Tests =====
+//
+// Every terminal escrow state (Released, Refunded, Resolved) must reject every
+// further settlement action through a shared guard, and the rejection must
+// occur before any token transfer or event emission.
+
+/// Helper: attempt every escrow settlement entry point and assert that each one
+/// is rejected with `expected` on a terminal escrow.
+///
+/// Functions that return `Result<_, Error>` surface the guard error through
+/// `try_*` as `Ok(Err(..))`; functions that panic surface it as `Err(Ok(..))`.
+#[allow(clippy::too_many_arguments)]
+fn assert_all_settlement_actions_rejected(
+    client: &CraftNexusContractClient,
+    env: &Env,
+    order_id: u32,
+    admin: &Address,
+    expected: Error,
+) {
+    // Panicking entry points: the guard runs before any state write.
+    assert_panic_contract_error(client.try_release_funds(&order_id), expected);
+    assert_panic_contract_error(client.try_auto_release(&order_id), expected);
+    assert_panic_contract_error(
+        client.try_extend_release_window(&order_id, &3600),
+        expected,
+    );
+    assert_panic_contract_error(
+        client.try_dispute_escrow(&order_id, &Symbol::new(env, "LateDispute"), admin),
+        expected,
+    );
+    assert_panic_contract_error(
+        client.try_resolve_dispute(&order_id, &Resolution::ReleaseToSeller, admin),
+        expected,
+    );
+    assert_panic_contract_error(
+        client.try_resolve_dispute_partial(&order_id, &1, admin),
+        expected,
+    );
+    assert_panic_contract_error(
+        client.try_submit_evidence(
+            &order_id,
+            admin,
+            &String::from_str(env, "ipfs://late-evidence"),
+        ),
+        expected,
+    );
+    assert_panic_contract_error(
+        client.try_escalate_dispute(&order_id, admin),
+        expected,
+    );
+
+    // Result-returning entry points: the guard returns Err before any write.
+    assert_eq!(
+        client.try_refund(&(order_id as u64)).unwrap_err(),
+        Ok(expected)
+    );
+    assert_eq!(
+        client.try_resolve_expired_dispute(&order_id).unwrap_err(),
+        Ok(expected)
+    );
+    assert_eq!(
+        client
+            .try_propose_partial_refund(&order_id, &1, admin)
+            .unwrap_err(),
+        Ok(expected)
+    );
+    assert_eq!(
+        client.try_accept_partial_refund(&order_id).unwrap_err(),
+        Ok(expected)
+    );
+    assert_eq!(
+        client.try_cancel_partial_refund(&order_id).unwrap_err(),
+        Ok(expected)
+    );
+    assert_eq!(
+        client.try_cancel_unfunded_escrow(&order_id, admin).unwrap_err(),
+        Ok(expected)
+    );
+}
+
+/// Regression test: a `Released` escrow rejects every further settlement action.
+#[test]
+fn test_released_escrow_rejects_all_settlement_actions() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.release_funds(&1);
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Released);
+    assert!(escrow.status.is_terminal());
+
+    assert_all_settlement_actions_rejected(&client, &env, 1, &admin, Error::InvalidEscrowState);
+}
+
+/// Regression test: a `Refunded` escrow rejects every further settlement action.
+#[test]
+fn test_refunded_escrow_rejects_all_settlement_actions() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.refund(&1u64);
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Refunded);
+    assert!(escrow.status.is_terminal());
+
+    assert_all_settlement_actions_rejected(&client, &env, 1, &admin, Error::InvalidEscrowState);
+}
+
+/// Regression test: a `Resolved` escrow (via arbitrated release) rejects every
+/// further settlement action.
+#[test]
+fn test_resolved_escrow_rejects_all_settlement_actions() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Defect"), &buyer);
+    client.resolve_dispute(&1, &Resolution::ReleaseToSeller, &admin);
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Resolved);
+    assert!(escrow.status.is_terminal());
+
+    assert_all_settlement_actions_rejected(&client, &env, 1, &admin, Error::SettlementAlreadyFinalized);
+}
+
+/// Regression test: a `Resolved` escrow (via expired-dispute resolution) rejects
+/// every further settlement action.
+#[test]
+fn test_expired_dispute_resolved_escrow_rejects_all_settlement_actions() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Expired"), &buyer);
+
+    let max_duration = client.get_max_dispute_duration();
+    env.ledger().with_mut(|li| {
+        li.timestamp += max_duration as u64;
+    });
+    client.resolve_expired_dispute(&1);
+
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.status, EscrowStatus::Resolved);
+    assert!(escrow.status.is_terminal());
+
+    assert_all_settlement_actions_rejected(&client, &env, 1, &admin, Error::SettlementAlreadyFinalized);
+}
+
+/// Regression test: a cancelled recurring escrow rejects further cycle releases
+/// and repeated cancellation.
+#[test]
+fn test_cancelled_recurring_escrow_rejects_mutation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &1000, &3600, &2);
+    client.cancel_recurring_escrow(&rec.id);
+
+    // Terminal (cancelled) recurring escrow must reject further cycle release.
+    assert_panic_contract_error(client.try_release_next_cycle(&rec.id), Error::InvalidEscrowState);
+    // ... and reject repeated cancellation.
+    assert_panic_contract_error(
+        client.try_cancel_recurring_escrow(&rec.id),
+        Error::InvalidEscrowState,
+    );
+}
+
+/// Regression test: rejection happens before any token transfer or event
+/// emission — the escrow record and settlement receipt stay untouched.
+#[test]
+fn test_terminal_rejection_leaves_record_and_receipt_untouched() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Defect"), &buyer);
+    client.resolve_dispute(&1, &Resolution::ReleaseToSeller, &admin);
+
+    let before = client.get_escrow(&1);
+    assert_eq!(before.status, EscrowStatus::Resolved);
+    let receipt_before = client.get_settlement_receipt(&1).expect("receipt");
+
+    // Every attempted mutation is rejected …
+    assert_all_settlement_actions_rejected(&client, &env, 1, &admin, Error::SettlementAlreadyFinalized);
+
+    // … so the record and the receipt are byte-for-byte unchanged.
+    let after = client.get_escrow(&1);
+    assert_eq!(after.status, EscrowStatus::Resolved);
+    assert_eq!(after, before);
+    assert_eq!(
+        client.get_settlement_receipt(&1).expect("receipt"),
+        receipt_before
+    );
+}

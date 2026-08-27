@@ -725,6 +725,20 @@ pub enum EscrowStatus {
     SettlementPending = 8,
 }
 
+impl EscrowStatus {
+    /// Returns `true` for lifecycle states that permanently settle an escrow.
+    ///
+    /// Terminal escrows have already moved funds (or finalized a dispute) and
+    /// must never be mutated again through any entry point: no further release,
+    /// refund, dispute, extension, or settlement may run.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            EscrowStatus::Released | EscrowStatus::Refunded | EscrowStatus::Resolved
+        )
+    }
+}
+
 #[contracttype]
 #[derive(Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -4337,6 +4351,7 @@ impl CraftNexusContract {
     pub fn cancel_unfunded_escrow(env: Env, order_id: u32, caller: Address) -> Result<(), Error> {
         let _guard = ReentryGuardScope::new(&env);
         let escrow = Self::get_stored_escrow(&env, order_id);
+        Self::assert_escrow_not_terminal(&env, &escrow, order_id)?;
         if escrow.funded {
             return Err(Error::InvalidEscrowState);
         }
@@ -4793,6 +4808,38 @@ impl CraftNexusContract {
         } else {
             Err(Error::InvalidEscrowState)
         }
+    }
+
+    /// Reject any mutation of a terminal escrow record.
+    ///
+    /// Terminal states (`Released`, `Refunded`, `Resolved`) are immutable:
+    /// funds have already moved and the escrow cannot be re-released,
+    /// re-refunded, re-disputed, or re-settled.  This guard is the shared
+    /// entry-point barrier called at the top of every escrow mutation path.
+    ///
+    /// `Resolved` escrows always carry a settlement receipt, so they surface
+    /// [`Error::SettlementAlreadyFinalized`]; `Released`/`Refunded` escrows
+    /// surface [`Error::InvalidEscrowState`].
+    fn assert_escrow_not_terminal(env: &Env, escrow: &Escrow, order_id: u32) -> Result<(), Error> {
+        if escrow.status.is_terminal() {
+            return if Self::has_settlement_receipt(env, order_id) {
+                Err(Error::SettlementAlreadyFinalized)
+            } else {
+                Err(Error::InvalidEscrowState)
+            };
+        }
+        Ok(())
+    }
+
+    /// Reject any mutation of a cancelled (inactive) recurring escrow.
+    ///
+    /// Once a recurring escrow has been cancelled or fully cycled it must
+    /// not accept further cycle releases or additional cancellations.
+    fn assert_recurring_escrow_active(escrow: &RecurringEscrow) -> Result<(), Error> {
+        if !escrow.is_active {
+            return Err(Error::InvalidEscrowState);
+        }
+        Ok(())
     }
 
     fn claim_active_escrow_transition(
@@ -5625,6 +5672,8 @@ impl CraftNexusContract {
     pub fn release_funds(env: Env, order_id: u32) {
         let _guard = ReentryGuardScope::new(&env);
         let escrow_for_auth = Self::get_stored_escrow(&env, order_id);
+        Self::assert_escrow_not_terminal(&env, &escrow_for_auth, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
 
         // Only buyer can release funds
         escrow_for_auth.buyer.require_auth();
@@ -5730,6 +5779,8 @@ impl CraftNexusContract {
     pub fn auto_release(env: Env, order_id: u32) {
         let _guard = ReentryGuardScope::new(&env);
         let escrow_for_window = Self::get_stored_escrow(&env, order_id);
+        Self::assert_escrow_not_terminal(&env, &escrow_for_window, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
 
         if !(escrow_for_window.status == EscrowStatus::Active) {
             env.panic_with_error(crate::Error::InvalidEscrowState);
@@ -5850,6 +5901,8 @@ impl CraftNexusContract {
 
         Self::extend_persistent(&env, &escrow_key);
         let mut escrow: Escrow = escrow_opt.unwrap();
+        Self::assert_escrow_not_terminal(&env, &escrow, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
 
         // Only buyer can extend release window
         escrow.buyer.require_auth();
@@ -6533,10 +6586,14 @@ impl CraftNexusContract {
     /// * `escrow_id` - Escrow/Order identifier
     pub fn refund(env: Env, escrow_id: u64) -> Result<(), Error> {
         let _guard = ReentryGuardScope::new(&env);
+
+        let order_id = escrow_id as u32;
+        let escrow_snapshot = Self::get_stored_escrow(&env, order_id);
+        Self::assert_escrow_not_terminal(&env, &escrow_snapshot, order_id)?;
+
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
-        let order_id = escrow_id as u32;
         let mut escrow =
             Self::claim_active_escrow_transition(&env, order_id, EscrowStatus::RefundPending)?;
 
@@ -6900,6 +6957,8 @@ impl CraftNexusContract {
         }
 
         let escrow_for_auth = Self::get_stored_escrow(&env, order_id);
+        Self::assert_escrow_not_terminal(&env, &escrow_for_auth, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
 
         // Only the two parties to this specific escrow may open a dispute;
         // admin/arbitrator cannot initiate on their behalf.
@@ -7017,6 +7076,8 @@ impl CraftNexusContract {
             .unwrap_or_else(|e| env.panic_with_error(e));
 
         let snapshot = Self::get_stored_escrow(&env, order_id);
+        Self::assert_escrow_not_terminal(&env, &snapshot, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
         Self::assert_open_for_settlement(&env, &snapshot, order_id)
             .unwrap_or_else(|e| env.panic_with_error(e));
         Self::assert_arbitrator_resolution_window(&env, &snapshot, &config)
@@ -7151,6 +7212,8 @@ impl CraftNexusContract {
         submitter.require_auth();
 
         let escrow = Self::get_stored_escrow(&env, order_id);
+        Self::assert_escrow_not_terminal(&env, &escrow, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
         if escrow.status != EscrowStatus::Disputed {
             env.panic_with_error(crate::Error::NotInDispute);
         }
@@ -7214,6 +7277,8 @@ impl CraftNexusContract {
         submitter.require_auth();
 
         let escrow = Self::get_stored_escrow(&env, order_id);
+        Self::assert_escrow_not_terminal(&env, &escrow, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
         if escrow.status != EscrowStatus::Disputed {
             env.panic_with_error(crate::Error::NotInDispute);
         }
@@ -7326,6 +7391,8 @@ impl CraftNexusContract {
         caller.require_auth();
 
         let escrow = Self::get_stored_escrow(&env, order_id);
+        Self::assert_escrow_not_terminal(&env, &escrow, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
         if escrow.status != EscrowStatus::Disputed {
             env.panic_with_error(crate::Error::NotInDispute);
         }
@@ -7419,6 +7486,8 @@ impl CraftNexusContract {
             .unwrap_or_else(|e| env.panic_with_error(e));
 
         let snapshot = Self::get_stored_escrow(&env, order_id);
+        Self::assert_escrow_not_terminal(&env, &snapshot, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
         Self::assert_open_for_settlement(&env, &snapshot, order_id)
             .unwrap_or_else(|e| env.panic_with_error(e));
         Self::assert_arbitrator_resolution_window(&env, &snapshot, &config)
@@ -8569,6 +8638,7 @@ impl CraftNexusContract {
         }
         Self::extend_persistent(&env, &(ESCROW, order_id));
         let snapshot = snapshot_opt.unwrap();
+        Self::assert_escrow_not_terminal(&env, &snapshot, order_id)?;
 
         let config = Self::get_platform_config_internal(&env);
         Self::assert_open_for_settlement(&env, &snapshot, order_id)?;
@@ -9079,6 +9149,7 @@ impl CraftNexusContract {
         }
         let escrow: Escrow = escrow_opt.unwrap();
 
+        Self::assert_escrow_not_terminal(&env, &escrow, order_id)?;
         Self::assert_open_for_settlement(&env, &escrow, order_id)?;
         if !Self::is_escrow_party(&escrow, &caller) {
             return Err(Error::Unauthorized);
@@ -9216,6 +9287,7 @@ impl CraftNexusContract {
         }
         let snapshot: Escrow = snapshot_opt.unwrap();
 
+        Self::assert_escrow_not_terminal(&env, &snapshot, order_id)?;
         Self::assert_open_for_settlement(&env, &snapshot, order_id)?;
 
         let proposal =
@@ -9285,6 +9357,7 @@ impl CraftNexusContract {
         }
         let escrow: Escrow = escrow_opt.unwrap();
 
+        Self::assert_escrow_not_terminal(&env, &escrow, order_id)?;
         Self::assert_open_for_settlement(&env, &escrow, order_id)?;
 
         let proposal =
@@ -9418,9 +9491,8 @@ impl CraftNexusContract {
             .get(&key)
             .unwrap_or_else(|| env.panic_with_error(crate::Error::RecurringEscrowNotFound));
 
-        if !escrow.is_active {
-            env.panic_with_error(crate::Error::InvalidEscrowState);
-        }
+        Self::assert_recurring_escrow_active(&escrow)
+            .unwrap_or_else(|e| env.panic_with_error(e));
         if escrow.current_cycle >= escrow.duration as u64 {
             env.panic_with_error(crate::Error::CycleNotReady);
         }
@@ -9538,9 +9610,8 @@ impl CraftNexusContract {
             .unwrap_or_else(|| env.panic_with_error(crate::Error::RecurringEscrowNotFound));
 
         escrow.buyer.require_auth();
-        if !escrow.is_active {
-            env.panic_with_error(crate::Error::InvalidEscrowState);
-        }
+        Self::assert_recurring_escrow_active(&escrow)
+            .unwrap_or_else(|e| env.panic_with_error(e));
 
         let remaining = escrow.total_amount - escrow.released_amount;
 
