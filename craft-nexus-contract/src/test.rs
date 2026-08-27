@@ -3,7 +3,7 @@ extern crate alloc;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
+    testutils::{storage::Persistent as _, Address as _, Events, Ledger},
     token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, TryIntoVal,
 };
 
@@ -5693,6 +5693,154 @@ fn test_platform_config_ttl_extension_on_read() {
     // Read again - should still succeed because the TTL was extended on read
     let config_after = client.get_platform_config();
     assert_eq!(config.admin, config_after.admin);
+}
+
+// ===== Issue #533: TTL extension after every persistent write =====
+//
+// Every `env.storage().persistent().set(..)` call must be followed by an
+// `extend_ttl` so low-activity entries are never silently archived. These
+// tests assert that each write path leaves its keys with a refreshed TTL
+// (`>= TTL_EXTENSION`) immediately after the write, matching the convention
+// in `onboarding_test.rs`.
+
+/// Assert that a persistent entry's remaining TTL reflects a full extension.
+fn assert_key_ttl_extended(
+    env: &Env,
+    client: &CraftNexusContractClient<'static>,
+    key: &impl IntoVal<Env, soroban_sdk::Val>,
+) {
+    env.as_contract(&client.address, || {
+        let ttl = env.storage().persistent().get_ttl(key);
+        assert!(
+            ttl >= TTL_EXTENSION,
+            "expected TTL >= {TTL_EXTENSION}, got {ttl} for key after write"
+        );
+    });
+}
+
+/// Opening a dispute rewrites the escrow entry (status -> Disputed). The escrow
+/// key must have its TTL extended by that write path.
+#[test]
+fn test_open_dispute_extends_escrow_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    let amount = 800_000i128;
+    token_admin.mint(&buyer, &amount);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
+
+    client.dispute_escrow(&1, &Symbol::new(&env, "item_not_as_described"), &buyer);
+
+    assert_key_ttl_extended(&env, &client, &(ESCROW, 1u32));
+}
+
+/// Submitting evidence writes the `EvidenceLog` entry; its TTL must be extended.
+#[test]
+fn test_submit_evidence_extends_evidence_log_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    let amount = 800_000i128;
+    token_admin.mint(&buyer, &amount);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "item_not_as_described"), &buyer);
+
+    client.submit_evidence(&1, &buyer, &String::from_str(&env, "ipfs://buyer-evidence"));
+
+    assert_key_ttl_extended(&env, &client, &DataKey::EvidenceLog(1));
+    assert_key_ttl_extended(&env, &client, &(ESCROW, 1u32));
+}
+
+/// Escalating a dispute writes the `DisputeEscalation` record; its TTL must be
+/// extended so the record survives until resolution.
+#[test]
+fn test_escalate_dispute_extends_escalation_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    let amount = 800_000i128;
+    token_admin.mint(&buyer, &amount);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "item_not_as_described"), &buyer);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_DISPUTE_ESCALATION_WINDOW as u64 + 1;
+    });
+
+    client.escalate_dispute(&1, &buyer);
+
+    assert_key_ttl_extended(&env, &client, &DataKey::DisputeEscalation(1));
+}
+
+/// `commit_resolved_escrow` rewrites the escrow entry (status -> Resolved) as
+/// part of every dispute settlement; the escrow key must keep a fresh TTL.
+#[test]
+fn test_resolve_dispute_extends_escrow_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, admin) =
+        setup_test(&env, true);
+
+    let amount = 800_000i128;
+    token_admin.mint(&buyer, &amount);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "item_not_as_described"), &buyer);
+
+    client.resolve_dispute(&1, &Resolution::RefundToBuyer, &admin);
+
+    assert_key_ttl_extended(&env, &client, &(ESCROW, 1u32));
+}
+
+/// Releasing funds rewrites the escrow entry (status -> Released); the escrow
+/// key must keep a fresh TTL.
+#[test]
+fn test_release_funds_extends_escrow_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    let amount = 800_000i128;
+    token_admin.mint(&buyer, &amount);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &Some(1));
+
+    client.release_funds(&1);
+
+    assert_key_ttl_extended(&env, &client, &(ESCROW, 1u32));
+}
+
+/// Extending a release window rewrites the escrow entry; the escrow key must
+/// keep a fresh TTL.
+#[test]
+fn test_extend_release_window_extends_escrow_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    let amount = 800_000i128;
+    token_admin.mint(&buyer, &amount);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &Some(3600));
+
+    client.extend_release_window(&1, &7200);
+
+    assert_key_ttl_extended(&env, &client, &(ESCROW, 1u32));
+}
+
+/// Staking tokens lazily initialises the `StakedArtisanIndexed` / count keys;
+/// both writes must extend TTL.
+#[test]
+fn test_stake_tokens_extends_artisan_index_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&seller, &100_000_000);
+    client.stake_tokens(&seller, &token_id, &5_000_000);
+
+    assert_key_ttl_extended(&env, &client, &DataKey::StakedArtisanIndexed(0));
+    assert_key_ttl_extended(&env, &client, &DataKey::StakedArtisanCount);
 }
 
 // ===== Issue #656: funding_deadline / cancel_unfunded_escrow / auto_cancel_unfunded =====

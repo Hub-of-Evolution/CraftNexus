@@ -211,10 +211,6 @@ pub enum Error {
     BatchJobUnauthorized = 60,
     /// The scheduled batch has already reached a terminal state.
     BatchJobCompleted = 61,
-    /// Pagination limit is zero; caller must request at least one item (#1022).
-    PaginationLimitZero = 80,
-    /// Pagination cursor is invalid (past end of dataset or empty dataset) (#1022).
-    PaginationCursorInvalid = 81,
     /// Platform wallet cannot be the contract address.
     InvalidPlatformWallet = 62,
     /// Provided service-agreement hash is invalid
@@ -259,6 +255,10 @@ pub enum Error {
     /// identifiers are rejected so a retry (or a conflicting external
     /// reference) can never overwrite an existing escrow's state.
     EscrowAlreadyExists = 80,
+    /// Pagination limit is zero; caller must request at least one item (#1022).
+    PaginationLimitZero = 81,
+    /// Pagination cursor is invalid (past end of dataset or empty dataset) (#1022).
+    PaginationCursorInvalid = 82,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -5332,6 +5332,7 @@ impl CraftNexusContract {
     ) -> Escrow {
         escrow.status = EscrowStatus::Resolved;
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::extend_persistent(&env, &(ESCROW, order_id));
         Self::write_settlement_receipt(env, order_id, path, proposal_nonce);
         Self::clear_partial_refund_proposal(env, order_id);
         Self::update_active_dispute_count(env, -1);
@@ -5732,6 +5733,7 @@ impl CraftNexusContract {
         // Update status
         escrow.status = EscrowStatus::Released;
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::extend_persistent(&env, &(ESCROW, order_id));
 
         // Decrement active counts
         Self::update_active_obligations(&env, &escrow.buyer, -1);
@@ -5844,6 +5846,7 @@ impl CraftNexusContract {
         // Update status
         escrow.status = EscrowStatus::Released;
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::extend_persistent(&env, &(ESCROW, order_id));
 
         // Decrement active counts
         Self::update_active_obligations(&env, &escrow.buyer, -1);
@@ -5949,6 +5952,7 @@ impl CraftNexusContract {
 
         escrow.release_window = new_window;
         env.storage().persistent().set(&escrow_key, &escrow);
+        Self::extend_persistent(&env, &escrow_key);
 
         Self::emit_escrow_created(
             &env,
@@ -6986,6 +6990,7 @@ impl CraftNexusContract {
                 env.panic_with_error(crate::Error::BatchLimitExceeded);
             }
             env.storage().persistent().set(&rate_key, &(count + 1));
+            Self::extend_persistent(&env, &rate_key);
         }
 
         let escrow_for_auth = Self::get_stored_escrow(&env, order_id);
@@ -7012,6 +7017,7 @@ impl CraftNexusContract {
                                                       // downstream timers (evidence window, escalation window, max duration).
         escrow.dispute_initiated_at = Some(env.ledger().timestamp());
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::extend_persistent(&env, &(ESCROW, order_id));
         // Increment the global active dispute counter used by emergency-op
         // guards (admin recovery, upgrade proposals) to detect unsafe conditions.
         Self::update_active_dispute_count(&env, 1);
@@ -7263,6 +7269,7 @@ impl CraftNexusContract {
             env.panic_with_error(crate::Error::EvidenceAlreadyUsed);
         }
         env.storage().persistent().set(&hash_key, &true);
+        Self::extend_persistent(&env, &hash_key);
 
         let key = DataKey::EvidenceLog(order_id);
         let mut log: Vec<DisputeEvidence> = env
@@ -7289,6 +7296,7 @@ impl CraftNexusContract {
 
         log.push_back(evidence);
         env.storage().persistent().set(&key, &log);
+        Self::extend_persistent(&env, &key);
         id
     }
 
@@ -7345,6 +7353,7 @@ impl CraftNexusContract {
             env.panic_with_error(crate::Error::EvidenceAlreadyUsed);
         }
         env.storage().persistent().set(&hash_key, &true);
+        Self::extend_persistent(&env, &hash_key);
 
         let id = log.len() as u64;
         let submitted_at = env.ledger().timestamp();
@@ -7364,6 +7373,7 @@ impl CraftNexusContract {
 
         log.push_back(evidence);
         env.storage().persistent().set(&key, &log);
+        Self::extend_persistent(&env, &key);
         id
     }
 
@@ -7392,6 +7402,7 @@ impl CraftNexusContract {
 
         if modified {
             env.storage().persistent().set(&key, &updated_log);
+            Self::extend_persistent(&env, &key);
         }
 
         updated_log
@@ -7448,6 +7459,7 @@ impl CraftNexusContract {
         };
 
         env.storage().persistent().set(&escalation_key, &record);
+        Self::extend_persistent(&env, &escalation_key);
 
         Self::emit_dispute_escalated(&env, order_id);
     }
@@ -8500,6 +8512,7 @@ impl CraftNexusContract {
                     // Update status
                     escrow.status = EscrowStatus::Released;
                     env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+                    Self::extend_persistent(&env, &(ESCROW, order_id));
 
                     // Decrement active counts
                     Self::update_active_obligations(&env, &escrow.buyer, -1);
@@ -8771,9 +8784,11 @@ impl CraftNexusContract {
                 &DataKey::StakedArtisanIndexed(count),
                 &artisan,
             );
+            Self::extend_persistent(&env, &DataKey::StakedArtisanIndexed(count));
             env.storage()
                 .persistent()
                 .set(&DataKey::StakedArtisanCount, &(count + 1));
+            Self::extend_persistent(&env, &DataKey::StakedArtisanCount);
         }
         let new_stake = if let Some(existing_stake) = current_stake {
             ArtisanStakeData {
@@ -9874,9 +9889,10 @@ impl CraftNexusContract {
             return Ok(final_report);
         }
         env.storage().persistent().set(
-            &DataKey::ReconciliationProgress(token),
+            &DataKey::ReconciliationProgress(token.clone()),
             &expected_locked,
         );
+        Self::extend_persistent(&env, &DataKey::ReconciliationProgress(token));
         Ok(report)
     }
 
