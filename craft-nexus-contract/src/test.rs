@@ -7004,3 +7004,64 @@ mod onboarding_state_consistency {
         assert_panic_contract_error(result, Error::OnboardingProfileInactive);
     }
 }
+
+#[test]
+fn test_recurring_escrow_remainder_accounting() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    // Set fee to 0 to strictly test the remainder math without platform fee deductions
+    client.update_platform_fee(&0);
+
+    // 100 tokens spread across 3 cycles (33, 33, 34)
+    let total_amount = 100i128;
+    token_admin.mint(&buyer, &total_amount);
+
+    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &total_amount, &100, &3);
+    let token_client = token::Client::new(&env, &token_id);
+
+    // Cycle 1: 100 / 3 = 33
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.release_next_cycle(&rec.id);
+    assert_eq!(token_client.balance(&seller), 33);
+
+    // Cycle 2: 100 / 3 = 33
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.release_next_cycle(&rec.id);
+    assert_eq!(token_client.balance(&seller), 66); // 33 + 33
+
+    // Cycle 3 (Final): Exact remainder = 34
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.release_next_cycle(&rec.id);
+    
+    // Sum equals original amount perfectly
+    assert_eq!(token_client.balance(&seller), 100);
+    assert!(!client.get_recurring_escrow(&rec.id).is_active);
+}
+
+#[test]
+fn test_recurring_escrow_cancellation_refunds_unreleased_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    client.update_platform_fee(&0);
+
+    let total_amount = 100i128;
+    token_admin.mint(&buyer, &total_amount);
+
+    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &total_amount, &100, &3);
+    let token_client = token::Client::new(&env, &token_id);
+
+    // Cycle 1: 100 / 3 = 33
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.release_next_cycle(&rec.id);
+    
+    // Cancel the remainder
+    client.cancel_recurring_escrow(&rec.id);
+
+    // Buyer receives exact unreleased amount (100 - 33 = 67)
+    assert_eq!(token_client.balance(&buyer), 67);
+    assert!(!client.get_recurring_escrow(&rec.id).is_active);
+}
