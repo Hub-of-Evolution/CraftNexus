@@ -3226,6 +3226,46 @@ impl CraftNexusContract {
         migrated_count
     }
 
+
+    fn validate_partial_refund_solvency(
+    env: &Env,
+    escrow: &Escrow,
+    refund_gross: i128,
+) -> Result<(i128, FeeAllocation), Error> {
+    // 1. Rejects over-sized proposals instantly
+    if refund_gross <= 0 || refund_gross > escrow.amount {
+        return Err(Error::InvalidRefundAmount);
+    }
+    
+    let seller_gross = escrow
+        .amount
+        .checked_sub(refund_gross)
+        .ok_or(Error::InvalidRefundAmount)?;
+        
+    let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
+    let allocation = Self::compute_fee_allocation(
+        env,
+        escrow.amount,
+        fee_bps,
+        SettlementKind::PartialRefund(refund_gross, seller_gross),
+    );
+    
+    // 3. Successful settlement balances to the original escrow amount
+    let sum = allocation
+        .platform_fee
+        .checked_add(allocation.seller_amount)
+        .and_then(|s| s.checked_add(allocation.buyer_amount));
+        
+    if sum != Some(escrow.amount)
+        || allocation.platform_fee < 0
+        || allocation.seller_amount < 0
+        || allocation.buyer_amount < 0
+    {
+        return Err(Error::InvalidRefundAmount);
+    }
+    Ok((seller_gross, allocation))
+}
+
     /// Migrate legacy ArtisanStakeQueue Vec storage to individual indexed entries.
     ///
     /// This function reads the old ArtisanStakeQueue Vec and converts each entry
@@ -3391,6 +3431,9 @@ impl CraftNexusContract {
             evidence_challenge_window: DEFAULT_EVIDENCE_CHALLENGE_WINDOW,
         };
 
+
+
+        
         env.storage()
             .instance()
             .set(&DataKey::PlatformConfig, &config);
