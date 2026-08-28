@@ -682,8 +682,9 @@ fn test_artisan_stake_queue_pruning() {
 
     let count = client.get_artisan_stake_queue_count(&artisan);
     assert_eq!(count, STAKE_QUEUE_PRUNE_THRESHOLD);
+    let staked_before_pruning = client.get_stake(&artisan);
 
-    // Advance time to mature some deposits
+    // Advance time to mature the deposits
     env.ledger().with_mut(|li| {
         li.timestamp = li.timestamp + (DEFAULT_STAKE_COOLDOWN as u64) + 1;
     });
@@ -691,26 +692,39 @@ fn test_artisan_stake_queue_pruning() {
     // Add one more deposit - this should trigger pruning
     client.stake_tokens(&artisan, &token, &1000);
 
-    // Count should collapse to the single new deposit because all earlier entries matured and were pruned.
+    // The matured entries must be compacted into a single aggregate rather
+    // than dropped (#1051), so the queue holds the aggregate plus the new
+    // deposit - never a bare single slot that discards prior principal.
     let count_after_pruning = client.get_artisan_stake_queue_count(&artisan);
-    assert_eq!(count_after_pruning, 1);
+    assert_eq!(count_after_pruning, 2);
 
-    let stored_deposit: Option<StakeDeposit> = env.as_contract(&client.address, || {
+    let aggregate: Option<StakeDeposit> = env.as_contract(&client.address, || {
         env.storage()
             .persistent()
             .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 0))
     });
-    let deposit = stored_deposit.expect("pruned queue should retain the latest deposit in storage");
-    assert_eq!(deposit.amount, 1000);
+    let aggregate = aggregate.expect("compacted matured entries should remain in storage");
+    assert_eq!(
+        aggregate.amount, staked_before_pruning,
+        "compaction must preserve the full matured principal, not discard it"
+    );
 
-    let missing_deposit: Option<StakeDeposit> = env.as_contract(&client.address, || {
+    let new_deposit: Option<StakeDeposit> = env.as_contract(&client.address, || {
         env.storage()
             .persistent()
             .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 1))
     });
-    assert!(
-        missing_deposit.is_none(),
-        "only the latest deposit should remain after pruning"
+    let new_deposit = new_deposit.expect("the newly added deposit should remain in storage");
+    assert_eq!(new_deposit.amount, 1000);
+
+    // Total staked accounting is unaffected by compaction, and the artisan
+    // can still withdraw every bit of matured principal afterwards.
+    assert_eq!(client.get_stake(&artisan), staked_before_pruning + 1000);
+    client.unstake_tokens(&artisan, &token);
+    assert_eq!(
+        token::TokenClient::new(&env, &token).balance(&artisan),
+        100_000_000,
+        "artisan must be able to recover every unit of matured principal"
     );
 }
 
@@ -740,7 +754,7 @@ fn test_artisan_stake_queue_pruning_does_not_run_before_threshold() {
 }
 
 #[test]
-fn test_artisan_stake_queue_pruning_removes_all_matured_deposits() {
+fn test_artisan_stake_queue_pruning_aggregates_all_matured_deposits() {
     let (env, client, _, artisan, token, _, _, _) = setup_test();
 
     let token_asset = token::StellarAssetClient::new(&env, &token);
@@ -756,10 +770,24 @@ fn test_artisan_stake_queue_pruning_removes_all_matured_deposits() {
 
     client.stake_tokens(&artisan, &token, &1000);
 
+    // Every matured deposit must be folded into a single aggregate entry
+    // rather than deleted (#1051) - only the new deposit is separate.
     let count_after_pruning = client.get_artisan_stake_queue_count(&artisan);
     assert_eq!(
-        count_after_pruning, 1,
-        "only the newest deposit should remain"
+        count_after_pruning, 2,
+        "matured deposits should be compacted into one entry, not dropped"
+    );
+
+    let aggregate: StakeDeposit = env
+        .as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 0))
+        })
+        .expect("aggregate of matured deposits should be stored");
+    assert_eq!(
+        aggregate.amount, 41_000,
+        "aggregate must preserve the full matured principal"
     );
 
     let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
@@ -768,12 +796,12 @@ fn test_artisan_stake_queue_pruning_removes_all_matured_deposits() {
     });
     assert!(
         count_present,
-        "queue count should remain stored for the remaining deposit"
+        "queue count should remain stored for the remaining deposits"
     );
 }
 
 #[test]
-fn test_artisan_stake_queue_pruning_can_empty_queue() {
+fn test_artisan_stake_queue_pruning_compacts_without_losing_principal() {
     let (env, client, _, artisan, token, _, _, _) = setup_test();
 
     let token_asset = token::StellarAssetClient::new(&env, &token);
@@ -793,12 +821,15 @@ fn test_artisan_stake_queue_pruning_can_empty_queue() {
         li.timestamp = li.timestamp + (DEFAULT_STAKE_COOLDOWN as u64) + 1;
     });
 
-    // Every queued deposit is now matured, so this stake empties the queue
-    // completely before appending the fresh deposit at index 0.
+    // Every queued deposit is now matured, so this stake compacts them into a
+    // single aggregate entry before appending the fresh deposit.
     client.stake_tokens(&artisan, &token, &1000);
 
     let count_after_pruning = client.get_artisan_stake_queue_count(&artisan);
-    assert_eq!(count_after_pruning, 1);
+    assert_eq!(
+        count_after_pruning, 2,
+        "aggregate of matured deposits plus the new deposit should remain"
+    );
 
     let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
     let count_present = env.as_contract(&client.address, || {
@@ -806,14 +837,35 @@ fn test_artisan_stake_queue_pruning_can_empty_queue() {
     });
     assert!(count_present);
 
-    // The pruned slots must not linger in persistent storage.
-    for index in 1..STAKE_QUEUE_PRUNE_THRESHOLD {
+    let aggregate: StakeDeposit = env
+        .as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 0))
+        })
+        .expect("aggregate of matured deposits should be stored");
+    assert_eq!(
+        aggregate.amount,
+        (STAKE_QUEUE_PRUNE_THRESHOLD as i128) * 1000,
+        "no matured principal may be lost during compaction"
+    );
+
+    // Storage must still be bounded: no stale slots beyond the compacted length.
+    for index in 2..STAKE_QUEUE_PRUNE_THRESHOLD {
         let stale_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), index);
         let still_present = env.as_contract(&client.address, || {
             env.storage().persistent().has(&stale_key)
         });
-        assert!(!still_present, "pruned deposit {index} should be removed");
+        assert!(!still_present, "stale slot {index} should be removed");
     }
+
+    // And the artisan can still recover every matured unit.
+    client.unstake_tokens(&artisan, &token);
+    assert_eq!(
+        token::TokenClient::new(&env, &token).balance(&artisan),
+        100_000_000,
+        "compaction must not prevent full principal recovery"
+    );
 }
 
 #[test]

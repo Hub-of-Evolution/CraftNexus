@@ -26,6 +26,8 @@ mod min_release_window_test;
 #[cfg(test)]
 mod reentrancy_test;
 #[cfg(test)]
+mod sweep_allowance_test;
+#[cfg(test)]
 mod scalability_test;
 #[cfg(test)]
 mod time_boundary_test;
@@ -213,10 +215,6 @@ pub enum Error {
     BatchJobUnauthorized = 60,
     /// The scheduled batch has already reached a terminal state.
     BatchJobCompleted = 61,
-    /// Pagination limit is zero; caller must request at least one item (#1022).
-    PaginationLimitZero = 80,
-    /// Pagination cursor is invalid (past end of dataset or empty dataset) (#1022).
-    PaginationCursorInvalid = 81,
     /// Platform wallet cannot be the contract address.
     InvalidPlatformWallet = 62,
     /// Provided service-agreement hash is invalid
@@ -261,6 +259,13 @@ pub enum Error {
     /// identifiers are rejected so a retry (or a conflicting external
     /// reference) can never overwrite an existing escrow's state.
     EscrowAlreadyExists = 80,
+    /// Pagination limit is zero; caller must request at least one item (#1022).
+    PaginationLimitZero = 81,
+    /// Pagination cursor is invalid (past end of dataset or empty dataset) (#1022).
+    PaginationCursorInvalid = 82,
+    /// Requested WASM upgrade cooldown is below `MIN_WASM_UPGRADE_COOLDOWN`,
+    /// which would let the mandatory review window be bypassed (#1062).
+    UpgradeCooldownTooShort = 83,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -349,6 +354,14 @@ const TTL_EXTENSION: u32 = 518_400;
 // Re-exported from the centralised time_policy module for single source of truth.
 /// Default grace period for WASM upgrades (7 days in seconds)
 const DEFAULT_WASM_UPGRADE_COOLDOWN: u32 = time_policy::WASM_UPGRADE_COOLDOWN as u32;
+/// Minimum enforceable WASM upgrade cooldown (1 day in seconds) (#1062).
+///
+/// `execute_upgrade` correctly rejects execution before `upgrade_at`, but that
+/// review window is only meaningful if it cannot be trivially shortened. Without
+/// a floor here, a single admin call to `set_wasm_upgrade_cooldown(0)` right
+/// before proposing an upgrade would let it execute immediately, defeating the
+/// whole point of the timelock.
+const MIN_WASM_UPGRADE_COOLDOWN: u32 = 24 * 60 * 60;
 /// Minimum time (seconds) that must elapse after a cancel_upgrade_wasm call
 /// before propose_upgrade_wasm is accepted again (Issue #618).
 /// Prevents the cancel-and-repropose pattern that resets the review window.
@@ -3693,7 +3706,12 @@ impl CraftNexusContract {
     }
 
     /// Execute a pending admin action once its approvals and timelock have been satisfied.
+    ///
+    /// Guarded like every other custody entry point (#1069): `SweepUnallocatedFunds`
+    /// reaches `transfer_tokens_and_record_audit`, which fails closed unless a
+    /// `ReentryGuardScope` is already active for the current invocation.
     pub fn execute_admin_action(env: Env, action_id: u64) -> Result<(), Error> {
+        let _guard = ReentryGuardScope::new(&env);
         let action = Self::get_admin_action(&env, action_id).ok_or(Error::AdminActionTerminal)?;
         if action.cancelled {
             return Err(Error::AdminActionTerminal);
@@ -3767,6 +3785,9 @@ impl CraftNexusContract {
                 Ok(())
             }
             AdminActionKind::SetWasmUpgradeCooldown(cooldown_seconds) => {
+                if *cooldown_seconds < MIN_WASM_UPGRADE_COOLDOWN {
+                    return Err(Error::UpgradeCooldownTooShort);
+                }
                 let mut config = Self::get_platform_config_internal(env);
                 let old_value = config.wasm_upgrade_cooldown;
                 config.wasm_upgrade_cooldown = *cooldown_seconds;
@@ -3790,18 +3811,7 @@ impl CraftNexusContract {
                 Ok(())
             }
             AdminActionKind::SweepUnallocatedFunds(token, destination) => {
-                if env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, ReconciliationReport>(&DataKey::ReconciliationReport(token.clone()))
-                    .is_some_and(|report| report.unresolved)
-                {
-                    return Err(Error::ReconciliationRequired);
-                }
-                let allocation = Self::fund_allocation(env, token);
-                if allocation.unallocated < 0 {
-                    return Err(Error::EmergencyAccountingInvariant);
-                }
+                let allocation = Self::assert_safe_to_sweep(env, token)?;
                 let unallocated = allocation.unallocated;
                 if unallocated > 0 {
                     Self::transfer_tokens_and_record_audit(
@@ -9078,11 +9088,17 @@ impl CraftNexusContract {
         Self::extend_persistent(env, &count_key);
     }
 
-    /// Prune matured stake deposits from the queue to prevent storage bloat.
+    /// Compact matured stake deposits in the queue to prevent storage bloat.
     ///
-    /// Removes deposits where cooldown_end <= current_time and compacts the queue
-    /// by shifting remaining deposits to fill gaps. This maintains queue ordering
-    /// while keeping storage bounded.
+    /// A deposit reaching its cooldown makes it *withdrawable*, not withdrawn —
+    /// the principal is still owed to the artisan until `unstake_tokens` actually
+    /// pays it out and removes the entry. Earlier revisions of this function
+    /// deleted matured entries outright during compaction, silently destroying
+    /// unwithdrawn principal (#1051). Instead, this folds every matured-but-still-
+    /// owed deposit into a single aggregate entry that preserves their combined
+    /// amount and latest maturity, and only removes entries that are already gone.
+    /// Non-matured deposits keep their relative order, with the aggregate placed
+    /// at the position of the first matured deposit it absorbed.
     fn prune_matured_stake_deposits(env: &Env, artisan: &Address) {
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -9093,37 +9109,73 @@ impl CraftNexusContract {
 
         let now = env.ledger().timestamp();
         let mut write_index = 0u32;
+        let mut matured_aggregate: Option<StakeDeposit> = None;
 
-        // Compact queue by moving non-matured deposits to fill gaps
         for read_index in 0..current_count {
             let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), read_index);
 
-            if let Some(deposit) = env
+            let deposit = match env
                 .storage()
                 .persistent()
                 .get::<DataKey, StakeDeposit>(&deposit_key)
             {
-                if deposit.cooldown_end > now {
-                    // Deposit is not matured, keep it
-                    if write_index != read_index {
-                        // Move deposit to new position
-                        let new_key =
-                            DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
-                        env.storage().persistent().set(&new_key, &deposit);
-                        Self::extend_persistent(env, &new_key);
-                    }
-                    write_index += 1;
-                }
+                Some(deposit) => deposit,
+                None => continue,
+            };
 
-                // Remove old entry if we moved it or if it was matured
-                if write_index != read_index + 1 {
+            if time_policy::is_deadline_reached(now, deposit.cooldown_end) {
+                // Matured but not yet withdrawn: fold its principal into the
+                // running aggregate instead of dropping it.
+                matured_aggregate = Some(match matured_aggregate {
+                    Some(agg) => StakeDeposit {
+                        amount: agg.amount + deposit.amount,
+                        cooldown_end: if agg.cooldown_end > deposit.cooldown_end {
+                            agg.cooldown_end
+                        } else {
+                            deposit.cooldown_end
+                        },
+                    },
+                    None => deposit,
+                });
+                if read_index != write_index {
                     env.storage().persistent().remove(&deposit_key);
                 }
+                continue;
             }
+
+            // Non-matured deposit: flush any pending matured aggregate first so
+            // its combined principal is written before this entry.
+            if let Some(agg) = matured_aggregate.take() {
+                let agg_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
+                env.storage().persistent().set(&agg_key, &agg);
+                Self::extend_persistent(env, &agg_key);
+                write_index += 1;
+            }
+
+            if write_index != read_index {
+                let new_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
+                env.storage().persistent().set(&new_key, &deposit);
+                Self::extend_persistent(env, &new_key);
+                env.storage().persistent().remove(&deposit_key);
+            }
+            write_index += 1;
         }
 
-        // Update count to reflect pruned queue. If nothing remains, remove the
-        // count entry rather than leaving a stale counter behind.
+        if let Some(agg) = matured_aggregate.take() {
+            let agg_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), write_index);
+            env.storage().persistent().set(&agg_key, &agg);
+            Self::extend_persistent(env, &agg_key);
+            write_index += 1;
+        }
+
+        // Defensive cleanup: remove any stale entries left beyond the new length.
+        for cleanup_index in write_index..current_count {
+            let cleanup_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), cleanup_index);
+            env.storage().persistent().remove(&cleanup_key);
+        }
+
+        // Update count to reflect compacted queue. If nothing remains, remove
+        // the count entry rather than leaving a stale counter behind.
         if write_index > 0 {
             env.storage().persistent().set(&count_key, &write_index);
             Self::extend_persistent(env, &count_key);
@@ -9310,9 +9362,17 @@ impl CraftNexusContract {
     }
 
     /// Admin sets the WASM upgrade cooldown period (in seconds).
+    ///
+    /// Rejected below `MIN_WASM_UPGRADE_COOLDOWN` (#1062): the cooldown is the
+    /// review window that protects every future upgrade proposal, so it must
+    /// not be reducible to near-zero right before `propose_upgrade_wasm`.
     pub fn set_wasm_upgrade_cooldown(env: Env, cooldown_seconds: u32) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
+
+        if cooldown_seconds < MIN_WASM_UPGRADE_COOLDOWN {
+            return Err(Error::UpgradeCooldownTooShort);
+        }
 
         let mut config = Self::get_platform_config_internal(&env);
         let old_value = config.wasm_upgrade_cooldown;
@@ -9958,6 +10018,49 @@ impl CraftNexusContract {
         Self::fund_allocation(&env, &token)
     }
 
+    /// Prove that a sweep of `token`'s unallocated balance will not touch an
+    /// active customer or artisan obligation (#1069).
+    ///
+    /// The incremental `TotalLocked`/`TotalStaked` counters are convenient for
+    /// O(1) reads, but a sweep is exactly the situation where trusting them
+    /// blindly is dangerous: any bug that under-counts a liability turns
+    /// directly into stealable "unallocated" balance. `reconcile_token`
+    /// independently re-derives the canonical locked/staked totals from the
+    /// actual escrow and stake records, so a sweep is only allowed once a
+    /// *complete* reconciliation report proves the tracked counters match
+    /// that canonical recomputation, and only for as long as neither the
+    /// on-chain balance nor the tracked counters have moved since - a stale
+    /// report can no longer vouch for the current state and must be refreshed
+    /// via `reconcile_token` before the sweep can proceed.
+    fn assert_safe_to_sweep(env: &Env, token: &Address) -> Result<FundAllocation, Error> {
+        let allocation = Self::fund_allocation(env, token);
+        if allocation.unallocated < 0 {
+            return Err(Error::EmergencyAccountingInvariant);
+        }
+
+        let report: ReconciliationReport = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ReconciliationReport(token.clone()))
+            .ok_or(Error::ReconciliationRequired)?;
+
+        if !report.complete || report.unresolved {
+            return Err(Error::ReconciliationRequired);
+        }
+
+        // The report must still describe the *current* canonical state.
+        // Any movement in balance or tracked totals since reconciliation
+        // means the proof is stale and cannot back this sweep.
+        if report.balance != allocation.balance
+            || report.tracked_locked != allocation.total_locked
+            || report.tracked_staked != allocation.total_staked
+        {
+            return Err(Error::ReconciliationRequired);
+        }
+
+        Ok(allocation)
+    }
+
     fn fund_allocation(env: &Env, token: &Address) -> FundAllocation {
         let balance = token::Client::new(env, token).balance(&env.current_contract_address());
         let total_locked = env
@@ -10180,6 +10283,14 @@ impl CraftNexusContract {
 
     /// Recovery function to sweep unallocated tokens from the contract (admin only).
     /// Unallocated funds = current_balance - (total_locked_in_escrows + total_staked_by_artisans).
+    ///
+    /// Requires a complete, resolved, and current `reconcile_token` report for
+    /// `token` (#1069): the incremental locked/staked counters are trusted for
+    /// routine reads, but a sweep must be *proven* safe against a canonical
+    /// recomputation from the actual escrow and stake records before any
+    /// balance can leave the contract this way. Call `reconcile_token` first;
+    /// `Error::ReconciliationRequired` means it is missing, incomplete, stale,
+    /// or found a mismatch.
     pub fn sweep_unallocated_funds(
         env: Env,
         token: Address,
@@ -10189,18 +10300,7 @@ impl CraftNexusContract {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
 
-        if env
-            .storage()
-            .persistent()
-            .get::<DataKey, ReconciliationReport>(&DataKey::ReconciliationReport(token.clone()))
-            .is_some_and(|report| report.unresolved)
-        {
-            return Err(Error::ReconciliationRequired);
-        }
-        let allocation = Self::fund_allocation(&env, &token);
-        if allocation.unallocated < 0 {
-            return Err(Error::EmergencyAccountingInvariant);
-        }
+        let allocation = Self::assert_safe_to_sweep(&env, &token)?;
         let unallocated = allocation.unallocated;
 
         if unallocated > 0 {

@@ -2610,6 +2610,53 @@ fn test_set_upgrade_threshold_zero_fails() {
     assert!(result.is_err());
 }
 
+/// #1062 — the review window is the whole point of the timelock, so it must
+/// not be reducible to near-zero. Both the direct setter and the values below
+/// `MIN_WASM_UPGRADE_COOLDOWN` must be rejected.
+#[test]
+fn test_set_wasm_upgrade_cooldown_below_minimum_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let result = client.try_set_wasm_upgrade_cooldown(&0);
+    assert!(result.is_err());
+
+    let result = client.try_set_wasm_upgrade_cooldown(&(24 * 60 * 60 - 1));
+    assert!(result.is_err());
+
+    // The floor itself is accepted.
+    let result = client.try_set_wasm_upgrade_cooldown(&(24 * 60 * 60));
+    assert!(result.is_ok());
+}
+
+/// #1062 — a proposal's `upgrade_at` is fixed at commit time; executing before
+/// that timestamp is rejected and the approved hash cannot be swapped out from
+/// under the pending timelock without going through cancel + a fresh proposal.
+#[test]
+fn test_execute_upgrade_enforces_full_timelock_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let hash = BytesN::from_array(&env, &[7u8; 32]);
+    client.propose_upgrade_wasm(&admin, &hash);
+    let proposal = client.get_upgrade_proposal().expect("proposal missing");
+
+    // Executing right away, or at any point before upgrade_at, must fail.
+    env.ledger().with_mut(|li| {
+        li.timestamp = proposal.upgrade_at - 1;
+    });
+    let result = client.try_execute_upgrade(&hash);
+    assert!(result.is_err());
+
+    // A second proposal cannot be raised to replace the pending hash while
+    // the timelock is active.
+    let other_hash = BytesN::from_array(&env, &[8u8; 32]);
+    let result = client.try_propose_upgrade_wasm(&admin, &other_hash);
+    assert!(result.is_err());
+}
+
 #[test]
 fn test_set_upgrade_signers_empty_resets_to_admin() {
     // Clearing the signers list makes the admin the sole default signer.
