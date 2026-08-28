@@ -23,6 +23,7 @@ import {
 } from "./config";
 import { getCurrentAddress } from "./wallet";
 import { Horizon } from "@stellar/stellar-sdk";
+import { getFundMovementHistory, recordFundMovement } from "./audit";
 
 // ============================================================================
 // Types and Interfaces
@@ -86,6 +87,7 @@ export interface IEscrowService {
   getEscrow(orderId: number): Promise<Escrow | null>;
   canAutoRelease(orderId: number): Promise<boolean>;
   getEscrowContractAddress(): string;
+  getFundMovementHistory(account: string): ReturnType<typeof getFundMovementHistory>;
 }
 
 // ============================================================================
@@ -367,11 +369,10 @@ export class EscrowService implements IEscrowService {
   async releaseFunds(orderId: number): Promise<TransactionResult> {
     if (this.mockMode) {
       console.log("[MOCK] Releasing funds for order:", orderId);
-      return {
-        success: true,
-        transactionHash: `mock_tx_${Date.now()}`,
-        mockMode: true,
-      };
+      const transactionHash = `mock_tx_${Date.now()}`;
+      const caller = await getCurrentAddress();
+      if (caller) recordFundMovement({ kind: "release", actor: caller, account: caller, asset: "USDC", amount: "0", reason: `Release order ${orderId}`, transactionHash });
+      return { success: true, transactionHash, mockMode: true };
     }
 
     this.validateConfiguration();
@@ -420,11 +421,10 @@ export class EscrowService implements IEscrowService {
   async autoRelease(orderId: number): Promise<TransactionResult> {
     if (this.mockMode) {
       console.log("[MOCK] Auto-releasing funds for order:", orderId);
-      return {
-        success: true,
-        transactionHash: `mock_tx_${Date.now()}`,
-        mockMode: true,
-      };
+      const transactionHash = `mock_tx_${Date.now()}`;
+      const caller = await getCurrentAddress();
+      if (caller) recordFundMovement({ kind: "release", actor: caller, account: caller, asset: "USDC", amount: "0", reason: `Release order ${orderId}`, transactionHash });
+      return { success: true, transactionHash, mockMode: true };
     }
 
     this.validateConfiguration();
@@ -472,11 +472,10 @@ export class EscrowService implements IEscrowService {
   async refund(orderId: number, authorizedAddress: string): Promise<TransactionResult> {
     if (this.mockMode) {
       console.log("[MOCK] Refunding order:", orderId);
-      return {
-        success: true,
-        transactionHash: `mock_tx_${Date.now()}`,
-        mockMode: true,
-      };
+      const transactionHash = `mock_tx_${Date.now()}`;
+      const caller = await getCurrentAddress();
+      if (caller) recordFundMovement({ kind: "refund", actor: caller, account: caller, asset: "USDC", amount: "0", reason: `Refund order ${orderId}`, transactionHash });
+      return { success: true, transactionHash, mockMode: true };
     }
 
     this.validateConfiguration();
@@ -633,6 +632,10 @@ export class EscrowService implements IEscrowService {
    */
   getEscrowContractAddress(): string {
     return getEscrowContractAddress();
+  }
+
+  getFundMovementHistory(account: string) {
+    return getFundMovementHistory(account);
   }
 }
 
