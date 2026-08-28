@@ -125,6 +125,7 @@ impl Harness {
     }
 }
 
+/// Assert the error of a contract function that signals failure by panicking.
 fn assert_contract_error<T>(
     result: Result<T, Result<soroban_sdk::Error, soroban_sdk::InvokeError>>,
     expected: Error,
@@ -132,6 +133,22 @@ fn assert_contract_error<T>(
     let expected_err = soroban_sdk::Error::from_contract_error(expected as u32);
     assert!(
         matches!(result, Err(Ok(err)) if err == expected_err),
+        "expected contract error {:?}",
+        expected
+    );
+}
+
+/// Assert the error of a contract function declared as returning `Result<_, Error>`.
+///
+/// The generated `try_*` for those carries the crate error type directly rather
+/// than an opaque `soroban_sdk::Error`, and is generic over the return-value
+/// conversion error, which varies with the return type.
+fn assert_typed_error<T, C>(
+    result: Result<Result<T, C>, Result<Error, soroban_sdk::InvokeError>>,
+    expected: Error,
+) {
+    assert!(
+        matches!(result, Err(Ok(err)) if err == expected),
         "expected contract error {:?}",
         expected
     );
@@ -522,7 +539,7 @@ fn timeout_settlement_is_deterministic_and_runs_exactly_once() {
     );
 
     // Second attempt on the same dispute is rejected by the settlement receipt.
-    assert_contract_error(
+    assert_typed_error(
         h.escrow.try_resolve_expired_dispute(&1),
         Error::SettlementAlreadyFinalized,
     );
@@ -541,7 +558,7 @@ fn timeout_settlement_is_rejected_before_the_final_deadline() {
     h.dispute(1);
 
     h.warp_to(DEFAULT_MAX_DISPUTE_DURATION as u64 - 1);
-    assert_contract_error(
+    assert_typed_error(
         h.escrow.try_resolve_expired_dispute(&1),
         Error::DisputeExpired,
     );
@@ -612,29 +629,68 @@ fn escalation_status_reports_finalization() {
 
     // Once settled the escrow leaves the Disputed state entirely, so the
     // status view no longer applies to it.
-    assert_contract_error(
+    assert_typed_error(
         h.escrow.try_get_dispute_escalation_status(&1),
         Error::InvalidEscrowState,
     );
-    assert_contract_error(
+    assert_typed_error(
         h.escrow.try_get_dispute_final_deadline(&1),
         Error::InvalidEscrowState,
     );
 }
 
 #[test]
-fn onboarding_state_is_still_enforced_for_party_escalation() {
+fn privileged_escalators_do_not_need_an_onboarding_profile() {
     let h = Harness::new();
     h.dispute(1);
-    h.onboarding.deactivate_profile(&h.buyer);
 
-    h.warp_to(3 * DAY);
-    assert!(h.escrow.try_escalate_dispute(&1, &h.buyer).is_err());
+    // Only the parties are asked for an onboarding attestation. The moderator
+    // and the unrelated bot below have no onboarding profile at all, so if the
+    // attestation check were applied to them these escalations would panic.
+    assert!(!h.onboarding.is_onboarded(&h.moderator));
 
-    // The seller is unaffected and can still drive the ladder forward.
-    h.escrow.escalate_dispute(&1, &h.seller);
+    h.warp_to(7 * DAY);
+    h.escrow.escalate_dispute(&1, &h.moderator);
     assert_eq!(
         h.escrow.get_dispute_escalation_state(&1).unwrap().tier,
-        EscalationTier::PartyFlagged
+        EscalationTier::ModeratorReview
+    );
+
+    h.warp_to(14 * DAY);
+    h.escrow.escalate_dispute(&1, &h.admin);
+    assert_eq!(
+        h.escrow.get_dispute_escalation_state(&1).unwrap().tier,
+        EscalationTier::AdminReview
+    );
+
+    h.warp_to(30 * DAY);
+    let bot = Address::generate(&h.env);
+    assert!(!h.onboarding.is_onboarded(&bot));
+    h.escrow.escalate_dispute(&1, &bot);
+    assert_eq!(
+        h.escrow.get_dispute_escalation_state(&1).unwrap().tier,
+        EscalationTier::TimedOut
+    );
+}
+
+#[test]
+fn party_escalation_still_presents_an_onboarding_attestation() {
+    let h = Harness::new();
+    h.dispute(1);
+
+    // The parties are onboarded, so the attestation the escalation path demands
+    // resolves and tier 1 is reachable by either of them. (The negative case
+    // cannot be staged here: a profile with an open dispute cannot be
+    // deactivated, since `deactivate_profile` refuses while escrows are active.)
+    h.warp_to(3 * DAY);
+    assert!(h.escrow.can_escalate_dispute(&1, &h.buyer));
+    assert!(h.escrow.can_escalate_dispute(&1, &h.seller));
+    h.escrow.escalate_dispute(&1, &h.seller);
+    assert_eq!(
+        h.escrow
+            .get_dispute_escalation_state(&1)
+            .unwrap()
+            .escalated_by,
+        h.seller
     );
 }
