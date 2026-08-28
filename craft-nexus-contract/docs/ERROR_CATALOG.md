@@ -15,7 +15,7 @@ This document catalogs all public contract errors, their meanings, triggering co
 | Amount & Fee | 1-5, 8, 23 | Issues with amounts, fees, and validation |
 | Authorization | 6-7, 18, 25, 31, 42, 49-52, 60 | Permission and state issues |
 | Escrow State | 3-4, 12, 19-20 | Escrow lifecycle and status errors |
-| Dispute Resolution | 10-11, 13-14, 53-55 | Dispute flow and evidence errors |
+| Dispute Resolution | 10-11, 13-14, 53-55, 84 | Dispute flow, escalation, and evidence errors |
 | Release & Windows | 15, 21, 23 | Timing and window errors |
 | Configuration | 9, 26, 39, 44 | Platform configuration errors |
 | Storage & Upgrades | 30, 32-38, 43, 45-48 | Upgrade and storage errors |
@@ -287,6 +287,21 @@ This document catalogs all public contract errors, their meanings, triggering co
 1. Verify correct order ID
 2. Ensure escrow is in Disputed state
 3. Check dispute initiation timestamp matches
+
+---
+
+#### Error 84: InvalidEscalationPolicy
+**Description**: The proposed dispute-escalation checkpoint schedule is invalid.
+
+**Triggering Conditions**:
+- `set_escalation_checkpoints` called with a zero `party_checkpoint`
+- The three checkpoint offsets are not strictly increasing
+- `admin_checkpoint` is not strictly below `max_dispute_duration`
+
+**Suggested Client Action**:
+1. Read the current final deadline: `get_max_dispute_duration()`
+2. Submit strictly increasing offsets, all below that value
+3. Verify with `get_escalation_checkpoints()`
 
 ---
 
