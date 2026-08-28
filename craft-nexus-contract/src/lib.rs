@@ -169,7 +169,7 @@ pub enum Error {
     /// Onboarding contract address has not been configured
     OnboardingContractNotSet = 39,
     /// The configured onboarding contract rejected the participant state proof
-    OnboardingAuthorizationFailed = 56,
+    OnboardingAuthorizationFailed = 85,
     // â”€â”€ Validation (40+): fix caller input â”€â”€
     /// Provided metadata hash is invalid
     InvalidMetadataHash = 40,
@@ -266,6 +266,8 @@ pub enum Error {
     /// Requested WASM upgrade cooldown is below `MIN_WASM_UPGRADE_COOLDOWN`,
     /// which would let the mandatory review window be bypassed (#1062).
     UpgradeCooldownTooShort = 83,
+    /// Token transfer failed or returned an unexpected result (#1064).
+    TokenTransferFailed = 84,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -5749,11 +5751,16 @@ impl CraftNexusContract {
             env.panic_with_error(crate::Error::ReentryDetected);
         }
 
-        // Commit effects before interaction. A failed token call rolls back the
-        // complete Soroban invocation, including this audit record.
-        Self::append_fund_audit_record(env, actor, amount, reason, balance_impact);
+        // Execute and validate token transfer before committing dependent audit state (#1064).
+        // Failed transfers or unexpected return values reject with stable TokenTransferFailed error.
         let token_client = token::Client::new(env, token);
-        token_client.transfer(from, to, &amount);
+        match token_client.try_transfer(from, to, &amount) {
+            Ok(Ok(())) => {}
+            _ => env.panic_with_error(crate::Error::TokenTransferFailed),
+        }
+
+        // Commit dependent accounting/audit state only after transfer is validated.
+        Self::append_fund_audit_record(env, actor, amount, reason, balance_impact);
     }
 
     fn transfer_platform_fee(
@@ -8865,6 +8872,12 @@ impl CraftNexusContract {
         }
         Self::extend_persistent(&env, &(ESCROW, order_id));
         let snapshot = snapshot_opt.unwrap();
+        let mut escrow = snapshot.clone();
+        if escrow.status != EscrowStatus::Disputed {
+            return Err(Error::InvalidEscrowState);
+        }
+        let initiated_at = escrow.dispute_initiated_at.ok_or(Error::InvalidEscrowState)?;
+        let current_time = env.ledger().timestamp();
 
         let config = Self::get_platform_config_internal(&env);
         // The deadline guard: if the dispute is still within the allowed window
@@ -9631,8 +9644,8 @@ impl CraftNexusContract {
             return Err(Error::Unauthorized);
         }
         let operation_id = Self::onboarding_operation_id(&env, b"accept_partial_refund:", order_id);
-        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
-        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+        Self::authorize_onboarding_state(&env, &snapshot.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &snapshot.seller, operation_id, UserRole::Artisan);
 
         let (_seller_gross, allocation) =
             Self::validate_partial_refund_solvency(&env, &snapshot, proposal.refund_amount)?;
@@ -9701,7 +9714,7 @@ impl CraftNexusContract {
         Self::authorize_onboarding_state(&env, &proposal.proposed_by, operation_id, expected_role);
 
         // Remove the proposal from storage
-        env.storage().persistent().remove(&proposal_key);
+        Self::clear_partial_refund_proposal(&env, order_id);
 
         Ok(())
     }

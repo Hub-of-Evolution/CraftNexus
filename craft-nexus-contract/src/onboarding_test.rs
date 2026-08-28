@@ -1837,6 +1837,29 @@ fn test_change_username_fee_requires_token_configuration() {
 }
 
 #[test]
+#[should_panic]
+fn test_change_username_fee_transfer_failure_leaves_state_unchanged() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let fee_wallet = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+    // User has 0 balance, so fee transfer will fail
+    client.onboard_user(&user, &String::from_str(&env, "fee_user_no_bal"), &UserRole::Buyer);
+    client.set_username_change_fee(&1_000_000);
+    client.set_username_fee_token(&token_contract.address());
+    client.set_username_fee_wallet(&fee_wallet);
+
+    // This should panic with TokenTransferFailed
+    client.change_username(&user, &String::from_str(&env, "new_username_attempt"));
+}
+
+#[test]
 fn test_change_username_with_special_characters() {
     let env = Env::default();
     env.mock_all_auths();
