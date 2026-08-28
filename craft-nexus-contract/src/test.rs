@@ -1,7053 +1,3409 @@
-#![cfg(test)]
+#![no_std]
+#![allow(clippy::too_many_arguments)]
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr,
+    Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
+};
 extern crate alloc;
 
-use super::*;
-use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
-    token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, TryIntoVal,
-};
+/// Centralised time-boundary policy for the contract.
+pub mod time_policy;
 
-fn setup_test(
-    env: &Env,
-    mock_auth: bool,
-) -> (
-    CraftNexusContractClient<'static>,
-    Address,
-    Address,
-    Address,
-    token::StellarAssetClient<'static>,
-    Address,
-    Address,
-) {
-    env.budget().reset_unlimited();
-    if mock_auth {
-        env.mock_all_auths();
-    }
-    let contract_id = env.register_contract(None, CraftNexusContract);
-    let client = CraftNexusContractClient::new(env, &contract_id);
+#[cfg(test)]
+mod arbitration_escalation_test;
+#[cfg(test)]
+mod enhanced_features_test;
+#[cfg(test)]
+mod event_snapshot_test;
+#[cfg(test)]
+mod expired_dispute_fee_test;
+#[cfg(test)]
+mod min_release_window_test;
+#[cfg(test)]
+mod reentrancy_test;
+#[cfg(test)]
+mod sweep_allowance_test;
+#[cfg(test)]
+mod scalability_test;
+#[cfg(test)]
+mod time_boundary_test;
+#[cfg(test)]
+mod test;
+#[cfg(test)]
+mod pagination_boundary_test;
+#[cfg(test)]
+mod prop_test;
 
-    let buyer = Address::generate(env);
-    let seller = Address::generate(env);
-    let platform_wallet = Address::generate(env);
-    let admin = Address::generate(env);
+// Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
+// artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
+#[cfg(not(target_family = "wasm"))]
+pub mod onboarding;
 
-    let token_admin = Address::generate(env);
-    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_admin_client = token::StellarAssetClient::new(env, &token_contract.address());
+/// Centralized pagination input validation (Issue #1022).
+pub mod pagination_validation;
 
-    let arbitrator = Address::generate(env);
-    let onboarding_contract = Address::generate(env);
+/// Error codes grouped by category for off-chain triage.
+///
+/// # Categories
+///
+/// | Range   | Category     | Meaning                                         | Triage                    |
+/// |---------|-------------|-------------------------------------------------|---------------------------|
+/// | 1–9     | Auth/Access | Authorization, ownership, or existence failures | Rollback immediately      |
+/// | 10–19   | State       | Invalid state transitions or preconditions      | Retry after state change  |
+/// | 20–29   | Config      | Operator-configurable limits or misconfig       | Operator must act         |
+/// | 30–39   | Operational | System or cooldown gates                        | Retry after cooldown      |
+/// | 40–42   | Validation  | Input validation failures                       | Fix caller input          |
+///
+/// Use [`is_retryable`] to determine whether an error may succeed on retry.
+#[contracterror(export = false)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum Error {
+    // ── Auth / Access (1–9): rollback immediately ──
+    /// The caller is not authorized for this operation. Ensure you are using
+    /// the correct admin, arbitrator, moderator, buyer, or seller address.
+    Unauthorized = 1,
+    /// No escrow exists with the given order ID. Verify the order_id is
+    /// correct and the escrow has not already been cleaned up.
+    EscrowNotFound = 2,
+    /// The escrow is not in the required state for this operation. For example,
+    /// you cannot release a Disputed escrow or re-fund an already-funded escrow.
+    /// Call get_escrow to inspect the current status before retrying.
+    InvalidEscrowState = 3,
+    /// DEPRECATED: Handled by onboarding contract. Retained for ABI compatibility.
+    UsernameAlreadyExists = 4,
+    /// The token is not on the platform whitelist. An admin must call
+    /// whitelist_token before this token can be used in escrows.
+    TokenNotWhitelisted = 5,
+    /// The escrow amount is below the configured per-token minimum. Call
+    /// get_fee_token_config to check the minimum, then increase the amount.
+    AmountBelowMinimum = 6,
+    /// The requested release window exceeds the platform-configured maximum.
+    /// Call get_max_release_window to check the current ceiling.
+    ReleaseWindowTooLong = 7,
+    /// The escrow is not in the Disputed state; dispute resolution cannot
+    /// proceed. The escrow must be in Disputed status before resolve_dispute
+    /// can be called.
+    NotInDispute = 8,
+    /// DEPRECATED: Handled by onboarding contract. Retained for ABI compatibility.
+    AlreadyOnboarded = 9,
+    // ── State / Transition (10–19): retry after state change ──
+    /// The fee exceeds the maximum allowed platform fee (MAX_PLATFORM_FEE_BPS,
+    /// currently 10%). Reduce fee_bps and retry.
+    InvalidFee = 10,
+    /// The buyer and seller addresses are identical; self-escrow is not
+    /// permitted. Use distinct buyer and seller addresses.
+    SameBuyerSeller = 11,
+    /// The platform has not been initialized. Call initialize before
+    /// invoking any escrow operations.
+    PlatformNotInitialized = 12,
+    /// The escrow release window has not yet elapsed; auto-release is
+    /// premature. Wait until created_at + release_window seconds have passed.
+    ReleaseWindowNotElapsed = 13,
+    /// Batch operation error (deprecated: use BatchLimitExceeded)
+    BatchOperationFailed = 14,
+    /// The contract is currently paused by an admin. Wait for the platform
+    /// to be unpaused (is_paused returns false) before retrying.
+    ContractPaused = 15,
+    /// The dispute deadline (max_dispute_duration) has not yet elapsed;
+    /// resolve_expired_dispute cannot be called yet. Wait until
+    /// dispute_initiated_at + max_dispute_duration seconds have passed.
+    DisputeExpired = 16,
+    /// The artisan's staked collateral is below the required minimum. The
+    /// artisan must call stake_tokens to top up before this operation proceeds.
+    InsufficientStake = 17,
+    /// The stake cooldown period has not yet elapsed. Wait until the
+    /// cooldown_end timestamp has passed before attempting to unstake.
+    StakeCooldownActive = 18,
+    /// The partial refund amount is invalid: it must be positive and not
+    /// exceed the escrow amount. Adjust refund_amount and retry.
+    InvalidRefundAmount = 19,
+    // ── Config / Resource (20–29): operator must act ──
+    /// Partial refund proposal not found
+    ProposalNotFound = 20,
+    /// Partial refund proposal already exists for this order
+    ProposalAlreadyExists = 21,
+    /// A re-entrant call was detected and blocked. Do not call guarded
+    /// functions recursively. Retry the operation as a standalone call.
+    ReentryDetected = 22,
+    /// The release window is below the platform-configured minimum
+    /// (min_release_window). Call get_min_release_window to check the floor,
+    /// then increase the window value.
+    ReleaseWindowTooShort = 23,
+    /// Staked funds can only be withdrawn in the original staking token
+    StakeTokenMismatch = 24,
+    /// Invalid admin address provided (zero address, invalid format, etc.)
+    InvalidAdminAddress = 25,
+    /// Platform configuration storage is corrupted or missing required fields
+    CorruptedPlatformConfig = 26,
+    /// Stake history queue is at capacity; requires pruning before new entries
+    StakeQueueFull = 27,
+    /// Admin recovery failed due to time lock or invalid conditions
+    AdminRecoveryFailed = 28,
+    /// Batch operation limit exceeded
+    BatchLimitExceeded = 29,
+    // ── Operational / Gates (30–39): retry after cooldown ──
+    /// Deprecated function called (no-op for ABI compatibility)
+    DeprecatedFunction = 30,
+    /// No pending admin transfer to accept or cancel
+    NoPendingAdmin = 31,
+    /// No WASM upgrade has been proposed
+    NoUpgradeProposed = 32,
+    /// WASM upgrade cooldown period is still active
+    UpgradeCooldownActive = 33,
+    /// A WASM upgrade proposal already exists
+    UpgradeProposalExists = 34,
+    /// Invalid WASM upgrade hash provided
+    InvalidUpgradeHash = 35,
+    /// Recurring escrow not found
+    RecurringEscrowNotFound = 36,
+    /// Escrow cycle not ready for release
+    CycleNotReady = 37,
+    /// Recurring escrow ID counter has reached its maximum safe value
+    RecurringEscrowIdExhausted = 38,
+    /// Onboarding contract address has not been configured
+    OnboardingContractNotSet = 39,
+    /// The configured onboarding contract rejected the participant state proof
+    OnboardingAuthorizationFailed = 56,
+    // ── Validation (40+): fix caller input ──
+    /// Provided metadata hash is invalid
+    InvalidMetadataHash = 40,
+    /// Provided IPFS hash is invalid
+    InvalidIpfsHash = 41,
+    /// Caller is not an authorized upgrade signer
+    NotAnUpgradeSigner = 42,
+    /// The same signer already approved this WASM upgrade hash
+    AlreadyApproved = 43,
+    /// Token decimal places are outside the supported range (0–18)
+    InvalidTokenDecimals = 44,
+    /// No compatibility manifest has been submitted for the upgrade
+    UpgradeCompatibilityMissing = 45,
+    /// The compatibility manifest does not describe the current state/version
+    UpgradeCompatibilityInvalid = 46,
+    /// The migration report contains records that require manual handling
+    UpgradeMigrationIncomplete = 47,
+    /// Persisted storage is on a legacy layout that must be migrated first.
+    StorageLayoutMismatch = 48,
+    /// Admin action is in a terminal state (executed or cancelled)
+    AdminActionTerminal = 49,
+    /// Admin action does not yet have enough approvals
+    AdminActionNeedsApprovals = 50,
+    /// Admin action timelock is still active
+    AdminActionTimelockActive = 51,
+    /// Caller is not an authorized admin action signer
+    NotAnAdminActionSigner = 52,
+    /// Evidence retention window has expired or is invalid (#927)
+    EvidenceExpired = 53,
+    /// Evidence payload has already been used in a previous dispute (#927)
+    EvidenceAlreadyUsed = 54,
+    /// Invalid dispute session for evidence submission (#927)
+    InvalidDisputeSession = 55,
+    /// Contract does not implement the supported token interface.
+    UnsupportedToken = 560,
+    /// The requested continuation size is outside the scheduler bound.
+    InvalidBatchWorkLimit = 57,
+    /// The scheduled batch was cancelled.
+    BatchJobCancelled = 58,
+    /// The requested scheduled batch does not exist.
+    BatchJobNotFound = 59,
+    /// The caller is not the account that scheduled the batch.
+    BatchJobUnauthorized = 60,
+    /// The scheduled batch has already reached a terminal state.
+    BatchJobCompleted = 61,
+    /// Platform wallet cannot be the contract address.
+    InvalidPlatformWallet = 62,
+    /// Provided service-agreement hash is invalid
+    InvalidServiceAgreementHash = 63,
+    /// Evidence challenge window has not elapsed; arbitrator resolution is blocked.
+    ChallengeWindowActive = 64,
+    /// The arbitrator address is blacklisted.
+    ArbitratorBlacklisted = 65,
+    /// Dispute action is not valid in the current session (duplicate escalate, bad parent evidence).
+    InvalidDisputeAction = 66,
+    /// Dispute escalation window has not elapsed.
+    EscalationWindowActive = 67,
+    /// Arbitrator resolution deadline (`max_dispute_duration`) has elapsed.
+    ArbitratorDeadlineExceeded = 68,
+    /// This escrow was already settled; a second settlement path cannot run.
+    SettlementAlreadyFinalized = 69,
+    /// Tracked obligations exceed the token balance held by the contract.
+    EmergencyAccountingInvariant = 70,
+    /// A reconciliation report has unresolved customer or collateral liabilities.
+    ReconciliationRequired = 71,
+    /// The requested reconciliation repair plan does not exist.
+    RepairPlanNotFound = 72,
+    /// The reconciliation repair plan has already reached a terminal state.
+    RepairPlanTerminal = 73,
+    /// The live token state no longer matches the reviewed repair plan.
+    RepairPlanPreconditionFailed = 74,
+    /// The user does not have an onboarding profile registered with the
+    /// configured onboarding contract.
+    OnboardingProfileNotFound = 75,
+    /// The user's onboarding profile is not in an active state (deactivated,
+    /// under review, or flagged).
+    OnboardingProfileInactive = 76,
+    /// The user's onboarding role does not permit the requested marketplace
+    /// operation.
+    OnboardingRoleMismatch = 77,
+    /// The user's onboarding profile state version does not match the expected
+    /// current version — stale onboarding state detected.
+    OnboardingProfileStale = 78,
+    /// The user's verification status has been revoked or is not current.
+    OnboardingVerificationRevoked = 79,
+    /// An escrow with this order ID already exists. Duplicate escrow
+    /// identifiers are rejected so a retry (or a conflicting external
+    /// reference) can never overwrite an existing escrow's state.
+    EscrowAlreadyExists = 80,
+    /// Pagination limit is zero; caller must request at least one item (#1022).
+    PaginationLimitZero = 81,
+    /// Pagination cursor is invalid (past end of dataset or empty dataset) (#1022).
+    PaginationCursorInvalid = 82,
+    /// Requested WASM upgrade cooldown is below `MIN_WASM_UPGRADE_COOLDOWN`,
+    /// which would let the mandatory review window be bypassed (#1062).
+    UpgradeCooldownTooShort = 83,
+}
 
-    // Set a non-zero timestamp for event tests
-    env.ledger().with_mut(|li| {
-        li.timestamp = 1711368000; // 2024-03-25
-    });
-
-    // Initialize contract with platform config (no onboarding contract for unit tests)
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &500,
-        &Some(onboarding_contract.clone()),
-    );
-
-    // Set min amount to 0 for tests to pass with small amounts
-    client.set_min_escrow_amount(&token_contract.address(), &0);
-    client.set_min_release_window(&1);
-    client.set_evidence_challenge_window(&0);
-
-    (
-        client,
-        buyer,
-        seller,
-        token_contract.address(),
-        token_admin_client,
-        platform_wallet,
-        admin,
+/// Returns `true` if the error is transient and the operation may succeed on retry.
+///
+/// Retryable errors are those that depend on time, state change, or operator
+/// action that is expected to resolve. Non-retryable errors (auth, not-found,
+/// validation, permanent config) will **never** succeed on retry without
+/// a different input or caller.
+#[must_use]
+pub fn is_retryable(error: Error) -> bool {
+    matches!(
+        error,
+        Error::InvalidEscrowState
+            | Error::ReleaseWindowNotElapsed
+            | Error::ContractPaused
+            | Error::DisputeExpired
+            | Error::StakeCooldownActive
+            | Error::ReentryDetected
+            | Error::StakeQueueFull
+            | Error::UpgradeCooldownActive
+            | Error::CycleNotReady
+            | Error::BatchLimitExceeded
+            | Error::ChallengeWindowActive
+            | Error::EscalationWindowActive
+            | Error::ArbitratorDeadlineExceeded
     )
 }
 
-#[test]
-fn test_create_escrow_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    let order_id = 1;
-    let amount = 500;
-    let window = 3600;
-
-    let escrow = client.create_escrow(
-        &buyer,
-        &seller,
-        &token_id,
-        &amount,
-        &order_id,
-        &Some(window),
-    );
-
-    assert_eq!(escrow.buyer, buyer);
-    assert_eq!(escrow.seller, seller);
-    assert_eq!(escrow.amount, amount);
-    assert_eq!(escrow.status, EscrowStatus::Active);
-    assert_eq!(escrow.release_window, window);
-
-    let stored_escrow = client.get_escrow(&order_id);
-    assert_eq!(stored_escrow, escrow);
-
-    // Verify event
-    let events = env.events().all();
-    assert!(!events.is_empty(), "No events emitted");
-    let last_event = events.last().unwrap();
-    assert_eq!(last_event.0, client.address);
-    let last_event = events.last();
-    let last_event = last_event.unwrap();
-    assert_eq!(last_event.0, client.address);
-    assert_eq!(last_event.0, client.address);
-    // Topics: ["escrow_created", escrow_id]
-    assert_eq!(
-        last_event.1,
-        vec![
-            &env,
-            Symbol::new(&env, "escrow").into_val(&env),
-            (order_id as u64).into_val(&env)
-        ]
-    );
-    // Verify payload
-    let event: EscrowEvent = last_event.2.try_into_val(&env).unwrap();
-    assert_eq!(event.escrow_id, order_id as u64);
-    assert_eq!(event.action, EscrowAction::Created);
-    assert_eq!(event.buyer, buyer);
-    assert_eq!(event.seller, seller);
-    assert_eq!(event.token, token_id);
-    assert_eq!(event.amount, amount);
-    assert!(event.timestamp > 0);
-}
-
-#[test]
-fn test_create_escrow_default_window() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_00000);
-    let escrow = client.create_escrow(&buyer, &seller, &token_id, &100_00000, &1, &None);
-
-    assert_eq!(escrow.release_window, 604800); // 7 days
-}
-
-// ─── Reject duplicate escrow identifiers (#1027) ─────────────────────────────
-
-/// A retry with an order ID that already exists must be rejected and must not
-/// overwrite the existing escrow.
-#[test]
-fn test_create_escrow_rejects_duplicate_order_id() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let original = client.create_escrow(&buyer, &seller, &token_id, &500, &7, &Some(3600));
-
-    // Same order ID, different amount — must be rejected as a duplicate.
-    let result = client.try_create_escrow(&buyer, &seller, &token_id, &900, &7, &Some(3600));
-    assert_panic_contract_error(result, Error::EscrowAlreadyExists);
-
-    // State is unchanged: the original escrow is still intact.
-    let stored = client.get_escrow(&7);
-    assert_eq!(stored, original);
-    assert_eq!(stored.amount, 500);
-    assert_eq!(stored.buyer, buyer);
-}
-
-/// Duplicate rejection also applies to the unfunded creation path.
-#[test]
-fn test_create_unfunded_escrow_rejects_duplicate_order_id() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
-
-    let original = client.create_unfunded_escrow(
-        &9, &buyer, &seller, &token_id, &500, &3600, &None, &None, &None,
-    );
-
-    let result = client.try_create_unfunded_escrow(
-        &9, &buyer, &seller, &token_id, &900, &3600, &None, &None, &None,
-    );
-    assert_panic_contract_error(result, Error::EscrowAlreadyExists);
-
-    let stored = client.get_escrow(&9);
-    assert_eq!(stored, original);
-    assert_eq!(stored.amount, 500);
-}
-
-/// A batch containing duplicate order IDs is rejected atomically — no escrow
-/// is created.
-#[test]
-fn test_create_batch_escrow_rejects_duplicate_order_ids() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000_000);
-
-    let escrow_params = vec![
-        &env,
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 100_000_000,
-            order_id: 100,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 200_000_000,
-            order_id: 100, // duplicate within the batch
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-    ];
-
-    let result = client.try_create_batch_escrow(&1u64, &escrow_params);
-    assert_eq!(result.unwrap_err(), Ok(Error::EscrowAlreadyExists));
-
-    // The batch is atomic: no escrow was persisted.
-    assert_eq!(client.get_escrow_count(), 0);
-}
-
-/// A batch that collides with an already-existing escrow is rejected.
-#[test]
-fn test_create_batch_escrow_rejects_existing_order_id() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &500, &200, &Some(3600));
-
-    let escrow_params = vec![
-        &env,
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 300_000_000,
-            order_id: 200, // already exists
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-    ];
-
-    let result = client.try_create_batch_escrow(&1u64, &escrow_params);
-    assert_eq!(result.unwrap_err(), Ok(Error::EscrowAlreadyExists));
-
-    // The pre-existing escrow is untouched.
-    let stored = client.get_escrow(&200);
-    assert_eq!(stored.amount, 500);
-}
-
-#[test]
-fn test_release_funds_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    client.release_funds(&1);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Released);
-
-    let token_client = token::Client::new(&env, &token_id);
-    // Seller receives 500 - 25 (5% fee) = 475
-    assert_eq!(token_client.balance(&seller), 47_500_000);
-    // Platform receives 25 (5% fee)
-    assert_eq!(token_client.balance(&platform_wallet), 2_500_000);
-    assert_eq!(token_client.balance(&client.address), 0);
-
-    // Check total fees collected
-    assert_eq!(client.get_total_fees_collected(), 2_500_000);
-
-    // Event verified by balance/status assertions above.
-}
-
-#[test]
-fn test_fund_movements_create_audit_records() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    let history = client.get_fund_audit_history(&buyer);
-    assert_eq!(history.len(), 1);
-
-    let entry = history.get(0).unwrap();
-    assert_eq!(entry.actor, buyer);
-    assert_eq!(entry.amount, 50_000_000);
-    assert_eq!(entry.reason, Symbol::new(&env, "escrow_funded"));
-    assert_eq!(entry.balance_impact, -50_000_000);
-    assert!(entry.timestamp > 0);
-}
-
-#[test]
-#[should_panic]
-fn test_release_funds_already_processed() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.release_funds(&1);
-    client.release_funds(&1); // Should panic
-}
-
-#[test]
-fn test_auto_release_success_after_window() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let window = 100;
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &Some(window));
-
-    // Advance time
-    env.ledger().with_mut(|li| {
-        li.timestamp += (window + 1) as u64;
-    });
-
-    assert!(client.can_auto_release(&1));
-    client.auto_release(&1);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Released);
-
-    let token_client = token::Client::new(&env, &token_id);
-    // Seller receives 500 - 25 (5% fee) = 475
-    assert_eq!(token_client.balance(&seller), 47_500_000);
-    // Platform receives 25 (5% fee)
-    assert_eq!(token_client.balance(&platform_wallet), 2_500_000);
-
-    // Event verified by balance/status assertions above.
-}
-
-#[test]
-#[should_panic]
-fn test_auto_release_failure_before_window() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_00000);
-    client.create_escrow(&buyer, &seller, &token_id, &100_00000, &1, &Some(100));
-
-    assert!(!client.can_auto_release(&1));
-    client.auto_release(&1);
-}
-
-#[test]
-fn test_refund_success_by_admin() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _admin) = setup_test(&env, false);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    // Check initial balance
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&buyer), 50_000_000);
-
-    // Provide escrow_id 1
-    client.refund(&1);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Refunded);
-
-    assert_eq!(token_client.balance(&buyer), 100_000_000);
-
-    // Event verified by balance/status assertions above.
-}
-
-#[test]
-fn test_dispute_escrow_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    client.dispute_escrow(&1, &Symbol::new(&env, "Item_damaged"), &buyer);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Disputed);
-    assert_eq!(
-        escrow.dispute_reason,
-        Some(Symbol::new(&env, "Item_damaged"))
-    );
-
-    // Verify event
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
-    assert_eq!(
-        last_event.1,
-        vec![
-            &env,
-            Symbol::new(&env, "escrow").into_val(&env),
-            1u64.into_val(&env)
-        ]
-    );
-    // Verify payload
-    let event: EscrowEvent = last_event.2.try_into_val(&env).unwrap();
-    assert_eq!(event.escrow_id, 1);
-    assert_eq!(event.action, EscrowAction::Disputed);
-    assert_eq!(event.buyer, buyer);
-    assert_eq!(event.seller, seller);
-    assert_eq!(event.token, token_id);
-    assert!(event.timestamp > 0);
-}
-
-#[test]
-fn test_dispute_escrow_by_seller() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &None);
-
-    client.dispute_escrow(&1, &Symbol::new(&env, "Payment_not_received"), &seller);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Disputed);
-    assert_eq!(
-        escrow.dispute_reason,
-        Some(Symbol::new(&env, "Payment_not_received"))
-    );
-}
-
-#[test]
-#[should_panic]
-fn test_dispute_escrow_unauthorized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    let unauthorized = Address::generate(&env);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Invalid_reason"), &unauthorized);
-}
-
-#[test]
-#[should_panic]
-fn test_disputed_prevents_release() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Damaged_item"), &buyer);
-
-    client.release_funds(&1);
-}
-
-#[test]
-#[should_panic]
-fn test_disputed_prevents_refund() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Damaged_item"), &buyer);
-
-    client.refund(&1);
-}
-
-#[test]
-fn test_pending_dispute_blocks_release_and_refund_races() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    env.as_contract(&client.address, || {
-        let mut escrow: Escrow = env.storage().persistent().get(&(ESCROW, 1u32)).unwrap();
-        escrow.status = EscrowStatus::DisputePending;
-        env.storage().persistent().set(&(ESCROW, 1u32), &escrow);
-    });
-
-    assert!(client.try_release_funds(&1).is_err());
-    assert!(client.try_refund(&1).is_err());
-}
-
-#[test]
-fn test_pending_release_or_refund_blocks_dispute_race() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &2, &None);
-
-    env.as_contract(&client.address, || {
-        let mut release_escrow: Escrow = env.storage().persistent().get(&(ESCROW, 1u32)).unwrap();
-        release_escrow.status = EscrowStatus::ReleasePending;
-        env.storage()
-            .persistent()
-            .set(&(ESCROW, 1u32), &release_escrow);
-
-        let mut refund_escrow: Escrow = env.storage().persistent().get(&(ESCROW, 2u32)).unwrap();
-        refund_escrow.status = EscrowStatus::RefundPending;
-        env.storage()
-            .persistent()
-            .set(&(ESCROW, 2u32), &refund_escrow);
-    });
-
-    assert!(client
-        .try_dispute_escrow(&1, &Symbol::new(&env, "Race"), &buyer)
-        .is_err());
-    assert!(client
-        .try_dispute_escrow(&2, &Symbol::new(&env, "Race"), &seller)
-        .is_err());
-}
-
-#[test]
-fn test_escrow_state_diagnostic_flags_pending_orphans() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    env.as_contract(&client.address, || {
-        let mut escrow: Escrow = env.storage().persistent().get(&(ESCROW, 1u32)).unwrap();
-        escrow.status = EscrowStatus::ReleasePending;
-        env.storage().persistent().set(&(ESCROW, 1u32), &escrow);
-    });
-
-    let diagnostic = client.diagnose_escrow_state(&1);
-    assert!(!diagnostic.is_consistent);
-    assert_eq!(diagnostic.issue, EscrowStateIssue::PendingTransitionUnfinished);
-}
-
-#[test]
-fn test_resolve_dispute_release_to_seller() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Non_delivery"), &buyer);
-
-    // Arbitrator is setup in setup_test as a random Address and mock_all_auths bypasses auth
-    client.resolve_dispute(&1, &Resolution::ReleaseToSeller, &admin);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Resolved);
-
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&seller), 47_500_000);
-
-    // Status and balances verified above.
-}
-
-#[test]
-fn test_resolve_dispute_refund_to_buyer() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Late_shipping"), &buyer);
-
-    client.resolve_dispute(&1, &Resolution::RefundToBuyer, &admin);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Resolved);
-
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&buyer), 100_000_000);
-
-    // Status and balances verified above.
-}
-
-#[test]
-fn test_resolve_dispute_by_moderator() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    let moderator = Address::generate(&env);
-
-    client.set_moderator(&moderator);
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Moderator_review"), &buyer);
-
-    client.resolve_dispute(&1, &Resolution::RefundToBuyer, &moderator);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Resolved);
-}
-
-#[test]
-fn test_recover_admin_with_zero_window_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _buyer, _seller, _token_id, _token_admin, _platform_wallet, admin) =
-        setup_test(&env, true);
-
-    // Simulate a malicious/deployer-provided zero-second recovery window by
-    // writing a recovery time equal to the current ledger timestamp and
-    // recording a zero delay. The contract should reject recovery attempts
-    // that don't meet the minimum cooldown.
-    let current_time = env.ledger().timestamp();
-    env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .set(&DataKey::FallbackAdmin, &admin);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminRecoveryTime, &current_time);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminRecoveryDelay, &0u64);
-    });
-
-    let recovered_admin = Address::generate(&env);
-    let res = client.try_recover_admin_access(&recovered_admin);
-    assert!(matches!(res, Err(Ok(Error::AdminRecoveryFailed))));
-}
-
-#[test]
-#[should_panic]
-fn test_resolve_dispute_non_disputed() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    client.resolve_dispute(&1, &Resolution::RefundToBuyer, &admin);
-}
-
-#[test]
-fn test_resolve_dispute_partial_release_50_50() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &50_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Partial_delivery"), &buyer);
-
-    // 50/50 split: buyer gets 25M, seller gets 25M minus 5% fee
-    client.resolve_dispute_partial(&1, &25_000_000, &admin);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Resolved);
-
-    let token_client = token::Client::new(&env, &token_id);
-    // Buyer gets exactly their share
-    assert_eq!(token_client.balance(&buyer), 25_000_000);
-    // Seller gets 25M - 5% fee (1_250_000) = 23_750_000
-    assert_eq!(token_client.balance(&seller), 23_750_000);
-}
-
-#[test]
-fn test_resolve_dispute_partial_release_custom_fee_tier() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
-
-    // Set custom 2% fee for seller
-    client.set_artisan_fee_tier(&seller, &200);
-
-    token_admin.mint(&buyer, &50_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Partial_delivery"), &buyer);
-
-    // 70/30 split: buyer gets 35M, seller gets 15M minus 2% fee
-    client.resolve_dispute_partial(&1, &35_000_000, &admin);
-
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&buyer), 35_000_000);
-    // Seller gets 15M - 2% fee (300_000) = 14_700_000
-    assert_eq!(token_client.balance(&seller), 14_700_000);
-}
-
-#[test]
-fn test_resolve_dispute_partial_release_fee_deducted_once() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, admin) =
-        setup_test(&env, true);
-
-    token_admin.mint(&buyer, &50_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Partial_delivery"), &buyer);
-
-    // 50/50 split
-    client.resolve_dispute_partial(&1, &25_000_000, &admin);
-
-    let token_client = token::Client::new(&env, &token_id);
-    // Fee is 5% of seller's 25M = 1_250_000 — charged exactly once
-    let expected_fee = 25_000_000i128 * 500 / 10_000;
-    assert_eq!(expected_fee, 1_250_000);
-
-    // Buyer + seller + platform_fee should equal escrow amount
-    let buyer_balance = token_client.balance(&buyer);
-    let seller_balance = token_client.balance(&seller);
-    let platform_balance = token_client.balance(&platform_wallet);
-    assert_eq!(
-        buyer_balance + seller_balance + platform_balance,
-        50_000_000
-    );
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #19)")]
-fn test_resolve_dispute_partial_release_zero_buyer_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Invalid_split"), &buyer);
-
-    client.resolve_dispute_partial(&1, &0, &admin);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #19)")]
-fn test_resolve_dispute_partial_release_full_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Invalid_split"), &buyer);
-
-    // buyer_amount == escrow.amount is invalid (must be < full amount)
-    client.resolve_dispute_partial(&1, &50_000_000, &admin);
-}
-
-#[test]
-#[should_panic]
-fn test_refund_failure_unauthorized() {
-    let env = Env::default();
-    // Do NOT mock auth globally during setup_test
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, false);
-
-    // Manually mock for create_escrow
-    env.mock_all_auths();
-    token_admin.mint(&buyer, &100_000_000);
-    client.set_min_escrow_amount(&token_id, &0);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    // Now call refund as a non-admin (actually without any auth)
-    // require_auth() will fail because we are calling it but no auth is recorded for 'admin'
-    client.refund(&1);
-}
-
-#[test]
-#[should_panic]
-fn test_get_escrow_not_found() {
-    let env = Env::default();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-    client.get_escrow(&999);
-}
-
-#[test]
-#[should_panic]
-fn test_create_escrow_zero_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_00000);
-    client.create_escrow(&buyer, &seller, &token_id, &0, &1, &None);
-}
-
-#[test]
-#[should_panic]
-fn test_create_escrow_negative_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_00000);
-    client.create_escrow(&buyer, &seller, &token_id, &-100, &1, &None);
-}
-
-#[test]
-#[should_panic]
-fn test_create_escrow_same_buyer_seller() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, _, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_00000);
-    client.create_escrow(&buyer, &buyer, &token_id, &100_00000, &1, &None);
-}
-
-// ===== Platform Fee Tests =====
-
-#[test]
-fn test_platform_fee_deduction_5_percent() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_00000);
-    // Create escrow with 1,000,000 (should have 50,000 fee at 5%)
-    client.create_escrow(&buyer, &seller, &token_id, &1_000_000, &1, &None);
-
-    client.release_funds(&1);
-
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&seller), 950_000); // 1,000,000 - 50,000
-    assert_eq!(token_client.balance(&platform_wallet), 50_000);
-    assert_eq!(client.get_total_fees_collected(), 50_000);
-}
-
-#[test]
-fn test_platform_fee_deduction_10_percent() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, CraftNexusContract);
-    let client = CraftNexusContractClient::new(&env, &contract_id);
-    let buyer = Address::generate(&env);
-    let seller = Address::generate(&env);
-    let platform_wallet = Address::generate(&env);
-    let admin = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_addr = token_contract.address();
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
-
-    let arbitrator = Address::generate(&env);
-
-    // Initialize with 10% fee
-    client.initialize(&platform_wallet, &admin, &arbitrator, &1000, &None);
-
-    token_admin_client.mint(&buyer, &10_000_000);
-    client.create_escrow(&buyer, &seller, &token_addr, &10_000_000, &1, &None);
-
-    client.release_funds(&1);
-
-    let token_client = token::Client::new(&env, &token_addr);
-    assert_eq!(token_client.balance(&seller), 9_000_000); // 10,000,000 - 1,000,000
-    assert_eq!(token_client.balance(&platform_wallet), 1_000_000);
-}
-
-#[test]
-fn test_calculate_fee_for_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    // 5% of 1000 = 50
-    let fee = client.calculate_fee_for_amount(&1000);
-    assert_eq!(fee, 50);
-
-    // 5% of 500 = 25
-    let fee = client.calculate_fee_for_amount(&500);
-    assert_eq!(fee, 25);
-}
-
-#[test]
-fn test_calculate_seller_net_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    // 1000 - 50 = 950
-    let net = client.calculate_seller_net_amount(&1000);
-    assert_eq!(net, 950);
-
-    // 500 - 25 = 475
-    let net = client.calculate_seller_net_amount(&500);
-    assert_eq!(net, 475);
-}
-
-fn assert_invalid_fee_error(
-    result: Result<
-        Result<i128, soroban_sdk::Error>,
-        Result<soroban_sdk::Error, soroban_sdk::InvokeError>,
-    >,
-) {
-    let expected = soroban_sdk::Error::from_contract_error(Error::InvalidFee as u32);
-    assert!(matches!(result, Err(Ok(err)) if err == expected));
-}
-
-#[test]
-fn test_calculate_fee_handles_high_safe_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let amount = i128::MAX / 1_000;
-    let fee = client.calculate_fee_for_amount(&amount);
-
-    assert_eq!(fee, amount / 20);
-}
-
-#[test]
-fn test_calculate_fee_overflow_returns_contract_error() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let result = client.try_calculate_fee_for_amount(&i128::MAX);
-
-    assert_invalid_fee_error(result);
-}
-
-#[test]
-fn test_calculate_seller_net_overflow_returns_contract_error() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let result = client.try_calculate_seller_net_amount(&i128::MAX);
-
-    assert_invalid_fee_error(result);
-}
-
-#[test]
-fn test_update_platform_fee() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, CraftNexusContract);
-    let client = CraftNexusContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let platform_wallet = Address::generate(&env);
-    let seller = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_addr = token_contract.address();
-    let token_admin_client = token::StellarAssetClient::new(&env, &token_addr);
-
-    let arbitrator = Address::generate(&env);
-
-    // Initialize with 5% fee
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &500,
-        &None::<Address>,
-    );
-
-    // Get initial fee
-
-    // Update to 8% fee (800 bps) - admin auth required
-    client.update_platform_fee(&800);
-
-    assert_eq!(client.get_platform_fee(), 800);
-
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
-    let _config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
-    let last_event = events.last().unwrap();
-    let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
-    assert_eq!(
-        config_event.field_name,
-        Symbol::new(&env, "platform_fee_bps")
-    );
-    assert_eq!(config_event.old_value, ConfigValue::U32(500));
-    assert_eq!(config_event.new_value, ConfigValue::U32(800));
-
-    // Now create escrow and release - should use 8%
-    token_admin_client.mint(&Address::generate(&env), &100_000_000);
-    let buyer = Address::generate(&env);
-    token_admin_client.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_addr, &100_000_000, &1, &None);
-
-    client.release_funds(&1);
-
-    let token_client = token::Client::new(&env, &token_addr);
-    // 100,000,000 - 8,000,000 = 92,000,000
-    assert_eq!(token_client.balance(&seller), 92_000_000);
-    assert_eq!(token_client.balance(&platform_wallet), 8_000_000);
-}
-
-#[test]
-#[should_panic]
-fn test_update_platform_fee_too_high() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, CraftNexusContract);
-    let client = CraftNexusContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let platform_wallet = Address::generate(&env);
-
-    let token_admin = Address::generate(&env);
-    let _token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-
-    let arbitrator = Address::generate(&env);
-
-    // Initialize with 5% fee
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &500,
-        &None::<Address>,
-    );
-
-    // Try to set fee above max (10%)
-    client.update_platform_fee(&1500);
-}
-
-#[test]
-fn test_total_fees_accumulate() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &30_000_000);
-
-    // Create and release multiple escrows
-    client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &1, &None);
-    client.release_funds(&1);
-
-    client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &2, &None);
-    client.release_funds(&2);
-
-    let token_client = token::Client::new(&env, &token_id);
-    // Total fees: 500,000 + 500,000 = 1,000,000
-    assert_eq!(token_client.balance(&platform_wallet), 1_000_000);
-    assert_eq!(client.get_total_fees_collected(), 1_000_000);
-}
-
-#[test]
-fn test_initialize_emits_config_events() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, CraftNexusContract);
-    let client = CraftNexusContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let platform_wallet = Address::generate(&env);
-    let arbitrator = Address::generate(&env);
-
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &500,
-        &None::<Address>,
-    );
-
-    let events = env.events().all();
-    let fee_event: ConfigUpdatedEvent = events
-        .get(events.len() - 2)
-        .unwrap()
-        .2
-        .try_into_val(&env)
-        .unwrap();
-    let wallet_event: ConfigUpdatedEvent = events
-        .get(events.len() - 1)
-        .unwrap()
-        .2
-        .try_into_val(&env)
-        .unwrap();
-
-    assert_eq!(fee_event.field_name, Symbol::new(&env, "platform_fee_bps"));
-    assert_eq!(
-        wallet_event.field_name,
-        Symbol::new(&env, "platform_wallet")
-    );
-}
-
-#[test]
-fn test_set_artisan_fee_tier_emits_dedicated_event() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, seller, _, _, _, _) = setup_test(&env, true);
-
-    client.set_artisan_fee_tier(&seller, &750);
-
-    assert_eq!(client.get_effective_fee_bps(&seller), 750);
-
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
-    assert_eq!(
-        last_event.1,
-        vec![
-            &env,
-            Symbol::new(&env, "admin_fee_tier_updated").into_val(&env),
-            seller.clone().into_val(&env)
-        ]
-    );
-    let fee_event: ArtisanFeeTierUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
-    assert_eq!(fee_event.artisan, seller);
-    assert_eq!(fee_event.fee_bps, 750);
-}
-
-// ===== Additional Comprehensive Coverage Tests =====
-
-#[test]
-#[should_panic]
-fn test_dispute_escrow_failure_unauthorized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    let _unauthorized = Address::generate(&env);
-    let unauthorized = Address::generate(&env);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Unauthorized"), &unauthorized);
-}
-
-#[test]
-#[should_panic]
-fn test_refund_after_release_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &1, &None);
-    client.release_funds(&1);
-    client.refund(&1);
-}
-
-#[test]
-#[should_panic]
-fn test_dispute_after_release_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &1, &None);
-    client.release_funds(&1);
-    client.dispute_escrow(&1, &Symbol::new(&env, "buyer_dispute"), &buyer);
-}
-
-#[test]
-#[should_panic]
-fn test_release_funds_escrow_not_found() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-    client.release_funds(&999);
-}
-
-#[test]
-#[should_panic]
-fn test_refund_escrow_not_found() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-    let _caller = Address::generate(&env);
-    client.refund(&999);
-}
-
-#[test]
-#[should_panic]
-fn test_dispute_escrow_not_found() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-    let caller = Address::generate(&env);
-    client.dispute_escrow(&999, &Symbol::new(&env, "reason"), &caller);
-}
-
-#[test]
-#[should_panic]
-fn test_auto_release_escrow_not_found() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-    client.auto_release(&999);
-}
-
-#[test]
-#[should_panic]
-fn test_can_auto_release_escrow_not_found() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-    let _ = client.can_auto_release(&999);
-}
-
-#[test]
-fn test_auto_release_at_exact_window_boundary() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let window = 100;
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &Some(window));
-
-    // Exactly at boundary should be releasable.
-    env.ledger().with_mut(|li| {
-        li.timestamp += window as u64;
-    });
-    assert!(client.can_auto_release(&1));
-    client.auto_release(&1);
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&seller), 47_500_000);
-    assert_eq!(token_client.balance(&platform_wallet), 2_500_000);
-}
-
-// ===== Governance (#95) Tests =====
-
-#[test]
-fn test_admin_transfer_flow() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let new_admin = Address::generate(&env);
-
-    // Initial admin proposes transfer
-    client.update_admin(&new_admin);
-
-    // Should still be old admin
-    let config = client.get_platform_config();
-    assert_eq!(config.admin, admin);
-    assert_eq!(config.pending_admin, Some(new_admin.clone()));
-
-    // New admin claims role
-    client.claim_admin();
-
-    // Now should be new admin
-    let config = client.get_platform_config();
-    assert_eq!(config.admin, new_admin);
-    assert_eq!(config.pending_admin, None);
-}
-
-#[test]
-fn test_admin_transfer_can_be_cancelled() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let new_admin = Address::generate(&env);
-    client.update_admin(&new_admin);
-
-    client.cancel_admin_transfer();
-
-    let config = client.get_platform_config();
-    assert_eq!(config.admin, admin);
-    assert_eq!(config.pending_admin, None);
-}
-
-#[test]
-fn test_cancel_admin_transfer_without_pending_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let result = client.try_cancel_admin_transfer();
-    assert!(result.is_err());
-}
-
-#[test]
-#[should_panic]
-fn test_claim_admin_no_pending_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    client.claim_admin();
-}
-
-// ===== Admin address validation tests (#419) =====
-
-#[test]
-#[should_panic]
-fn test_update_admin_contract_address_rejected() {
-    // Transferring admin to the contract itself must be rejected.
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-    client.update_admin(&client.address.clone());
-}
-
-#[test]
-#[should_panic]
-fn test_update_admin_requires_new_admin_cosign() {
-    // Without new_admin providing auth, update_admin must fail.
-    // setup_test(false) skips mock_all_auths, so new_admin's require_auth
-    // is never satisfied and the call panics.
-    let env = Env::default();
-    let (client, _, _, _, _, _, _) = setup_test(&env, false);
-    let new_admin = Address::generate(&env);
-    // No auth is mocked — both current-admin and new_admin auth will fail.
-    client.update_admin(&new_admin);
-}
-
-// ===== Admin recovery error tests (#415) =====
-
-fn assert_admin_recovery_failed(
-    result: Result<
-        Result<(), soroban_sdk::ConversionError>,
-        Result<Error, soroban_sdk::InvokeError>,
-    >,
-) {
-    assert!(matches!(result, Err(Ok(Error::AdminRecoveryFailed))));
-}
-
-#[test]
-fn test_recover_admin_missing_fallback_returns_standard_error() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let recovered_admin = Address::generate(&env);
-    let result = client.try_recover_admin_access(&recovered_admin);
-
-    assert_admin_recovery_failed(result);
-}
-
-#[test]
-fn test_recover_admin_invalid_address_returns_standard_error() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .set(&DataKey::FallbackAdmin, &admin);
-    });
-
-    let result = client.try_recover_admin_access(&client.address);
-
-    assert_admin_recovery_failed(result);
-}
-
-#[test]
-fn test_recover_admin_timelock_returns_standard_error() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .set(&DataKey::FallbackAdmin, &admin);
-    });
-
-    let recovered_admin = Address::generate(&env);
-    let initial_result = client.try_recover_admin_access(&recovered_admin);
-    assert_admin_recovery_failed(initial_result);
-
-    let locked_result = client.try_recover_admin_access(&recovered_admin);
-    assert_admin_recovery_failed(locked_result);
-}
-
-// ===== Admin recovery edge case snapshot tests =====
-
-#[test]
-fn test_recover_admin_access_zero_cooldown_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _buyer, _seller, _token_id, _token_admin, _platform_wallet, admin) =
-        setup_test(&env, true);
-
-    // Simulate a direct-storage bypass attempt: the time lock has already
-    // elapsed (recovery_time == current_time) but the recorded cooldown
-    // delay is zero. This must be rejected even though the timelock check
-    // itself would otherwise pass.
-    let current_time = env.ledger().timestamp();
-    env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .set(&DataKey::FallbackAdmin, &admin);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminRecoveryTime, &current_time);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminRecoveryDelay, &0u64);
-    });
-
-    let recovered_admin = Address::generate(&env);
-    let result = client.try_recover_admin_access(&recovered_admin);
-    assert_admin_recovery_failed(result);
-}
-
-#[test]
-fn test_recover_admin_access_same_address_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _buyer, _seller, _token_id, _token_admin, _platform_wallet, admin) =
-        setup_test(&env, true);
-
-    env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .set(&DataKey::FallbackAdmin, &admin);
-    });
-
-    // Attempting to "recover" to the address that is already the current
-    // admin must fail rather than silently succeeding as a no-op.
-    let result = client.try_recover_admin_access(&admin);
-    assert_admin_recovery_failed(result);
-}
-
-#[test]
-fn test_recover_admin_access_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _buyer, _seller, _token_id, _token_admin, _platform_wallet, admin) =
-        setup_test(&env, true);
-
-    env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .set(&DataKey::FallbackAdmin, &admin);
-    });
-
-    let recovered_admin = Address::generate(&env);
-
-    // First call initiates the 7-day time lock and fails.
-    let initial_result = client.try_recover_admin_access(&recovered_admin);
-    assert_admin_recovery_failed(initial_result);
-
-    // Advance the ledger past the minimum recovery cooldown.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 7 * 24 * 60 * 60 + 1;
-    });
-
-    // Second call, after the time lock has elapsed, must succeed.
-    client
-        .try_recover_admin_access(&recovered_admin)
-        .unwrap()
-        .unwrap();
-
-    let config = client.get_platform_config();
-    assert_eq!(config.admin, recovered_admin);
-}
-
-#[test]
-fn test_wasm_upgrade_grace_period() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let new_wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
-
-    // Propose upgrade
-    client.propose_upgrade_wasm(&admin, &new_wasm_hash);
-
-    // Try to upgrade immediately - should fail
-    // We can't easily catch a panic in a test without should_panic,
-    // but we can verify the error if we return Result.
-    // Our update_wasm uses expect/panic.
-}
-
-#[test]
-fn test_cancel_upgrade_wasm() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let new_wasm_hash = BytesN::from_array(&env, &[1u8; 32]);
-    client.propose_upgrade_wasm(&admin, &new_wasm_hash);
-
-    // Admin cancels
-    client.cancel_upgrade_wasm();
-
-    // Should panic when trying to update since proposal is gone
-}
-
-/// Issue #618 — cancel-and-repropose must not reset the review window.
-/// After a cancellation, propose_upgrade_wasm must return UpgradeCooldownActive
-/// if less than CANCEL_REPROPOSE_COOLDOWN seconds have elapsed.
-/// UpgradeCooldownActive = Error discriminant #33.
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #33)")]
-fn test_cancel_then_repropose_blocked_by_cooldown() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let hash = BytesN::from_array(&env, &[1u8; 32]);
-
-    // Propose and then cancel — this records LastUpgradeCancelledAt
-    client.propose_upgrade_wasm(&admin, &hash);
-    client.cancel_upgrade_wasm();
-
-    // Immediately re-proposing (same ledger timestamp) must panic with
-    // UpgradeCooldownActive (#33)
-    client.propose_upgrade_wasm(&admin, &hash);
-}
-
-/// Issue #618 — after the cancel cooldown window elapses, a new proposal must
-/// be accepted without error.
-#[test]
-fn test_repropose_succeeds_after_cancel_cooldown_elapses() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let hash = BytesN::from_array(&env, &[2u8; 32]);
-
-    // Propose and cancel
-    client.propose_upgrade_wasm(&admin, &hash);
-    client.cancel_upgrade_wasm();
-
-    // Advance the ledger past CANCEL_REPROPOSE_COOLDOWN (7 days + 1 s)
-    env.ledger().with_mut(|li| {
-        li.timestamp += 7 * 24 * 60 * 60 + 1;
-    });
-
-    // Re-proposing after the cooldown must succeed
-    client.propose_upgrade_wasm(&admin, &hash);
-    let proposal = client
-        .get_upgrade_proposal()
-        .expect("proposal should exist");
-    assert_eq!(proposal.wasm_hash, hash);
-}
-
-#[test]
-fn test_fee_rounding_floor_behavior_small_amounts() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    // 5% floor rounding (integer division).
-    assert_eq!(client.calculate_fee_for_amount(&1), 0);
-    assert_eq!(client.calculate_fee_for_amount(&19), 0);
-    assert_eq!(client.calculate_fee_for_amount(&20), 1);
-    assert_eq!(client.calculate_fee_for_amount(&39), 1);
-    assert_eq!(client.calculate_fee_for_amount(&40), 2);
-}
-
-#[test]
-fn test_fee_rounding_custom_bps_025_percent() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, CraftNexusContract);
-    let client = CraftNexusContractClient::new(&env, &contract_id);
-    let platform_wallet = Address::generate(&env);
-    let admin = Address::generate(&env);
-
-    let arbitrator = Address::generate(&env);
-
-    // 25 bps = 0.25%
-    client.initialize(&platform_wallet, &admin, &arbitrator, &25, &None);
-    assert_eq!(client.calculate_fee_for_amount(&1000), 2); // floor(2.5) => 2
-    assert_eq!(client.calculate_fee_for_amount(&399), 0); // floor(0.9975) => 0
-    assert_eq!(client.calculate_fee_for_amount(&400), 1); // floor(1.0) => 1
-}
-
-#[test]
-fn test_integration_multiple_tokens_and_escrows() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, CraftNexusContract);
-    let client = CraftNexusContractClient::new(&env, &contract_id);
-
-    let buyer = Address::generate(&env);
-    let seller = Address::generate(&env);
-    let platform_wallet = Address::generate(&env);
-    let admin = Address::generate(&env);
-    let arbitrator = Address::generate(&env);
-
-    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None);
-
-    // Token A
-    let token_a_admin = Address::generate(&env);
-    let token_a_contract = env.register_stellar_asset_contract_v2(token_a_admin.clone());
-    let token_a_asset = token::StellarAssetClient::new(&env, &token_a_contract.address());
-    token_a_asset.mint(&buyer, &100_000_000);
-
-    // Token B
-    let token_b_admin = Address::generate(&env);
-    let token_b_contract = env.register_stellar_asset_contract_v2(token_b_admin.clone());
-    let token_b_asset = token::StellarAssetClient::new(&env, &token_b_contract.address());
-    token_b_asset.mint(&buyer, &200_000_000);
-
-    client.create_escrow(
-        &buyer,
-        &seller,
-        &token_a_contract.address(),
-        &10_000_000,
-        &1,
-        &None,
-    );
-    client.create_escrow(
-        &buyer,
-        &seller,
-        &token_b_contract.address(),
-        &10_000_000,
-        &2,
-        &None,
-    );
-
-    client.release_funds(&1);
-    client.release_funds(&2);
-
-    let token_a = token::Client::new(&env, &token_a_contract.address());
-    let token_b = token::Client::new(&env, &token_b_contract.address());
-
-    // Seller: 9.5M (token A) + 9.5M (token B)
-    assert_eq!(token_a.balance(&seller), 9_500_000);
-    assert_eq!(token_b.balance(&seller), 9_500_000);
-
-    // Platform: 500,000 (token A) + 500,000 (token B)
-    let fee_a = token_a.balance(&platform_wallet);
-    let fee_b = token_b.balance(&platform_wallet);
-    assert_eq!(fee_a, 500_000);
-    assert_eq!(fee_b, 500_000);
-    assert_eq!(
-        client.get_total_fees_for_token(&token_a_contract.address()),
-        500_000
-    );
-    assert_eq!(
-        client.get_total_fees_for_token(&token_b_contract.address()),
-        500_000
-    );
-    assert_eq!(client.get_total_fees_collected(), 1_000_000);
-}
-
-#[test]
-fn test_fuzz_fee_and_net_amount_invariants() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    // Deterministic fuzz-style sweep of amounts for arithmetic invariants.
-    for amount in 1i128..=1_000i128 {
-        let fee = client.calculate_fee_for_amount(&amount);
-        let net = amount - fee;
-
-        assert!(fee >= 0, "fee must be non-negative");
-        assert!(fee <= amount, "fee cannot exceed amount");
-        assert_eq!(fee + net, amount, "fee + net must equal amount");
+const ESCROW: Symbol = symbol_short!("ESCROW");
+const PLATFORM_FEE: Symbol = symbol_short!("PLAT_FEE");
+const PLATFORM_WALLET: Symbol = symbol_short!("PLAT_WAL");
+const ONBOARD_CALL_FAILED: Symbol = symbol_short!("OB_FAIL");
+
+const BASE58_BTC_CHARSET: [bool; 256] = {
+    let mut chars = [false; 256];
+
+    let mut i = b'1' as usize;
+    while i <= b'9' as usize {
+        chars[i] = true;
+        i += 1;
     }
-}
 
-#[test]
-fn test_stake_and_unstake_same_token_succeeds() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&seller, &20_000_000);
-    client.stake_tokens(&seller, &token_id, &5_000_000);
-    assert_eq!(client.get_stake(&seller), 5_000_000);
-
-    env.ledger().with_mut(|li| {
-        li.timestamp += DEFAULT_STAKE_COOLDOWN as u64 + 1;
-    });
-
-    client.unstake_tokens(&seller, &token_id);
-
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(client.get_stake(&seller), 0);
-    assert_eq!(token_client.balance(&seller), 20_000_000);
-}
-
-#[test]
-#[should_panic]
-fn test_unstake_rejects_different_token_than_original_stake() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    let other_token_admin = Address::generate(&env);
-    let other_token_contract = env.register_stellar_asset_contract_v2(other_token_admin.clone());
-    let other_token_admin_client =
-        token::StellarAssetClient::new(&env, &other_token_contract.address());
-
-    token_admin.mint(&seller, &10_000_000);
-    other_token_admin_client.mint(&seller, &10_000_000);
-    client.stake_tokens(&seller, &token_id, &5_000_000);
-
-    env.ledger().with_mut(|li| {
-        li.timestamp += DEFAULT_STAKE_COOLDOWN as u64 + 1;
-    });
-
-    client.unstake_tokens(&seller, &other_token_contract.address());
-}
-
-#[test]
-#[should_panic]
-fn test_stake_rejects_different_token_than_existing_stake() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    let other_token_admin = Address::generate(&env);
-    let other_token_contract = env.register_stellar_asset_contract_v2(other_token_admin.clone());
-    let other_token_admin_client =
-        token::StellarAssetClient::new(&env, &other_token_contract.address());
-
-    token_admin.mint(&seller, &10_000_000);
-    other_token_admin_client.mint(&seller, &10_000_000);
-
-    client.stake_tokens(&seller, &token_id, &5_000_000);
-
-    // Cross-token deposit must be rejected without mutating existing stake.
-    client.stake_tokens(&seller, &other_token_contract.address(), &1_000);
-}
-
-#[test]
-fn test_cross_token_stake_fails_without_mutation() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    let other_token_admin = Address::generate(&env);
-    let other_token_contract = env.register_stellar_asset_contract_v2(other_token_admin.clone());
-    let other_token_admin_client =
-        token::StellarAssetClient::new(&env, &other_token_contract.address());
-
-    token_admin.mint(&seller, &10_000_000);
-    other_token_admin_client.mint(&seller, &10_000_000);
-
-    client.stake_tokens(&seller, &token_id, &5_000_000);
-    assert_eq!(client.get_stake(&seller), 5_000_000);
-
-    let token_client = token::Client::new(&env, &token_id);
-    let other_token_client = token::Client::new(&env, &other_token_contract.address());
-
-    let seller_balance_before = token_client.balance(&seller);
-    let other_balance_before = other_token_client.balance(&seller);
-
-    let r = client.try_stake_tokens(&seller, &other_token_contract.address(), &1_000);
-    assert!(r.is_err() || r.unwrap().is_err());
-
-    assert_eq!(client.get_stake(&seller), 5_000_000);
-    assert_eq!(token_client.balance(&seller), seller_balance_before);
-    assert_eq!(other_token_client.balance(&seller), other_balance_before);
-}
-
-#[test]
-fn test_get_artisan_stake_data_exposes_token() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&seller, &10_000_000);
-    client.stake_tokens(&seller, &token_id, &5_000_000);
-
-    let stake_data = client.get_artisan_stake_data(&seller);
-    assert!(stake_data.is_some());
-    let data = stake_data.unwrap();
-    assert_eq!(data.amount, 5_000_000);
-    assert_eq!(data.token, token_id);
-}
-
-#[test]
-fn test_create_escrow_with_metadata_success_cid_v0() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let ipfs_hash = String::from_str(&env, "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9");
-    let metadata_hash = Bytes::from_array(
-        &env,
-        &[
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1,
-        ],
-    );
-
-    let escrow = client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &10_000_000,
-        &1,
-        &None,
-        &Some(ipfs_hash.clone()),
-        &Some(metadata_hash.clone()),
-        &None,
-    );
-    assert_eq!(escrow.id, 1);
-    assert_eq!(escrow.ipfs_hash, Some(ipfs_hash.clone()));
-    assert_eq!(escrow.metadata_hash, Some(metadata_hash.clone()));
-
-    let metadata = client.get_escrow_metadata(&1);
-    assert_eq!(metadata.ipfs_hash, Some(ipfs_hash));
-    assert_eq!(metadata.metadata_hash, Some(metadata_hash));
-}
-
-#[test]
-fn test_create_escrow_with_metadata_success_cid_v1() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let ipfs_hash = String::from_str(
-        &env,
-        "bafybeigdyrztf2v7y5h6l2k3g5zazf5s6ptm3h4m5k4e3v2w2x2y3z4a5q",
-    );
-
-    let escrow = client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &10_000_000,
-        &1,
-        &None,
-        &Some(ipfs_hash.clone()),
-        &None,
-        &None,
-    );
-
-    assert_eq!(escrow.ipfs_hash, Some(ipfs_hash));
-}
-
-#[test]
-#[should_panic]
-fn test_create_escrow_with_invalid_cid_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &10_000_000,
-        &1,
-        &None,
-        &Some(String::from_str(&env, "a".repeat(129).as_str())),
-        &None,
-        &None,
-    );
-}
-
-#[test]
-#[should_panic]
-fn test_create_escrow_with_invalid_metadata_hash_length_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let invalid_hash = Bytes::from_array(&env, &[7; 31]);
-
-    client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &10_000_000,
-        &1,
-        &None,
-        &None,
-        &Some(invalid_hash),
-        &None,
-    );
-}
-
-// ===== Service Agreement Hash Tests (#708) =====
-
-#[test]
-fn test_create_escrow_with_service_agreement_hash() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let service_agreement_hash = Bytes::from_array(
-        &env,
-        &[
-            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-            2, 2, 2,
-        ],
-    );
-
-    let escrow = client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &10_000_000,
-        &1,
-        &None,
-        &None,
-        &None,
-        &Some(service_agreement_hash.clone()),
-    );
-    assert_eq!(
-        escrow.service_agreement_hash,
-        Some(service_agreement_hash.clone())
-    );
-
-    let metadata = client.get_escrow_metadata(&1);
-    assert_eq!(
-        metadata.service_agreement_hash,
-        Some(service_agreement_hash)
-    );
-    assert_eq!(metadata.ipfs_hash, None);
-    assert_eq!(metadata.metadata_hash, None);
-}
-
-#[test]
-#[should_panic]
-fn test_create_escrow_with_invalid_service_agreement_hash_length() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let invalid_hash = Bytes::from_array(&env, &[9; 31]); // 31 bytes, not 32
-
-    client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &10_000_000,
-        &1,
-        &None,
-        &None,
-        &None,
-        &Some(invalid_hash),
-    );
-}
-
-#[test]
-fn test_create_escrow_with_all_metadata_fields() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let ipfs_hash = String::from_str(&env, "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9");
-    let metadata_hash = Bytes::from_array(
-        &env,
-        &[
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1,
-        ],
-    );
-    let service_agreement_hash = Bytes::from_array(
-        &env,
-        &[
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3,
-        ],
-    );
-
-    let escrow = client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &10_000_000,
-        &1,
-        &None,
-        &Some(ipfs_hash.clone()),
-        &Some(metadata_hash.clone()),
-        &Some(service_agreement_hash.clone()),
-    );
-    assert_eq!(escrow.ipfs_hash, Some(ipfs_hash.clone()));
-    assert_eq!(escrow.metadata_hash, Some(metadata_hash.clone()));
-    assert_eq!(
-        escrow.service_agreement_hash,
-        Some(service_agreement_hash.clone())
-    );
-
-    let metadata = client.get_escrow_metadata(&1);
-    assert_eq!(metadata.ipfs_hash, Some(ipfs_hash));
-    assert_eq!(metadata.metadata_hash, Some(metadata_hash));
-    assert_eq!(
-        metadata.service_agreement_hash,
-        Some(service_agreement_hash)
-    );
-}
-
-#[test]
-fn test_create_escrow_without_service_agreement_hash_defaults_none() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let escrow = client.create_escrow(&buyer, &seller, &token_id, &500, &1, &Some(3600));
-    assert_eq!(escrow.service_agreement_hash, None);
-
-    let metadata = client.get_escrow_metadata(&1);
-    assert_eq!(metadata.service_agreement_hash, None);
-}
-
-// ===== Search and Pagination Tests =====
-
-#[test]
-fn test_escrow_search_by_buyer() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &200_000_000);
-
-    // Create 3 escrows for the same buyer
-    client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &1, &None);
-    client.create_escrow(&buyer, &seller, &token_id, &20_000_000, &2, &None);
-    client.create_escrow(&buyer, &seller, &token_id, &30_000_000, &3, &None);
-
-    // Get all (limit 10)
-    let b1 = client.get_escrows_by_buyer(&buyer, &0, &10, &false);
-    assert_eq!(b1.len(), 3);
-    assert_eq!(b1.get_unchecked(0), 1);
-    assert_eq!(b1.get_unchecked(1), 2);
-    assert_eq!(b1.get_unchecked(2), 3);
-
-    // Pagination: page 0, limit 2
-    let b2 = client.get_escrows_by_buyer(&buyer, &0, &2, &false);
-    assert_eq!(b2.len(), 2);
-    assert_eq!(b2.get_unchecked(0), 1);
-    assert_eq!(b2.get_unchecked(1), 2);
-
-    // Pagination: page 1, limit 2
-    let b3 = client.get_escrows_by_buyer(&buyer, &1, &2, &false);
-    assert_eq!(b3.len(), 1);
-    assert_eq!(b3.get_unchecked(0), 3);
-
-    // Pagination: out of bounds
-    let b4 = client.get_escrows_by_buyer(&buyer, &2, &2, &false);
-    assert_eq!(b4.len(), 0);
-}
-
-#[test]
-fn test_escrow_search_by_seller() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &200_000_000);
-
-    // Create escrows for different sellers
-    let seller2 = Address::generate(&env);
-    client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &1, &None);
-    client.create_escrow(&buyer, &seller2, &token_id, &20_000_000, &2, &None);
-    client.create_escrow(&buyer, &seller, &token_id, &30_000_000, &3, &None);
-
-    // Check seller 1
-    let s1 = client.get_escrows_by_seller(&seller, &0, &10, &false);
-    assert_eq!(s1.len(), 2);
-    assert_eq!(s1.get_unchecked(0), 1);
-    assert_eq!(s1.get_unchecked(1), 3);
-
-    // Check seller 2
-    let s2 = client.get_escrows_by_seller(&seller2, &0, &10, &false);
-    assert_eq!(s2.len(), 1);
-    assert_eq!(s2.get_unchecked(0), 2);
-
-    // Check non-existent seller
-    let s3 = client.get_escrows_by_seller(&Address::generate(&env), &0, &10, &false);
-    assert_eq!(s3.len(), 0);
-}
-
-#[test]
-fn test_escrow_search_reverse_pagination() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &200_000_000);
-
-    client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &1, &None);
-    client.create_escrow(&buyer, &seller, &token_id, &20_000_000, &2, &None);
-    client.create_escrow(&buyer, &seller, &token_id, &30_000_000, &3, &None);
-
-    let buyer_page_1 = client.get_escrows_by_buyer(&buyer, &0, &2, &true);
-    assert_eq!(buyer_page_1.len(), 2);
-    assert_eq!(buyer_page_1.get_unchecked(0), 3);
-    assert_eq!(buyer_page_1.get_unchecked(1), 2);
-
-    let buyer_page_2 = client.get_escrows_by_buyer(&buyer, &1, &2, &true);
-    assert_eq!(buyer_page_2.len(), 1);
-    assert_eq!(buyer_page_2.get_unchecked(0), 1);
-
-    let seller_page = client.get_escrows_by_seller(&seller, &0, &3, &true);
-    assert_eq!(seller_page.len(), 3);
-    assert_eq!(seller_page.get_unchecked(0), 3);
-    assert_eq!(seller_page.get_unchecked(1), 2);
-    assert_eq!(seller_page.get_unchecked(2), 1);
-}
-
-#[test]
-fn test_min_escrow_amount_configuration() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_00000);
-    // Let's test set_min_escrow_amount.
-
-    // Set a small min amount
-    client.set_min_escrow_amount(&token_id, &1_00000); // 1 token
-
-    // Now 50_00000 should work
-    client.create_escrow(&buyer, &seller, &token_id, &50_00000, &1, &None);
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.version, CURRENT_ESCROW_VERSION);
-    assert_eq!(escrow.amount, 50_00000);
-}
-
-#[test]
-fn test_set_min_escrow_amount_emits_config_event() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
-
-    client.set_min_escrow_amount(&token_id, &1_00000);
-
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
-    let _config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
-    let last_event = events.last().unwrap();
-    let config_event: ConfigUpdatedEvent = last_event.2.try_into_val(&env).unwrap();
-
-    assert_eq!(
-        config_event.field_name,
-        Symbol::new(&env, "min_escrow_amount")
-    );
-    assert_eq!(config_event.old_value, ConfigValue::I128(0));
-    assert_eq!(config_event.new_value, ConfigValue::I128(100000));
-}
-
-#[test]
-#[should_panic]
-fn test_create_escrow_below_custom_minimum() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    client.set_min_escrow_amount(&token_id, &50_000_000); // 50 tokens
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &40_000_000, &1, &None); // Should panic
-}
-
-#[test]
-fn test_partial_refund_allows_dust_after_minimum_increase() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Creation-time minimum check: escrow is valid at creation.
-    client.set_min_escrow_amount(&token_id, &10_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000, &1, &None);
-
-    // Admin raises minimum above any potential remainder after split.
-    client.set_min_escrow_amount(&token_id, &100_000);
-
-    // Dispute + partial refund leaves only a dust remainder for seller.
-    client.dispute_escrow(&1, &Symbol::new(&env, "Dust_split"), &buyer);
-    client.propose_partial_refund(&1, &49_990, &buyer);
-    client.accept_partial_refund(&1);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Resolved);
-
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&buyer), 99_999_990);
-    assert_eq!(token_client.balance(&seller), 10);
-}
-
-#[test]
-#[should_panic]
-fn test_set_min_escrow_amount_unauthorized() {
-    let env = Env::default();
-    // Do NOT mock auth globally
-    let (client, _, _, token_id, _, _, _) = setup_test(&env, false);
-
-    // Attempt to set min amount without being the admin or providing auth
-    // The contract uses get_admin and admin.require_auth()
-    client.set_min_escrow_amount(&token_id, &100);
-}
-
-#[test]
-fn test_contract_address_admin_is_authorized() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let contract_id = env.register_contract(None, CraftNexusContract);
-    let client = CraftNexusContractClient::new(&env, &contract_id);
-
-    let platform_wallet = Address::generate(&env);
-    let admin_contract = env.register_contract(None, CraftNexusContract);
-    let arbitrator = Address::generate(&env);
-    let token_admin = Address::generate(&env);
-    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-
-    env.ledger().with_mut(|li| {
-        li.timestamp = 1711368000;
-    });
-
-    client.initialize(&platform_wallet, &admin_contract, &arbitrator, &500, &None);
-    client.set_min_escrow_amount(&token_contract.address(), &0);
-
-    let config = client.get_platform_config();
-    assert_eq!(config.admin, admin_contract);
-}
-
-#[test]
-fn test_get_escrow_migrates_legacy_state() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
-
-    let legacy = LegacyEscrow {
-        id: 77,
-        buyer: buyer.clone(),
-        seller: seller.clone(),
-        token: token_id,
-        amount: 123,
-        status: EscrowStatus::Active,
-        release_window: 50,
-        created_at: 10,
-        ipfs_hash: None,
-        metadata_hash: None,
-        dispute_reason: None,
-        dispute_initiated_at: None,
-    };
-
-    env.as_contract(&client.address, || {
-        env.storage().persistent().set(&(ESCROW, 77u32), &legacy);
-    });
-
-    let escrow = client.get_escrow(&77);
-    assert_eq!(escrow.version, CURRENT_ESCROW_VERSION);
-    assert_eq!(escrow.amount, 123);
-    assert_eq!(escrow.batch_id, None);
-
-    let stored: Escrow = env.as_contract(&client.address, || {
-        env.storage().persistent().get(&(ESCROW, 77u32)).unwrap()
-    });
-    assert_eq!(stored.version, CURRENT_ESCROW_VERSION);
-    assert_eq!(stored.batch_id, None);
-}
-
-#[test]
-#[ignore]
-fn test_contract_upgrade_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    // Initial version should be 1
-    assert_eq!(client.get_version(), 1);
-
-    // To test update_wasm, we need a WASM hash that "exists" in the test environment.
-    // We can upload a tiny dummy WASM to get a valid hash.
-    let dummy_wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
-    let new_wasm_hash = env.deployer().upload_contract_wasm(dummy_wasm);
-
-    client.execute_upgrade(&new_wasm_hash);
-
-    // Version should be 2
-    assert_eq!(client.get_version(), 2);
-}
-
-#[test]
-#[should_panic]
-fn test_contract_upgrade_unauthorized() {
-    let env = Env::default();
-    // Do NOT mock auth globally
-    let (client, _, _, _, _, _, _) = setup_test(&env, false);
-
-    let dummy_hash = BytesN::from_array(&env, &[1u8; 32]);
-
-    // Attempt upgrade without admin auth
-    client.execute_upgrade(&dummy_hash);
-}
-
-#[test]
-fn test_upgrade_requires_compatibility_manifest() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
-    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
-
-    client.propose_upgrade_wasm(&admin, &wasm_hash);
-    env.ledger().with_mut(|ledger| {
-        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
-    });
-
-    let result = client.try_execute_upgrade(&wasm_hash);
-    assert!(matches!(result, Err(Ok(Error::UpgradeCompatibilityMissing))));
-}
-
-#[test]
-fn test_upgrade_manifest_is_recorded_and_consumed() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
-    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
-    let commitment = client.get_upgrade_state_commitment();
-    let nonzero = BytesN::from_array(&env, &[1u8; 32]);
-    let manifest = UpgradeCompatibilityManifest {
-        source_version: 1,
-        target_version: 2,
-        state_commitment: commitment.clone(),
-        interface_commitment: nonzero.clone(),
-        authorization_commitment: nonzero.clone(),
-        preconditions_commitment: nonzero.clone(),
-        postconditions_commitment: nonzero.clone(),
-        rollback_commitment: nonzero.clone(),
-        migration_checkpoint: nonzero,
-        migration_complete: true,
-        manual_records: 0,
-    };
-
-    client.propose_upgrade_wasm(&admin, &wasm_hash);
-    client.submit_compat_manifest(&wasm_hash, &manifest);
-    assert_eq!(
-        client
-            .get_upgrade_compat_manifest(&wasm_hash)
-            .unwrap(),
-        manifest
-    );
-
-    env.ledger().with_mut(|ledger| {
-        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
-    });
-    client.execute_upgrade(&wasm_hash);
-
-    let record = client
-        .get_upgrade_compat_history()
-        .last()
-        .unwrap();
-    assert_eq!(record.from_version, 1);
-    assert_eq!(record.to_version, 2);
-    assert_eq!(record.state_commitment, commitment);
-    assert!(client
-        .get_upgrade_compat_manifest(&wasm_hash)
-        .is_none());
-}
-
-#[test]
-fn test_get_version_initially() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-    assert_eq!(client.get_version(), 1);
-}
-
-#[test]
-fn test_execute_upgrade_rejects_legacy_storage_layout_without_migration() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .remove(&DataKey::StorageLayoutVersion);
-    });
-
-    let hash = BytesN::from_array(&env, &[9u8; 32]);
-    let result = client.try_execute_upgrade(&hash);
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), Ok(Error::StorageLayoutMismatch));
-}
-
-#[test]
-fn test_migrate_storage_layout_marks_current_layout_and_preserves_state() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .remove(&DataKey::StorageLayoutVersion);
-    });
-
-    let migrated = client.migrate_storage_layout();
-    assert_eq!(migrated, 1);
-    assert_eq!(
-        client.get_storage_layout_version(),
-        CURRENT_STORAGE_LAYOUT_VERSION
-    );
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.buyer, buyer);
-    assert_eq!(escrow.amount, 50_000_000);
-    assert_eq!(escrow.status, EscrowStatus::Active);
-}
-
-// ===== Multi-sig / timelocked admin action tests =====
-
-#[test]
-fn test_pending_admin_action_requires_approvals_and_timelock() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-    signers.push_back(signer2.clone());
-    client.set_admin_action_signers(&signers);
-    client.set_admin_action_threshold(&2);
-    client.set_admin_action_timelock_delay(&60);
-
-    let action = client.propose_admin_action(&admin, &AdminActionKind::PausePlatform(true));
-    assert_eq!(action.threshold, 2);
-    assert_eq!(action.approvals.len(), 1);
-    assert!(!client.is_paused());
-
-    let result = client.try_execute_admin_action(&action.id);
-    assert!(matches!(result, Err(Ok(Error::AdminActionNeedsApprovals))));
-
-    let second = client.approve_admin_action(&action.id, &signer2);
-    assert_eq!(second.approvals.len(), 2);
-
-    let result = client.try_execute_admin_action(&action.id);
-    assert!(matches!(result, Err(Ok(Error::AdminActionTimelockActive))));
-
-    env.ledger().with_mut(|li| {
-        li.timestamp += 61;
-    });
-
-    client.execute_admin_action(&action.id);
-    assert!(client.is_paused());
-}
-
-#[test]
-fn test_pending_admin_action_is_cancelable() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    client.set_admin_action_threshold(&1);
-    client.set_admin_action_timelock_delay(&60);
-
-    let action = client.propose_admin_action(&admin, &AdminActionKind::PausePlatform(true));
-    let cancelled = client.cancel_admin_action(&action.id);
-    assert!(cancelled.cancelled);
-
-    let pending = client.get_pending_admin_actions();
-    assert!(pending.is_empty());
-
-    let result = client.try_execute_admin_action(&action.id);
-    assert!(matches!(result, Err(Ok(Error::AdminActionTerminal))));
-}
-
-#[test]
-fn test_upgrade_default_threshold_is_one() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-    assert_eq!(client.get_upgrade_threshold(), 1);
-}
-
-#[test]
-fn test_propose_upgrade_single_admin_succeeds() {
-    // With threshold=1 and no explicit signers, the admin alone can propose.
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let hash = BytesN::from_array(&env, &[2u8; 32]);
-    client.propose_upgrade_wasm(&admin, &hash);
-
-    // Proposal should now be committed.
-    let proposal = client.get_upgrade_proposal().expect("proposal missing");
-    assert_eq!(proposal.wasm_hash, hash);
-    assert_eq!(proposal.proposed_by, admin);
-}
-
-#[test]
-#[should_panic]
-fn test_propose_upgrade_non_signer_rejected() {
-    // A random address that is not in the signers list must be rejected.
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let stranger = Address::generate(&env);
-    let hash = BytesN::from_array(&env, &[3u8; 32]);
-    // This should panic because stranger is not an authorized signer.
-    client.propose_upgrade_wasm(&stranger, &hash);
-}
-
-#[test]
-fn test_multisig_threshold_two_of_two() {
-    // Set threshold=2 and two explicit signers. Verify the proposal is only
-    // committed after both have approved.
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-    signers.push_back(signer2.clone());
-
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&2);
-
-    let hash = BytesN::from_array(&env, &[4u8; 32]);
-
-    // First approval — proposal must NOT be committed yet.
-    client.propose_upgrade_wasm(&admin, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_none(),
-        "proposal committed too early"
-    );
-    // Nonce is 0 on the first round (no cancellations yet).
-    assert_eq!(client.get_upgrade_approvals(&0).len(), 1);
-
-    // Second approval — threshold reached, proposal committed.
-    client.propose_upgrade_wasm(&signer2, &hash);
-    let proposal = client.get_upgrade_proposal().expect("proposal missing");
-    assert_eq!(proposal.wasm_hash, hash);
-}
-
-#[test]
-fn test_duplicate_approval_returns_already_approved() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-    signers.push_back(signer2.clone());
-
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&2);
-
-    let hash = BytesN::from_array(&env, &[5u8; 32]);
-
-    client.propose_upgrade_wasm(&admin, &hash);
-    let result = client.try_propose_upgrade_wasm(&admin, &hash);
-    assert!(result.is_err());
-    assert!(result.is_err());
-
-    // Nonce is 0; admin approved once; signer2 has not approved yet.
-    assert_eq!(client.get_upgrade_approvals(&0).len(), 1);
-    assert!(client.get_upgrade_proposal().is_none());
-}
-
-#[test]
-fn test_unique_signers_only_reach_threshold() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let signer3 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-    signers.push_back(signer2.clone());
-    signers.push_back(signer3.clone());
-
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&2);
-
-    let hash = BytesN::from_array(&env, &[7u8; 32]);
-
-    client.propose_upgrade_wasm(&admin, &hash);
-    assert!(client.get_upgrade_proposal().is_none());
-
-    client.propose_upgrade_wasm(&signer2, &hash);
-    let proposal = client.get_upgrade_proposal().expect("proposal missing");
-    assert_eq!(proposal.wasm_hash, hash);
-    assert_eq!(proposal.proposed_by, signer2);
-}
-
-#[test]
-fn test_set_upgrade_threshold_zero_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-    // threshold=0 must be rejected.
-    let result = client.try_set_upgrade_threshold(&0);
-    assert!(result.is_err());
-}
-
-/// #1062 — the review window is the whole point of the timelock, so it must
-/// not be reducible to near-zero. Both the direct setter and the values below
-/// `MIN_WASM_UPGRADE_COOLDOWN` must be rejected.
-#[test]
-fn test_set_wasm_upgrade_cooldown_below_minimum_fails() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let result = client.try_set_wasm_upgrade_cooldown(&0);
-    assert!(result.is_err());
-
-    let result = client.try_set_wasm_upgrade_cooldown(&(24 * 60 * 60 - 1));
-    assert!(result.is_err());
-
-    // The floor itself is accepted.
-    let result = client.try_set_wasm_upgrade_cooldown(&(24 * 60 * 60));
-    assert!(result.is_ok());
-}
-
-/// #1062 — a proposal's `upgrade_at` is fixed at commit time; executing before
-/// that timestamp is rejected and the approved hash cannot be swapped out from
-/// under the pending timelock without going through cancel + a fresh proposal.
-#[test]
-fn test_execute_upgrade_enforces_full_timelock_window() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let hash = BytesN::from_array(&env, &[7u8; 32]);
-    client.propose_upgrade_wasm(&admin, &hash);
-    let proposal = client.get_upgrade_proposal().expect("proposal missing");
-
-    // Executing right away, or at any point before upgrade_at, must fail.
-    env.ledger().with_mut(|li| {
-        li.timestamp = proposal.upgrade_at - 1;
-    });
-    let result = client.try_execute_upgrade(&hash);
-    assert!(result.is_err());
-
-    // A second proposal cannot be raised to replace the pending hash while
-    // the timelock is active.
-    let other_hash = BytesN::from_array(&env, &[8u8; 32]);
-    let result = client.try_propose_upgrade_wasm(&admin, &other_hash);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_set_upgrade_signers_empty_resets_to_admin() {
-    // Clearing the signers list makes the admin the sole default signer.
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(signer2.clone());
-    client.set_upgrade_signers(&signers);
-
-    // Reset back to empty (admin-default).
-    let empty: Vec<Address> = Vec::new(&env);
-    client.set_upgrade_signers(&empty);
-
-    // Admin can now propose directly.
-    let hash = BytesN::from_array(&env, &[6u8; 32]);
-    client.propose_upgrade_wasm(&admin, &hash);
-    assert!(client.get_upgrade_proposal().is_some());
-}
-
-// ============== Upgrade Governance Security Tests ==============
-
-/// AC2: Signer rotation after first approval cannot inflate the approval count.
-/// After the first signer approves (locking the snapshot), the admin adds a
-/// new signer and changes the threshold.  The new signer should be treated as
-/// part of the NEW round's signer set, but the snapshot for the CURRENT round
-/// is already fixed.  The current round must NOT count the new signer.
-#[test]
-fn test_signer_rotation_cannot_inflate_approval_count() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let evil_signer = Address::generate(&env);
-
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-    signers.push_back(signer2.clone());
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&2);
-
-    let hash = BytesN::from_array(&env, &[10u8; 32]);
-
-    // Round opens: admin approves (snapshot captured: {admin, signer2}, threshold=2).
-    client.propose_upgrade_wasm(&admin, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_none(),
-        "proposal should not be committed yet"
-    );
-
-    // Admin rotates signers to include evil_signer AFTER the round has opened.
-    let mut new_signers = Vec::new(&env);
-    new_signers.push_back(admin.clone());
-    new_signers.push_back(evil_signer.clone());
-    client.set_upgrade_signers(&new_signers);
-    // Admin also tries to lower threshold to 1 after the round is open.
-    client.set_upgrade_threshold(&1);
-
-    // evil_signer was NOT in the snapshot — must be rejected.
-    let result = client.try_propose_upgrade_wasm(&evil_signer, &hash);
-    assert!(
-        result.is_err(),
-        "evil_signer added after round open must not be able to approve"
-    );
-
-    // Proposal still not committed — the threshold snapshot (2) was not met.
-    assert!(
-        client.get_upgrade_proposal().is_none(),
-        "proposal must not be committed despite threshold change"
-    );
-
-    // Only the original signer2 (from the snapshot) can complete this round.
-    client.propose_upgrade_wasm(&signer2, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_some(),
-        "proposal must commit after 2 of 2 original signers"
-    );
-}
-
-// ===== Issue #95 — multi-sig threshold boundary scenarios =====
-
-/// Threshold of 1 with a single, explicitly configured signer (not the
-/// admin-fallback default). A lone signer's approval must commit immediately.
-#[test]
-fn test_multisig_threshold_one_explicit_signer_succeeds() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let sole_signer = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(sole_signer.clone());
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&1);
-
-    let hash = BytesN::from_array(&env, &[20u8; 32]);
-
-    // The admin itself is no longer a signer once an explicit list is set,
-    // so it must be rejected.
-    let admin_result = client.try_propose_upgrade_wasm(&admin, &hash);
-    assert!(
-        admin_result.is_err(),
-        "admin is not in the explicit signer list"
-    );
-
-    client.propose_upgrade_wasm(&sole_signer, &hash);
-    let proposal = client.get_upgrade_proposal().expect("proposal missing");
-    assert_eq!(proposal.wasm_hash, hash);
-    assert_eq!(proposal.proposed_by, sole_signer);
-}
-
-/// Threshold exactly equal to the number of configured signers (3-of-3):
-/// every single signer must approve before the proposal commits.
-#[test]
-fn test_multisig_threshold_equals_signer_count_three_of_three() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let signer3 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-    signers.push_back(signer2.clone());
-    signers.push_back(signer3.clone());
-
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&3);
-
-    let hash = BytesN::from_array(&env, &[21u8; 32]);
-
-    client.propose_upgrade_wasm(&admin, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_none(),
-        "1 of 3 must not commit"
-    );
-
-    client.propose_upgrade_wasm(&signer2, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_none(),
-        "2 of 3 must not commit"
-    );
-
-    client.propose_upgrade_wasm(&signer3, &hash);
-    let proposal = client.get_upgrade_proposal().expect("proposal missing");
-    assert_eq!(proposal.wasm_hash, hash);
-    assert_eq!(proposal.proposed_by, signer3);
-}
-
-/// Removing a signer from the live `UpgradeSigners` list mid-round must not
-/// invalidate that signer's already-recorded approval, since the round's
-/// signer set was snapshotted when the round opened (complements the
-/// signer-addition case in `test_signer_rotation_cannot_inflate_approval_count`).
-#[test]
-fn test_signer_removed_mid_round_does_not_invalidate_recorded_approval() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let signer3 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-    signers.push_back(signer2.clone());
-    signers.push_back(signer3.clone());
-
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&3);
-
-    let hash = BytesN::from_array(&env, &[22u8; 32]);
-
-    // Round opens: snapshot captures {admin, signer2, signer3}, threshold=3.
-    client.propose_upgrade_wasm(&admin, &hash);
-
-    // signer3 is removed from the live signers list after the round opened.
-    let mut reduced_signers = Vec::new(&env);
-    reduced_signers.push_back(admin.clone());
-    reduced_signers.push_back(signer2.clone());
-    client.set_upgrade_signers(&reduced_signers);
-
-    // signer2 (still live) approves.
-    client.propose_upgrade_wasm(&signer2, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_none(),
-        "2 of 3 snapshotted signers must not commit"
-    );
-
-    // signer3, though removed from the live list, was part of this round's
-    // snapshot and must still be able to complete it.
-    client.propose_upgrade_wasm(&signer3, &hash);
-    let proposal = client.get_upgrade_proposal().expect("proposal missing");
-    assert_eq!(proposal.wasm_hash, hash);
-    assert_eq!(proposal.proposed_by, signer3);
-}
-
-/// A committed proposal that is never executed before its operators move on
-/// ("expires" in practice) must be cancellable and, after the
-/// cancel-repropose cooldown elapses, replaceable with a new proposal.
-#[test]
-fn test_stale_upgrade_proposal_cancelled_and_reproposed() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let stale_hash = BytesN::from_array(&env, &[23u8; 32]);
-    client.propose_upgrade_wasm(&admin, &stale_hash);
-    let stale_proposal = client.get_upgrade_proposal().expect("proposal missing");
-    assert_eq!(stale_proposal.wasm_hash, stale_hash);
-
-    // Let a long time pass without executing — the proposal goes stale but
-    // remains pending since there is no automatic expiry, only the cooldown
-    // gate on execute_upgrade.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 30 * 24 * 60 * 60; // 30 days
-    });
-    assert!(
-        client.get_upgrade_proposal().is_some(),
-        "no automatic expiry — proposal still pending"
-    );
-
-    // The stale proposal is cancelled instead of executed.
-    client.cancel_upgrade_wasm();
-    assert!(client.get_upgrade_proposal().is_none());
-
-    // Advance past CANCEL_REPROPOSE_COOLDOWN (7 days + 1s) so a new proposal
-    // is accepted.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 7 * 24 * 60 * 60 + 1;
-    });
-
-    let new_hash = BytesN::from_array(&env, &[24u8; 32]);
-    client.propose_upgrade_wasm(&admin, &new_hash);
-    let proposal = client.get_upgrade_proposal().expect("proposal missing");
-    assert_eq!(proposal.wasm_hash, new_hash);
-}
-
-/// `get_upgrade_history` must append exactly one record per successful
-/// `execute_upgrade`, preserving from/to version pairs across multiple
-/// upgrades.
-#[test]
-fn test_get_upgrade_history_records_each_successful_upgrade() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    assert_eq!(client.get_upgrade_history().len(), 0);
-
-    // First upgrade: version 1 -> 2.
-    let wasm_one = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
-    let hash_one = env.deployer().upload_contract_wasm(wasm_one);
-
-    client.propose_upgrade_wasm(&admin, &hash_one);
-    env.ledger().with_mut(|li| {
-        li.timestamp += 7 * 24 * 60 * 60 + 1;
-    });
-    client.execute_upgrade(&hash_one);
-    assert_eq!(client.get_version(), 2);
-
-    let history_after_first = client.get_upgrade_history();
-    assert_eq!(history_after_first.len(), 1);
-    let first_record = history_after_first.get(0).unwrap();
-    assert_eq!(first_record.from_version, 1);
-    assert_eq!(first_record.to_version, 2);
-    assert_eq!(first_record.wasm_hash, hash_one);
-    assert_eq!(first_record.admin, admin);
-
-    // Second upgrade: version 2 -> 3. A distinct (but still structurally
-    // valid — magic + version + one empty custom section) module so its
-    // hash differs from the first.
-    let wasm_two = Bytes::from_array(
-        &env,
-        &[
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
-        ],
-    );
-    let hash_two = env.deployer().upload_contract_wasm(wasm_two);
-
-    client.propose_upgrade_wasm(&admin, &hash_two);
-    env.ledger().with_mut(|li| {
-        li.timestamp += 7 * 24 * 60 * 60 + 1;
-    });
-    client.execute_upgrade(&hash_two);
-    assert_eq!(client.get_version(), 3);
-
-    let history_after_second = client.get_upgrade_history();
-    assert_eq!(history_after_second.len(), 2);
-    let second_record = history_after_second.get(1).unwrap();
-    assert_eq!(second_record.from_version, 2);
-    assert_eq!(second_record.to_version, 3);
-    assert_eq!(second_record.wasm_hash, hash_two);
-}
-
-/// AC3: A pending proposal remains immutable after threshold approval is reached.
-/// After the proposal is committed via propose_upgrade_wasm, any call to
-/// propose_upgrade_wasm for the same hash must fail with UpgradeProposalExists.
-#[test]
-fn test_committed_proposal_is_immutable() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let hash = BytesN::from_array(&env, &[11u8; 32]);
-
-    // threshold=1 (default), admin is sole signer — one call commits.
-    client.propose_upgrade_wasm(&admin, &hash);
-    assert!(client.get_upgrade_proposal().is_some());
-
-    // Any subsequent propose call must fail with UpgradeProposalExists.
-    let result = client.try_propose_upgrade_wasm(&admin, &hash);
-    assert!(result.is_err());
-}
-
-/// AC4: Cancellation clears stale approvals — after cancel, the nonce is
-/// incremented and any old partial approvals are unreachable.  Re-proposing
-/// after the cooldown starts a fresh round that requires new approvals.
+    i = b'A' as usize;
+    while i <= b'H' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'J' as usize;
+    while i <= b'N' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'P' as usize;
+    while i <= b'Z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'a' as usize;
+    while i <= b'k' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'm' as usize;
+    while i <= b'z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    chars
+};
+const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
+
+/// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
+const TTL_THRESHOLD: u32 = 10_000;
+/// Lower TTL threshold used for hot index reads to reduce the cost of frequent
+/// TTL refresh calls (Issue #533).
+const READ_TTL_THRESHOLD: u32 = 1_000;
+/// Standard TTL extension for persistent storage (approx 30 days)
+const TTL_EXTENSION: u32 = 518_400;
+
+// Default configuration constants (can be overridden via PlatformConfig)
+// Re-exported from the centralised time_policy module for single source of truth.
+/// Default grace period for WASM upgrades (7 days in seconds)
+const DEFAULT_WASM_UPGRADE_COOLDOWN: u32 = time_policy::WASM_UPGRADE_COOLDOWN as u32;
+/// Minimum enforceable WASM upgrade cooldown (1 day in seconds) (#1062).
 ///
-/// Flow:
-/// 1. Round 0: admin sole-approves (threshold=1) → proposal committed.
-/// 2. Cancel → nonce bumped to 1, old state cleared.
-/// 3. Advance past cooldown.
-/// 4. Round 1: admin approves again → fresh state, nonce=1.
-/// 5. Old approvals for nonce 0 are empty; new round has exactly 1 approval.
-#[test]
-fn test_cancel_clears_stale_approvals_and_increments_nonce() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+/// `execute_upgrade` correctly rejects execution before `upgrade_at`, but that
+/// review window is only meaningful if it cannot be trivially shortened. Without
+/// a floor here, a single admin call to `set_wasm_upgrade_cooldown(0)` right
+/// before proposing an upgrade would let it execute immediately, defeating the
+/// whole point of the timelock.
+const MIN_WASM_UPGRADE_COOLDOWN: u32 = 24 * 60 * 60;
+/// Minimum time (seconds) that must elapse after a cancel_upgrade_wasm call
+/// before propose_upgrade_wasm is accepted again (Issue #618).
+/// Prevents the cancel-and-repropose pattern that resets the review window.
+const CANCEL_REPROPOSE_COOLDOWN: u64 = time_policy::CANCEL_REPROPOSE_COOLDOWN;
 
-    // Threshold=1 so a single admin approval commits the proposal immediately.
-    let hash_a = BytesN::from_array(&env, &[12u8; 32]);
-    let hash_b = BytesN::from_array(&env, &[13u8; 32]);
+/// Default maximum duration a dispute can remain open before it can be force-resolved (30 days in seconds)
+const DEFAULT_MAX_DISPUTE_DURATION: u32 = time_policy::MAX_DISPUTE_DURATION as u32;
 
-    // Round 0, nonce=0: admin approves hash_a → commits.
-    assert_eq!(client.get_upgrade_proposal_nonce(), 0, "nonce starts at 0");
-    client.propose_upgrade_wasm(&admin, &hash_a);
-    assert!(
-        client.get_upgrade_proposal().is_some(),
-        "proposal must commit at threshold=1"
+/// Default cooldown period after staking before tokens can be unstaked (7 days in seconds)
+const DEFAULT_STAKE_COOLDOWN: u32 = time_policy::STAKE_COOLDOWN as u32;
+
+/// Default minimum release window to prevent "flash" auto-releases (1 day in seconds)
+const DEFAULT_MIN_RELEASE_WINDOW: u32 = time_policy::MIN_RELEASE_WINDOW as u32;
+/// Absolute safety ceiling for admin-configurable max release window (365 days).
+const ABSOLUTE_MAX_RELEASE_WINDOW: u32 = time_policy::ABSOLUTE_MAX_RELEASE_WINDOW as u32;
+
+/// Default evidence expiry / retention window (7 days in seconds) (#927)
+const DEFAULT_EVIDENCE_EXPIRY_WINDOW: u64 = time_policy::EVIDENCE_EXPIRY_WINDOW;
+/// Default challenge period window before a dispute can be resolved (1 day in seconds) (#942)
+const DEFAULT_EVIDENCE_CHALLENGE_WINDOW: u32 = time_policy::EVIDENCE_CHALLENGE_WINDOW as u32;
+/// Default dispute escalation window (3 days in seconds) (#941)
+const DEFAULT_DISPUTE_ESCALATION_WINDOW: u32 = time_policy::DISPUTE_ESCALATION_WINDOW as u32;
+/// Default rate limit max calls per window (#943)
+const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 5;
+/// Default rate limit window (1 hour in seconds) (#943)
+const DEFAULT_RATE_LIMIT_WINDOW: u32 = time_policy::RATE_LIMIT_WINDOW as u32;
+
+/// Maximum platform fee in basis points (10000 = 100%)
+const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
+const MAX_TOTAL_RELEASE_WINDOW: u32 = time_policy::MAX_TOTAL_RELEASE_WINDOW as u32;
+const CURRENT_ESCROW_VERSION: u32 = 4;
+/// Explicit storage layout version for persisted contract state.
+///
+/// New deployments initialize this to `CURRENT_STORAGE_LAYOUT_VERSION`; legacy
+/// deployments without the key must run `migrate_storage_layout` before any
+/// WASM upgrade can be executed.
+const CURRENT_STORAGE_LAYOUT_VERSION: u32 = 1;
+/// Maximum number of escrows per batch operation (Issue #111)
+// Conservative batch size to avoid exceeding instruction/read-write limits
+// observed on Soroban testnets. Reduced from 100 to 20 (Issue #198).
+const MAX_BATCH_SIZE: u32 = 20;
+/// Maximum number of escrows a scheduled continuation may process.
+const MAX_SCHEDULED_BATCH_WORK: u32 = 5;
+const MAX_PAGE_SIZE: u32 = 100;
+/// Timeout for unfunded escrows before they can be cancelled (24 hours) (#213)
+const UNFUNDED_CANCEL_TIMEOUT: u64 = time_policy::UNFUNDED_CANCEL_TIMEOUT;
+/// Hard ceiling for `NextRecurringEscrowId` (Issue #233).
+///
+/// `u64::MAX` is reserved as a sentinel so the allocator can detect an
+/// exhausted ID space without wrapping. At the realistic peak rate of
+/// one new recurring escrow per ledger this cap is far beyond any
+/// practical deployment lifetime, but the explicit bound lets us fail
+/// fast with `Error::RecurringEscrowIdExhausted` instead of silently
+/// colliding with an existing entry.
+const MAX_RECURRING_ESCROW_ID: u64 = u64::MAX - 1;
+/// Deterministic fee policy version. Bump when fee allocation formulas change.
+const FEE_POLICY_VERSION: u32 = 1;
+/// Maximum number of upgrade records retained in `UpgradeHistory`. Older
+/// records are dropped FIFO once the cap is reached. Sized so a contract
+/// upgraded twice a year for ~16 years still has full visibility.
+const MAX_UPGRADE_HISTORY: u32 = 32;
+
+/// Symbol topics emitted alongside `UpgradeProposalEvent`.
+const UPGRADE_PROPOSED: Symbol = symbol_short!("UPG_PROP");
+const UPGRADE_CANCELLED: Symbol = symbol_short!("UPG_CANC");
+const UPGRADE_EXECUTED: Symbol = symbol_short!("UPG_EXEC");
+/// Maximum number of stake history entries per artisan (bounded queue to prevent storage bloat) (#237)
+const MAX_STAKE_HISTORY_SIZE: u32 = 100;
+/// Threshold at which to trigger automatic pruning of old stake history entries (#237)
+const STAKE_HISTORY_PRUNE_THRESHOLD: u32 = 80;
+/// Maximum number of stake deposits per artisan queue (bounded to prevent storage bloat)
+const MAX_STAKE_QUEUE_SIZE: u32 = 50;
+/// Threshold at which to trigger automatic pruning of matured stake deposits
+const STAKE_QUEUE_PRUNE_THRESHOLD: u32 = 40;
+/// Time lock period before admin recovery is allowed (7 days) (#240)
+const ADMIN_RECOVERY_DELAY: u64 = time_policy::ADMIN_RECOVERY_DELAY;
+/// Minimum allowed admin recovery cooldown. Deploys attempting to set a
+/// shorter window (including zero) will be rejected during recovery.
+const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = time_policy::MIN_ADMIN_RECOVERY_COOLDOWN;
+/// Default timelock delay for pending critical admin actions (24 hours).
+const DEFAULT_ADMIN_ACTION_TIMELOCK_DELAY: u64 = time_policy::ADMIN_ACTION_TIMELOCK_DELAY;
+
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum DisputeTransition {
+    Initiate,
+    SubmitEvidence,
+    Escalate,
+    ProposeRefund,
+    AcceptRefund(Address), // address of the proposer
+    CancelRefund(Address), // address of the proposer
+    ResolveArbitrated,
+}
+
+/// The kind of critical admin action that requires multi-sig approval
+/// and timelock enforcement.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum AdminActionKind {
+    PausePlatform(bool),
+    SetPlatformFee(u32),
+    SetPlatformWallet(Address),
+    SetWasmUpgradeCooldown(u32),
+    SetMinStakeRequired(i128),
+    SweepUnallocatedFunds(Address, Address),
+    ExecuteUpgrade(BytesN<32>),
+    SetMaxDisputeDuration(u32),
+    SetStakeCooldown(u32),
+    SetArtisanFeeTier(Address, u32),
+    SetModerator(Address),
+    SetMinEscrowAmount(Address, i128),
+    SetMaxReleaseWindow(u32),
+    SetMinReleaseWindow(u32),
+    SetOnboardingContract(Address),
+    SetExpiredDisputePolicy(ExpiredDisputeFeePolicy),
+    ApplyReconciliationRepair(u64),
+}
+
+/// A pending critical admin action proposal that requires multi-sig
+/// approvals and a timelock before execution.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct AdminActionProposal {
+    pub id: u64,
+    pub kind: AdminActionKind,
+    pub proposer: Address,
+    pub approvals: Vec<Address>,
+    pub threshold: u32,
+    pub signers: Vec<Address>,
+    pub created_at: u64,
+    pub ready_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+}
+
+/// Storage keys for the admin action proposal system.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum AdminActionDataKey {
+    NextAdminActionId,
+    AdminAction(u64),
+    AdminActionSigners,
+    AdminActionThreshold,
+    AdminActionTimelockDelay,
+}
+
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum DataKey {
+    Escrow(u32),
+    /// DEPRECATED: Legacy vector-based storage. Kept for backward compatibility.
+    /// New implementations should use BuyerEscrowIndexed instead.
+    BuyerEscrows(Address),
+    /// DEPRECATED: Legacy vector-based storage. Kept for backward compatibility.
+    /// New implementations should use SellerEscrowIndexed instead.
+    SellerEscrows(Address),
+    MinEscrowAmount(Address),
+    TotalFees(Address),
+    FeeTokenIndex,
+    FeeTokenConfig(Address),
+    ContractVersion,
+    /// Platform configuration storage key
+    PlatformConfig,
+    /// Explicit storage layout version for persisted state.
+    StorageLayoutVersion,
+    /// Custom fee tier for an artisan (basis points)
+    ArtisanFeeTier(Address),
+    /// Staked token amount and asset for an artisan
+    ArtisanStake(Address),
+    /// DEPRECATED legacy storage: Token address backing an artisan's staked balance.
+    ///
+    /// Replaced by [`ArtisanStake::token`] in [`ArtisanStakeData`]. Kept for
+    /// lazy migration of pre-v2 stake records during contract upgrades.
+    ArtisanStakeToken(Address),
+    StakeCooldownEnd(Address),
+    /// DEPRECATED single-cooldown timestamp for an artisan.
+    ///
+    /// Active stake/unstake logic uses [`DataKey::ArtisanStakeQueue`]; this
+    /// key is **never read** by any code path in the live contract and
+    /// cannot influence cooldown decisions. It is updated alongside the
+    /// queue (set to the latest `cooldown_end`) purely so older read-only
+    /// clients still see a meaningful value. Once a queue is fully
+    /// drained the key is removed in `unstake_tokens`.
+    ///
+    ///
+    /// Per-deposit stake queue for an artisan. Each entry represents an
+    /// individual deposit and its cooldown end timestamp. This allows
+    /// accurate tracking of staking timeframes when multiple deposits
+    /// are made at different times.
+    ArtisanStakeQueue(Address),
+    /// Count of entries in the artisan stake queue (for bounds checking)
+    ArtisanStakeQueueCount(Address),
+    /// Indexed storage of stake deposits (Address, index) -> StakeDeposit
+    ArtisanStakeQueueIndexed(Address, u32),
+    /// Partial refund proposal for a disputed order
+    PartialRefundProposal(u32),
+    /// Terminal settlement receipt; presence means the dispute is finalized.
+    SettlementReceipt(u32),
+    /// Blacklisted arbitrator address
+    ArbitratorBlacklist(Address),
+    /// Count of currently open disputes
+    ActiveDisputeCount,
+    /// Cumulative funded escrow volume
+    TotalVolume,
+    /// Re-entrancy guard key
+    ReentryGuard,
+    /// Pending admin address for two-step transfer
+    PendingAdmin,
+    /// Proposal for contract WASM upgrade
+    WasmUpgradeProposal,
+    /// Configurable maximum release window (in seconds)
+    MaxReleaseWindow,
+    /// Address of the deployed onboarding contract for cross-contract reputation calls
+    OnboardingContractAddress,
+    /// DEPRECATED legacy storage: Map of whitelisted token addresses (Address -> bool).
+    /// New code stores each token as an individual key-value pair.
+    WhitelistedTokens,
+    /// Individual whitelisted token entry (Address -> bool)
+    WhitelistedTokenIndexed(Address),
+    /// Count of whitelisted tokens for efficient enumeration.
+    WhitelistedTokenCount,
+    /// DEPRECATED: Legacy monolithic Vec of all escrow order IDs.
+    /// New writes use [`DataKey::GlobalEscrowIdIndexed`] (#515). Kept for
+    /// lazy migration on the next index update or paginated read.
+    AllEscrowIds,
+    /// Total count of escrows ever created; O(1) length for indexed enumeration
+    EscrowCount,
+    /// Indexed global escrow order ID by creation sequence (#515).
+    /// Each entry stores one `u32` order ID, avoiding Vec rewrites on batch create.
+    GlobalEscrowIdIndexed(u32),
+    /// Fallback admin address for recovery if primary admin storage is corrupted (#240)
+    FallbackAdmin,
+    /// Timestamp when admin recovery mechanism becomes available (time-lock safety).
+    /// Stored as a compact `u64` ledger timestamp (#431 / key index #30).
+    AdminRecoveryTime,
+    /// The configured delay (seconds) that was recorded when the recovery time
+    /// was initiated. Used to validate that a minimum cooldown was respected.
+    AdminRecoveryDelay,
+    /// Historical record of stake changes per artisan (bounded queue for audit trail) (#237)
+    StakeHistory(Address),
+    /// Count of entries in the stake history queue (bounds checking)
+    StakeHistoryCount(Address),
+    /// Timestamp when an artisan's stake was last modified (for maintenance checks)
+    StakeLastModified(Address),
+    /// Number of fund-movement audit entries for a given actor/account.
+    FundAuditCount(Address),
+    /// Indexed fund-movement audit entry for an actor/account.
+    FundAuditIndexed(Address, u32),
+    /// Indexed storage of a buyer's escrow ID by position
+    BuyerEscrowIndexed(Address, u32),
+    /// Indexed storage of a seller's escrow ID by position
+    SellerEscrowIndexed(Address, u32),
+    /// Count of a buyer's escrows
+    BuyerEscrowCount(Address),
+    /// Count of a seller's escrows
+    SellerEscrowCount(Address),
+    /// Total locked funds across all active escrows for a given token address.
+    TotalLocked(Address),
+    /// Total amount of funds currently staked by artisans for a token address.
+    TotalStaked(Address),
+    /// Indexed artisan address with a persisted stake record.
+    StakedArtisanIndexed(u32),
+    /// Number of indexed artisan stake records.
+    StakedArtisanCount,
+    /// Latest completed reconciliation result for a token address.
+    ReconciliationReport(Address),
+    /// In-progress reconciliation accumulator for a token address.
+    ReconciliationProgress(Address),
+    /// Repair plan awaiting explicit admin-action approval.
+    ReconciliationRepairPlan(u64),
+    /// Monotonic repair-plan identifier.
+    NextReconciliationRepairPlanId,
+    /// Bounded log of completed WASM upgrades. Capped at MAX_UPGRADE_HISTORY
+    UpgradeHistory,
+    /// Compatibility evidence for completed WASM upgrades.
+    UpgradeCompatibilityHistory,
+    /// Key for a recurring escrow by its ID
+    RecurringEscrow(u64),
+    /// ID counter for recurring escrows
+    NextRecurringEscrowId,
+    /// Number of recurring escrow records created.
+    RecurringEscrowCount,
+    /// Persisted resource-aware batch escrow job.
+    BatchEscrowJob(u64),
+    /// Count of currently active (non-released, non-refunded) escrows or recurring escrows for a user address.
+    ActiveObligations(Address),
+    /// Required number of distinct signer approvals before a WASM upgrade proposal is committed.
+    UpgradeThreshold,
+    /// Canonical per-round approval state (signers snapshot, threshold snapshot,
+    /// round nonce, and accumulated approvals).  Replaces the old hash-keyed
+    /// `UpgradeApprovals(BytesN<32>)` to prevent cross-round replay.
+    /// Always stored at index 0; the nonce lives inside the struct.
+    UpgradeApprovalState(u32),
+    /// Ordered list of addresses authorized to co-sign WASM upgrade proposals.
+    UpgradeSigners,
+    /// Ledger timestamp (u64) recorded when the last upgrade proposal was
+    /// cancelled. Used to enforce CANCEL_REPROPOSE_COOLDOWN (Issue #618).
+    LastUpgradeCancelledAt,
+    /// Differential compatibility manifest keyed by the proposed WASM hash.
+    UpgradeCompatibilityManifest(BytesN<32>),
+    /// Structured evidence log for a disputed escrow order (#927)
+    EvidenceLog(u32),
+    /// Submitted evidence hash to prevent reuse across disputes (#927)
+    UsedEvidenceHash(BytesN<32>),
+    /// Escalation record for a dispute (#941)
+    DisputeEscalation(u32),
+    /// Configurable dispute escalation window in seconds (#941)
+    DisputeEscalationWindow,
+    /// Counter for rate-limited calls per address per window (#943)
+    RateLimitCount(Address, u64),
+    /// Platform rate limit configuration (max_calls, window) (#943)
+    RateLimitConfig,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArtisanStakeData {
+    pub amount: i128,
+    pub token: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct StakeDeposit {
+    pub amount: i128,
+    pub cooldown_end: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum RecurringEscrowAction {
+    Created = 0,
+    CycleReleased = 1,
+    Cancelled = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RecurringEscrow {
+    pub id: u64,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub token: Address,
+    pub total_amount: i128,
+    pub released_amount: i128,
+    pub frequency: u64,
+    pub duration: u32,
+    pub current_cycle: u64,
+    pub last_release_time: u64,
+    pub is_active: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RecurringEscrowEvent {
+    pub id: u64,
+    pub action: RecurringEscrowAction,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
+/// Lifecycle status of an escrow order.
+///
+/// # Live variants
+/// - `Active` — funded (or created) and open for release / refund / dispute
+/// - `Released` — funds sent to the seller
+/// - `Refunded` — funds returned to the buyer
+/// - `Disputed` — dispute opened; awaiting arbitrator resolution
+/// - `Resolved` — dispute resolved (release or refund completed)
+/// - `ReleasePending` / `RefundPending` / `DisputePending` — in-flight
+///  CEI transitions claimed while an external call is outstanding
+///
+/// # Removed legacy variants (issue #706)
+/// `Draft` and `UnderReview` were deprecated in contract version 1.2 and are
+/// **not** part of this enum. Do not reintroduce them — they caused confusion
+/// with the live lifecycle and are unused by every transition path.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformStats {
+    pub total_volume: i128,
+    pub total_escrows: u32,
+    pub active_users: u32,
+    pub whitelist_count: u32,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum EscrowStatus {
+    Active = 0,
+    Released = 1,
+    Refunded = 2,
+    Disputed = 3,
+    Resolved = 4,
+    ReleasePending = 5,
+    RefundPending = 6,
+    DisputePending = 7,
+    /// In-flight exclusive claim while a dispute settlement path executes.
+    SettlementPending = 8,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EscrowStateIssue {
+    None = 0,
+    EscrowNotFound = 1,
+    PendingTransitionUnfinished = 2,
+    MissingDisputeTimestamp = 3,
+    InvalidTerminalState = 4,
+    SettlementReceiptConflict = 5,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowStateDiagnostic {
+    pub order_id: u32,
+    pub status: EscrowStatus,
+    pub is_consistent: bool,
+    pub issue: EscrowStateIssue,
+}
+
+/// Choice of resolution for a disputed escrow.
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum Resolution {
+    /// Release funds to the seller.
+    /// Platform fees ARE collected in this case.
+    ReleaseToSeller = 0,
+    /// Refund funds to the buyer.
+    /// Full amount is returned; platform fees ARE NOT collected.
+    RefundToBuyer = 1,
+}
+
+/// Describes which settlement formula to apply when computing a `FeeAllocation`.
+///
+/// Every terminal settlement path must supply one of these variants so that
+/// `compute_fee_allocation` can deterministically decide how the escrow pot is
+/// split among platform, seller, and buyer.  Adding a new path means adding a
+/// new variant here; all existing invariant tests will catch regressions.
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum SettlementKind {
+    /// Normal release (buyer-approved or auto-release).
+    /// Platform fee deducted from the seller's portion; buyer pays nothing.
+    ReleaseFunds,
+    /// Full refund with no fee (admin-initiated or dispute RefundToBuyer).
+    /// Buyer receives the entire escrow amount; platform collects nothing.
+    FullRefundNoFee,
+    /// Expired-dispute resolution: buyer receives full amount, platform fee
+    /// comes only from the seller's locked pot.
+    ExpiredDisputeDeductFromSeller,
+    /// Expired-dispute resolution: platform fee deducted from the buyer's
+    /// refund; seller receives nothing additional.
+    ExpiredDisputeDeductFromBuyer,
+    /// Expired-dispute resolution: fee split equally between buyer and seller.
+    ExpiredDisputeSplitFee,
+    /// Partial-refund settlement. `refund_gross` and `seller_gross` are the
+    /// gross portions *before* fees, supplied as context fields.
+    PartialRefund(i128, i128),
+}
+
+/// Output of `compute_fee_allocation`.
+///
+/// Every value is non-negative and the three amounts sum exactly to the
+/// original `escrow.amount`, guaranteeing the contract never leaks or
+/// over-pays:
+///
+/// ```text
+/// platform_fee + seller_amount + buyer_amount == escrow_amount
+/// ```
+///
+/// Callers **must** use these three values — and only these three values —
+/// when performing token transfers in any settlement path.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeAllocation {
+    /// Amount transferred to the platform wallet.
+    pub platform_fee: i128,
+    /// Net amount transferred to the seller (artisan).
+    pub seller_amount: i128,
+    /// Net amount transferred back to the buyer.
+    pub buyer_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct Escrow {
+    pub version: u32,
+    pub id: u64,
+    pub batch_id: Option<u64>,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32, // Time in seconds before auto-release
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<Symbol>,
+    pub dispute_initiated_at: Option<u64>,
+    pub funded: bool,
+    /// Ledger timestamp after which any party (or admin) may cancel this escrow
+    /// if it has not yet been funded. Set to created_at + UNFUNDED_CANCEL_TIMEOUT
+    /// for unfunded escrows; None for escrows that were funded at creation (#656).
+    pub funding_deadline: Option<u64>,
+    pub service_agreement_hash: Option<Bytes>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct LegacyEscrow {
+    pub id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<String>,
+    pub dispute_initiated_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct EscrowWithoutBatch {
+    pub version: u32,
+    pub id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<String>,
+    pub dispute_initiated_at: Option<u64>,
+}
+
+/// Escrow format before service_agreement_hash was added (#708).
+/// Used for backward-compatible deserialization during v4→v5 migration.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct EscrowV4 {
+    pub version: u32,
+    pub id: u64,
+    pub batch_id: Option<u64>,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<Symbol>,
+    pub dispute_initiated_at: Option<u64>,
+    pub funded: bool,
+    pub funding_deadline: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EscrowAction {
+    Created = 0,
+    Released = 1,
+    Refunded = 2,
+    Disputed = 3,
+    Resolved = 4,
+    Extended = 5,
+    BatchCreated = 6,
+    BatchReleased = 7,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FundMovementAuditEntry {
+    pub actor: Address,
+    pub amount: i128,
+    pub reason: Symbol,
+    pub timestamp: u64,
+    pub balance_impact: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FundAllocation {
+    pub balance: i128,
+    pub total_locked: i128,
+    pub total_staked: i128,
+    pub unallocated: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReconciliationReport {
+    pub token: Address,
+    pub balance: i128,
+    pub expected_locked: i128,
+    pub expected_staked: i128,
+    pub tracked_locked: i128,
+    pub tracked_staked: i128,
+    pub scanned_escrows: u32,
+    pub next_cursor: u32,
+    pub complete: bool,
+    pub unresolved: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReconciliationRepairPlan {
+    pub id: u64,
+    pub token: Address,
+    pub expected_locked: i128,
+    pub expected_staked: i128,
+    pub observed_balance: i128,
+    pub observed_tracked_locked: i128,
+    pub observed_tracked_staked: i128,
+    pub created_at: u64,
+    pub applied: bool,
+    pub cancelled: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowEvent {
+    /// Schema version for this event payload. Increment when fields are added
+    /// or reordered so off-chain indexers can handle multiple schema generations
+    /// without breaking across upgrades. Current version: 1.
+    pub schema_version: u32,
+    pub escrow_id: u64,
+    pub action: EscrowAction,
+    pub buyer: Address,
+    pub seller: Address,
+    /// Monetary fields are emitted as raw integer types (i128/u64). Avoid
+    /// converting integers to strings inside the contract — emit numeric
+    /// values and perform human-friendly formatting off-chain (UI/indexer).
+    pub amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowResolvedEvent {
+    /// Schema version for this event payload. Increment when fields are added
+    /// or reordered so off-chain indexers can handle multiple schema generations
+    /// without breaking across upgrades. Current version: 1.
+    pub schema_version: u32,
+    pub escrow_id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub arbitrator: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReputationUpdateEvent {
+    pub address: Address,
+    pub successful_delta: u32,
+    pub disputed_delta: u32,
+    pub metrics_sales_delta: u32,
+    pub metrics_amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+/// Tagged union used to carry a single configuration value inside
+/// [`ConfigUpdatedEvent`].
+///
+/// Soroban events must be self-describing for off-chain indexers, but
+/// `PlatformConfig` fields are heterogeneous (counts, monetary amounts,
+/// addresses, and free-form strings). Rather than emit a separate event type
+/// per field — which would bloat the contract's event ABI — every admin
+/// configuration change is normalized into one of these four variants. Indexers
+/// match on the variant tag to recover the underlying Rust type without any
+/// loss of precision (in particular, `I128` monetary values are never
+/// stringified on-chain; see the note on [`EscrowEvent::amount`]).
+///
+/// # Variant mapping
+///
+/// * `U32`     — bounded counters and basis-point fees (e.g. `platform_fee_bps`).
+/// * `I128`    — monetary thresholds such as `min_escrow_amount`.
+/// * `Address` — role and token addresses (e.g. `fee_collector`).
+/// * `String`  — human-readable identifiers that have no compact encoding.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum ConfigValue {
+    U32(u32),
+    I128(i128),
+    Address(Address),
+    String(String),
+}
+
+/// Emitted whenever an admin mutates a single field of the on-chain
+/// `PlatformConfig`.
+///
+/// # Topics
+///
+/// Published under `(symbol "config_updated", symbol field_name)` so indexers
+/// can subscribe to changes of a specific field cheaply. The `field_name` topic
+/// mirrors the `field_name` payload member.
+///
+/// # Preconditions
+///
+/// * The caller must be the current platform admin; the emitting function
+///   asserts `admin.require_auth()` before the storage write, so this event is
+///   only ever observed for an authorized change.
+///
+/// # Storage side-effects
+///
+/// * The corresponding `PlatformConfig` field has already been persisted by the
+///   time this event fires. The event is emitted *after* the storage write,
+///   in keeping with the check-effects-interactions ordering used throughout
+///   the contract.
+///
+/// # Payload
+///
+/// * `field_name` — symbolic name of the mutated field.
+/// * `old_value`  — value held immediately before the write.
+/// * `new_value`  — value persisted by this update.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ConfigUpdatedEvent {
+    pub field_name: Symbol,
+    pub old_value: ConfigValue,
+    pub new_value: ConfigValue,
+}
+
+/// Emitted when an artisan's negotiated platform-fee tier is set or changed.
+///
+/// Per-artisan fee tiers let the platform reward high-reputation sellers with a
+/// reduced `fee_bps` (basis points, where `10_000` == 100%). The persisted tier
+/// overrides the global `platform_fee_bps` for that artisan's future escrows.
+///
+/// # Topics
+///
+/// Published under `(symbol "artisan_fee_tier_updated", address artisan)` so a
+/// client can stream the fee history of a single artisan.
+///
+/// # Preconditions
+///
+/// * The caller must be the platform admin (`require_auth`).
+/// * `fee_bps` is validated against `MAX_PLATFORM_FEE_BPS`; an out-of-range
+///   value aborts with [`Error::InvalidFee`] and no event is emitted.
+///
+/// # Storage side-effects
+///
+/// * The artisan's fee-tier ledger entry is written (and its TTL extended)
+///   before this event fires.
+///
+/// # Payload
+///
+/// * `artisan` — address whose fee tier was updated.
+/// * `fee_bps` — the new fee in basis points applied to future escrows.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArtisanFeeTierUpdatedEvent {
+    pub artisan: Address,
+    pub fee_bps: u32,
+}
+
+/// Emitted when an artisan stakes collateral tokens into the platform.
+///
+/// Staking is a precondition for accepting high-value escrows; the staked
+/// balance backs the artisan's dispute exposure. Token movement obeys the
+/// check-effects-interactions pattern: the artisan's persistent stake balance
+/// is increased and committed *before* the external `token.transfer` callback,
+/// so a malicious token contract cannot re-enter and observe a stale balance.
+///
+/// # Topics
+///
+/// Published under `(symbol "tokens_staked", address artisan)`.
+///
+/// # Preconditions
+///
+/// * `artisan.require_auth()` — only the staker may stake on their own behalf.
+/// * `amount` must be positive and `token` whitelisted.
+///
+/// # Storage side-effects
+///
+/// * The artisan's staked-balance entry is incremented and its TTL extended.
+///
+/// # Payload
+///
+/// * `artisan` — the staking address.
+/// * `token`   — the staked token's contract address.
+/// * `amount`  — raw token amount staked (never stringified on-chain).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct TokensStakedEvent {
+    pub artisan: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an artisan withdraws previously staked collateral.
+///
+/// # Topics
+///
+/// Published under `(symbol "tokens_unstaked", address artisan)`.
+///
+/// # Preconditions
+///
+/// * `artisan.require_auth()`.
+/// * The stake cooldown must have elapsed, otherwise the call aborts with
+///   [`Error::StakeCooldownActive`] and no event is emitted.
+/// * The withdrawal token must match the original staking token
+///   ([`Error::StakeTokenMismatch`]).
+///
+/// # Storage side-effects
+///
+/// * The artisan's staked-balance entry is decremented *before* the outbound
+///   `token.transfer`, preserving reentrancy safety (the transfer is the final
+///   interaction in the call path).
+///
+/// # Payload
+///
+/// * `artisan` — the withdrawing address.
+/// * `token`   — the unstaked token's contract address.
+/// * `amount`  — raw token amount returned to the artisan.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct TokensUnstakedEvent {
+    pub artisan: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an order's off-chain metadata is verified against its on-chain
+/// commitment.
+///
+/// The contract stores only a compact hash of an order's metadata (see
+/// [`EscrowMetadata`]); the full document lives off-chain (e.g. IPFS). When a
+/// verifier reveals the document and the contract confirms its hash matches the
+/// stored commitment, this event records the successful verification so
+/// indexers can mark the order's metadata as trusted.
+///
+/// # Topics
+///
+/// Published under `(symbol "metadata_verified", u64 order_id)`.
+///
+/// # Preconditions
+///
+/// * The stored commitment must exist and the revealed content must hash to it,
+///   otherwise the call aborts with [`Error::InvalidMetadataHash`].
+///
+/// # Storage side-effects
+///
+/// * None beyond TTL refresh of the order entry; verification is a read-and-
+///   compare operation that emits this audit event.
+///
+/// # Payload
+///
+/// * `order_id`  — the escrow/order whose metadata was verified.
+/// * `verifier`  — address that submitted the reveal proof.
+/// * `timestamp` — ledger timestamp at verification time.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MetadataVerifiedEvent {
+    pub order_id: u64,
+    pub verifier: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformPausedEvent {
+    pub initiator: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformUnpausedEvent {
+    pub initiator: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowMetadata {
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub service_agreement_hash: Option<Bytes>,
+}
+
+/// Metadata reveal proof for privacy verification (Issue #122)
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MetadataRevealProof {
+    /// The full metadata content (off-chain document)
+    pub content: Bytes,
+    /// Optional secret key for additional verification
+    pub secret: Option<Bytes>,
+}
+
+/// Test-only metadata structure for simplified testing
+#[cfg(test)]
+#[derive(Clone, Eq, PartialEq)]
+pub struct Metadata {
+    pub title: String,
+    pub description: String,
+    pub category: String,
+}
+
+/// Proposal record for a pending WASM upgrade.
+///
+/// `upgrade_at` is the earliest ledger timestamp at which `execute_upgrade` may
+/// run; it equals `proposed_at + wasm_upgrade_cooldown` from `PlatformConfig`.
+/// `proposed_by` records the admin that submitted the proposal — note that the
+/// admin role can rotate via the two-step transfer (`update_admin` /
+/// `claim_admin`), so the value reflects the admin at proposal time, not at
+/// execution time. `execute_upgrade` re-checks the *current* admin's auth, so
+/// rotating admins cannot bypass authorization.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct WasmUpgradeProposal {
+    pub wasm_hash: BytesN<32>,
+    pub upgrade_at: u64,
+    pub proposed_by: Address,
+    pub proposed_at: u64,
+}
+
+/// Lifecycle event emitted whenever a WASM upgrade proposal is created,
+/// replaced, cancelled, or executed. Indexers can use the `action` symbol to
+/// reconstruct the upgrade audit trail without scanning storage.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeProposalEvent {
+    pub action: Symbol,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+    pub upgrade_at: u64,
+}
+
+/// On-chain record of a completed WASM upgrade.
+///
+/// One entry is appended to `UpgradeHistory` per successful `execute_upgrade`
+/// call, providing operators and auditors visibility into how the contract
+/// reached its current `ContractVersion`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeRecord {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Additive audit record for compatibility evidence. Kept separate from
+/// `UpgradeRecord` so existing serialized upgrade history remains readable.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeCompatibilityRecord {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub state_commitment: BytesN<32>,
+    pub migration_checkpoint: BytesN<32>,
+    pub timestamp: u64,
+}
+
+/// Evidence produced by an isolated old/new implementation compatibility run.
+/// Hash fields commit to the complete manifest and its test evidence; the
+/// contract deliberately does not trust an uncommitted human-readable report.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeCompatibilityManifest {
+    pub source_version: u32,
+    pub target_version: u32,
+    pub state_commitment: BytesN<32>,
+    pub interface_commitment: BytesN<32>,
+    pub authorization_commitment: BytesN<32>,
+    pub preconditions_commitment: BytesN<32>,
+    pub postconditions_commitment: BytesN<32>,
+    pub rollback_commitment: BytesN<32>,
+    pub migration_checkpoint: BytesN<32>,
+    pub migration_complete: bool,
+    pub manual_records: u32,
+}
+
+/// Stable, representative state used by migration tooling when creating a
+/// differential snapshot. The resulting hash is supplied in the manifest.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeStateSnapshot {
+    pub contract_version: u32,
+    pub escrow_count: u32,
+    pub recurring_escrow_next_id: u64,
+    pub upgrade_threshold: u32,
+    pub paused: bool,
+    pub onboarding_configured: bool,
+}
+
+/// Immutable per-round state for the multi-sig upgrade approval flow.
+///
+/// Written once on the **first** approval call for a given proposal nonce and
+/// never mutated except to append new approvals.  Keyed by
+/// `DataKey::UpgradeApprovalState(nonce)`.
+///
+/// # Security properties
+///
+/// * `signers`   — snapshotted from `UpgradeSigners` (or admin fallback) at
+///   round open.  Subsequent `set_upgrade_signers` calls cannot alter which
+///   addresses are eligible for this round, closing the signer-rotation race.
+///
+/// * `threshold` — snapshotted from `UpgradeThreshold` at round open.
+///   Mid-round `set_upgrade_threshold` calls therefore cannot lower the bar
+///   for the current round.
+///
+/// * `approvals` — grows monotonically as valid signers call
+///   `propose_upgrade_wasm`.  Only addresses present in `signers` may appear
+///   here; duplicates are rejected with `AlreadyApproved`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeApprovalState {
+    /// Monotonically increasing round counter.  Incremented on every
+    /// `cancel_upgrade_wasm` call so that residual state from a prior
+    /// round cannot be replayed in a subsequent round.
+    pub nonce: u32,
+    /// Signer set captured when the round was opened (first approval).
+    pub signers: Vec<Address>,
+    /// Approval threshold captured when the round was opened.
+    pub threshold: u32,
+    /// Addresses that have submitted a valid approval this round.
+    pub approvals: Vec<Address>,
+}
+
+/// Per-token fee configuration introduced for #239.
+///
+/// The legacy `FeeTokenIndex` storage held only a flat `Vec<Address>` of
+/// fee-receiving tokens, which forced any future multi-token fee model into a
+/// contract upgrade. This struct gives us a per-token slot keyed by
+/// `DataKey::FeeTokenConfig(token)` that can carry forward additional fields
+/// (e.g. custom_bps overrides, token-specific receivers) without touching the
+/// global storage shape — new fields can be appended as `Option<T>` and read
+/// with safe fallbacks.
+///
+/// # Fields
+///
+/// * `active` - Boolean flag indicating whether this token is currently active for
+///   platform fee collection. When false, the admin can disable a token without
+///   losing its accumulated totals, allowing history preservation while stopping
+///   future fee counting.
+///
+/// * `custom_fee_bps` - Optional custom fee basis points specific to this token.
+///   Reserved for a future multi-token fee mode; currently NOT consulted by
+///   `calculate_fee` to keep this change storage-only and avoid behavior changes.
+///   A follow-up issue will wire this into fee calculation once the storage shape
+///   stabilizes in production.
+///
+/// * `accumulated` - Total fees accumulated in this token, measured in stroops.
+///   Monotonically increasing counter that preserves fee history across
+///   activation/deactivation cycles.
+///
+/// # Storage Side-effects
+///
+/// - Stored persistently under `DataKey::FeeTokenConfig(token_address)` with
+///   TTL extension on reads to prevent premature archival.
+/// - Updates to this struct trigger config refresh in affected escrow operations
+///   to ensure correct fee calculations based on token status.
+///
+/// # Integration notes
+///
+/// Off-chain integrators should cache this struct keyed by token address and
+/// refresh on-demand when escrow operations reference new tokens. The `accumulated`
+/// field provides audit trail for fee reconciliation; timestamp context is
+/// available via escrow event logs.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeTokenInfo {
+    pub active: bool,
+    pub custom_fee_bps: Option<u32>,
+    pub accumulated: i128,
+}
+
+/// Summary event emitted after a fee-token config migration run.
+///
+/// Operators can compare `scanned_tokens`, `migrated_configs`, and
+/// `skipped_existing` to verify that the legacy `FeeTokenIndex` was fully
+/// audited and that a second run is a no-op.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeTokenConfigsMigratedEvent {
+    pub scanned_tokens: u32,
+    pub migrated_configs: u32,
+    pub skipped_existing: u32,
+}
+
+/// Aggregated version metadata returned from `get_version_info`. Mirrors the
+/// fields surfaced via the upgrade history but in a flat shape suitable for
+/// dashboards / `migrate_v_x` style audits.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct VersionInfo {
+    pub current_version: u32,
+    pub upgrade_count: u32,
+}
+
+/// Parameters for batch escrow creation
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowCreateParams {
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub order_id: u32,
+    pub release_window: Option<u32>,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub service_agreement_hash: Option<Bytes>,
+}
+
+/// Lifecycle state for a resource-aware batch escrow job.
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum BatchJobStatus {
+    Pending = 0,
+    Completed = 1,
+    Cancelled = 2,
+}
+
+/// Persisted state for a scheduled batch. The parameters are immutable so a
+/// continuation always operates on the same ordered input and cursor.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct BatchEscrowJob {
+    pub owner: Address,
+    pub params: Vec<EscrowCreateParams>,
+    pub next_index: u32,
+    pub status: BatchJobStatus,
+}
+
+/// Lightweight progress returned to clients and indexers without exposing the
+/// stored parameter vector.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct BatchJobProgress {
+    pub id: u64,
+    pub owner: Address,
+    pub next_index: u32,
+    pub total: u32,
+    pub status: BatchJobStatus,
+}
+
+/// Policy for handling fees when a dispute expires without arbitrator resolution.
+///
+/// A dispute "expires" when the configured `max_dispute_duration` elapses
+/// without the arbitrator delivering a verdict (see [`PlatformConfig`]).
+/// At that point the escrow must still be unwound — but the platform fee
+/// is suddenly ambiguous: nobody won the dispute, so the usual "loser
+/// pays the fee" rule doesn't apply. This enum is the on-chain knob the
+/// admin uses to pick a policy at configuration time.
+///
+/// # Indexer / off-chain integration
+///
+/// Each variant is serialised as its `repr(u32)` discriminant on the
+/// wire, so off-chain indexers can match against `0..=3` without binding
+/// to the variant names. The discriminants are stable; reordering them
+/// would be a breaking change for existing escrows whose `PlatformConfig`
+/// has been persisted on-chain.
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum ExpiredDisputeFeePolicy {
+    /// Refund buyer in full, platform collects no fee. The default,
+    /// buyer-friendly policy — the platform absorbs the cost of the
+    /// arbitrator timing out. Use when buyer goodwill matters more than
+    /// covering operational cost on stalled disputes.
+    RefundFullNoPlatformFee = 0,
+    /// Refund buyer minus platform fee. The platform still earns its
+    /// fee, taken from the buyer's refunded amount. Symmetric to a
+    /// normal "buyer loses" resolution; use when the platform must
+    /// cover its costs regardless of dispute outcome.
+    RefundMinusPlatformFee = 1,
+    /// Refund buyer in full, deduct platform fee from the seller's
+    /// locked amount. The seller forfeits the fee even though they
+    /// never received payment — use when seller responsibility for
+    /// presenting evidence outweighs the cost of forfeiting on a
+    /// stalled arbitration.
+    DeductFeeFromSeller = 2,
+    /// Split the platform fee: half deducted from the buyer's refund,
+    /// half from the seller's locked amount. The most "neutral" policy
+    /// — both sides share the cost of the arbitrator timing out.
+    SplitFee = 3,
+}
+
+/// Platform configuration data
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformConfig {
+    pub platform_fee_bps: u32,    // Platform fee in basis points (500 = 5%)
+    pub platform_wallet: Address, // Wallet address to receive fees
+    /// Admin address for management.
+    /// This address can be a regular account or a Multisig contract address
+    /// to enhance security for sensitive operations like `propose_upgrade_wasm` (#95).
+    pub admin: Address,
+    pub arbitrator: Address, // Arbitrator for dispute resolution
+    pub moderator: Option<Address>,
+    pub is_paused: bool,                // Circuit breaker (#96)
+    pub min_stake_required: i128, // Minimum stake artisan must hold to create escrows (Issue #99)
+    pub pending_admin: Option<Address>, // Pending admin for two-step transfer
+    pub wasm_upgrade_cooldown: u32, // Grace period for WASM upgrades in seconds (default: 7 days)
+    pub max_dispute_duration: u32, // Maximum duration a dispute can remain open in seconds (default: 30 days)
+    pub stake_cooldown: u32, // Cooldown period after staking before tokens can be unstaked in seconds (default: 7 days)
+    /// Policy for handling platform fees when disputes expire without arbitrator resolution
+    pub expired_dispute_fee_policy: ExpiredDisputeFeePolicy,
+    /// Minimum release window to prevent "flash" auto-releases (default: 1 day)
+    pub min_release_window: u32,
+    /// Dispute escalation window in seconds (default: 3 days)
+    pub dispute_escalation_window: u32,
+    /// Evidence/counter-evidence challenge window before arbitrator resolution
+    pub evidence_challenge_window: u32,
+}
+
+/// Structured record of dispute evidence with metadata and expiry thresholds (#927).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct DisputeEvidence {
+    pub id: u64,
+    pub order_id: u32,
+    pub dispute_session_id: u64,
+    pub submitter: Address,
+    pub evidence_uri: String,
+    pub parent_evidence_id: Option<u64>,
+    pub submitted_at: u64,
+    pub expires_at: u64,
+    pub is_invalidated: bool,
+}
+
+/// Record of dispute escalation to arbitration (#941).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct DisputeEscalationRecord {
+    pub order_id: u32,
+    pub escalated_by: Address,
+    pub escalated_at: u64,
+}
+
+/// Configuration for sensitive action rate limiting (#943).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RateLimitConfig {
+    pub max_calls: u32,
+    pub window: u32,
+}
+
+/// Partial refund proposal created during a dispute (Issue #101)
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PartialRefundProposal {
+    pub order_id: u32,
+    pub refund_amount: i128,
+    pub proposed_by: Address,
+    pub proposed_at: u64,
+    /// Incremented on each cancel so a cancelled proposal cannot be replayed.
+    pub nonce: u64,
+}
+
+/// Which terminal settlement path finalized a dispute.
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum SettlementPath {
+    PartialRefundAccepted = 0,
+    ArbitratedRelease = 1,
+    ArbitratedRefund = 2,
+    ArbitratedPartial = 3,
+    ExpiredDispute = 4,
+}
+
+/// Immutable receipt written before token transfers on every dispute settlement path.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct SettlementReceipt {
+    pub order_id: u32,
+    pub path: SettlementPath,
+    pub executed_at: u64,
+    pub proposal_nonce: u64,
+}
+
+/// User roles in the CraftNexus platform
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum UserRole {
+    None = 0,      // User has not onboarded
+    Buyer = 1,     // Can purchase items
+    Artisan = 2,   // Can sell items and create escrow
+    Admin = 3,     // Platform administrator
+    Moderator = 4, // Can help manage disputes
+}
+
+/// Profile status for users
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum ProfileStatus {
+    Active = 0,
+    Deactivated = 1,
+}
+
+/// Onboarding status for users
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UserProfile {
+    pub version: u32,
+    pub address: Address,
+    pub role: UserRole,
+    pub username: String,
+    pub registered_at: u64,
+    pub is_verified: bool,
+    /// Count of escrows where this user was on the winning side (#100)
+    pub successful_trades: u32,
+    /// Count of escrows that ended in a dispute against this user (#100)
+    pub disputed_trades: u32,
+    /// Portfolio CID for artisan showcase (IPFS) - Issue #112
+    pub portfolio_cid: Option<String>,
+    /// Status of the user profile - Issue #113
+    pub status: ProfileStatus,
+}
+
+/// Coherent onboarding state proof passed across the escrow boundary.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct OnboardingAttestation {
+    pub account: Address,
+    pub profile_version: u32,
+    pub role: UserRole,
+    pub is_verified: bool,
+    pub status: ProfileStatus,
+    pub state_revision: u64,
+    pub ledger_sequence: u32,
+    pub operation_id: Bytes,
+    pub contract_instance: Address,
+    pub state_digest: BytesN<32>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct LegacyUserProfile {
+    pub address: Address,
+    pub role: UserRole,
+    pub username: String,
+    pub registered_at: u64,
+    pub is_verified: bool,
+    /// Count of escrows where this user was on the winning side (#100)
+    pub successful_trades: u32,
+    /// Count of escrows that ended in a dispute against this user (#100)
+    pub disputed_trades: u32,
+    /// Portfolio CID for artisan showcase (IPFS) - Issue #112
+    pub portfolio_cid: Option<String>,
+}
+
+/// Minimal cross-contract interface for the OnboardingContract.
+/// Used by CraftNexusContract to update user reputation and activity metrics
+/// when escrow state changes (release, refund, resolve).
+#[soroban_sdk::contractclient(name = "OnboardingClient")]
+pub trait OnboardingInterface {
+    /// Issue a proof bound to this escrow contract and operation.
+    fn get_onboarding_attestation(
+        env: Env,
+        user: Address,
+        operation_id: Bytes,
+        contract_instance: Address,
+    ) -> OnboardingAttestation;
+    /// Validate and consume a single-use onboarding proof.
+    fn validate_onboarding_attestation(env: Env, attestation: OnboardingAttestation) -> bool;
+    /// Increment a user's reputation counters.
+    ///
+    /// Called by this escrow contract after a terminal escrow outcome where a
+    /// winner/loser can be determined (release/refund/dispute resolution).
+    /// The onboarding contract authenticates that the caller is the registered
+    /// escrow contract address.
+    fn update_reputation(env: Env, address: Address, successful_delta: u32, disputed_delta: u32);
+    /// Increment a user's activity metrics (escrow count + volume).
+    ///
+    /// Used by onboarding to drive auto-verification and analytics counters.
+    fn update_user_metrics(
+        env: Env,
+        address: Address,
+        escrow_count_delta: u32,
+        volume_delta: i128,
+        token_address: Address,
     );
-    // Approval state is removed on commit, so get_upgrade_approvals returns empty.
-    assert_eq!(
-        client.get_upgrade_approvals(&0).len(),
-        0,
-        "approvals are cleared after commit"
-    );
-
-    // Cancel the committed proposal → nonce bumps to 1.
-    client.cancel_upgrade_wasm();
-    assert_eq!(
-        client.get_upgrade_proposal_nonce(),
-        1,
-        "nonce must be 1 after cancel"
-    );
-    assert!(
-        client.get_upgrade_proposal().is_none(),
-        "proposal must be removed after cancel"
-    );
-    // Old nonce 0 approvals remain empty (never re-populated after commit+cancel).
-    assert_eq!(
-        client.get_upgrade_approvals(&0).len(),
-        0,
-        "old nonce 0 approvals must be empty after cancel"
-    );
-
-    // Advance past CANCEL_REPROPOSE_COOLDOWN (7 days + 1 s).
-    env.ledger().with_mut(|li| {
-        li.timestamp += 7 * 24 * 60 * 60 + 1;
-    });
-
-    // Round 1, nonce=1: admin proposes a different hash → fresh state.
-    client.propose_upgrade_wasm(&admin, &hash_b);
-    assert!(
-        client.get_upgrade_proposal().is_some(),
-        "proposal must commit in fresh round"
-    );
-    // Nonce 0 still returns empty — old state was not replayed.
-    assert_eq!(
-        client.get_upgrade_approvals(&0).len(),
-        0,
-        "nonce 0 must still be empty in round 1"
-    );
+    /// Mark a user profile as deactivated.
+    ///
+    /// Used by the escrow contract for administrative safety actions; the
+    /// onboarding contract enforces its own authorization rules.
+    fn deactivate_profile(env: Env, user: Address);
+    /// Verify a user, returning the updated profile.
+    fn verify_user(env: Env, user: Address) -> UserProfile;
+    /// Return true if the user currently has any active escrow obligations.
+    fn has_active_contracts(env: Env, user: Address) -> bool;
+    /// Update onboarding's local active-contract counter for a user.
+    ///
+    /// `delta` should be `+1` when an escrow becomes active and `-1` when the
+    /// escrow closes. The onboarding contract rejects underflows.
+    fn update_active_contracts(env: Env, user: Address, delta: i32);
+    /// Number of onboarding profiles whose status is currently active.
+    fn get_active_user_count(env: Env) -> u32;
+    /// Refresh the persistent TTL for a user's profile entry.
+    fn bump_user_profile_ttl(env: Env, user: Address) -> bool;
+    /// Refresh the persistent TTL for a user's activity metrics entry.
+    fn bump_user_metrics_ttl(env: Env, user: Address) -> bool;
+    /// Return the role assigned to `user`, or `UserRole::None` if no profile exists.
+    fn get_user_role(env: Env, user: Address) -> UserRole;
+    /// Return true if `user` has an active onboarding profile.
+    fn is_profile_active(env: Env, user: Address) -> bool;
+    /// Return the schema version stored on `user`'s profile, or `0` if no profile exists.
+    fn get_user_profile_version(env: Env, user: Address) -> u32;
+    /// Return the monotonically increasing state version for `user`'s profile,
+    /// or `0` if no profile exists.
+    fn get_user_state_version(env: Env, user: Address) -> u32;
+    /// Return true if `user` has passed verification (manual or auto).
+    fn is_user_verified(env: Env, user: Address) -> bool;
 }
 
-/// AC4 (simplified): cancel_upgrade_wasm increments the proposal nonce.
-#[test]
-fn test_cancel_increments_proposal_nonce() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let hash = BytesN::from_array(&env, &[13u8; 32]);
-
-    // Commit a proposal (threshold=1, admin is sole signer).
-    client.propose_upgrade_wasm(&admin, &hash);
-    let nonce_before = client.get_upgrade_proposal_nonce();
-    assert_eq!(nonce_before, 0, "nonce starts at 0");
-
-    // Cancel increments the nonce.
-    client.cancel_upgrade_wasm();
-    let nonce_after = client.get_upgrade_proposal_nonce();
-    assert_eq!(nonce_after, 1, "nonce must be 1 after first cancel");
-}
-
-/// Replay protection: after cancel + cooldown, re-proposing the same hash
-/// with the same signers starts a completely new round (nonce=1, empty approvals).
-#[test]
-fn test_repropose_same_hash_starts_fresh_round_after_cancel() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-    signers.push_back(signer2.clone());
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&2);
-
-    let hash = BytesN::from_array(&env, &[14u8; 32]);
-
-    // Round 0: admin approves. Threshold not yet met.
-    // To get a partial approval we need threshold=2; but cancel requires a committed
-    // proposal. Lower threshold to 1 to commit, then cancel.
-    client.set_upgrade_threshold(&1);
-    client.propose_upgrade_wasm(&admin, &hash);
-    // Committed. Cancel it.
-    client.cancel_upgrade_wasm();
-    // Nonce is now 1.
-    assert_eq!(client.get_upgrade_proposal_nonce(), 1);
-
-    // Advance past cooldown.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 7 * 24 * 60 * 60 + 1;
-    });
-
-    // Round 1: admin approves again for the SAME hash.
-    client.set_upgrade_threshold(&2);
-    client.propose_upgrade_wasm(&admin, &hash);
-
-    // Nonce is still 1 (cancel hasn't been called again).
-    assert_eq!(client.get_upgrade_proposal_nonce(), 1);
-
-    // Only 1 approval in round 1 — admin's prior approval from round 0 is NOT counted.
-    assert_eq!(
-        client.get_upgrade_approvals(&1).len(),
-        1,
-        "round 1 must have exactly 1 fresh approval, not carry over from round 0"
-    );
-
-    // Proposal must NOT be committed (threshold=2, only 1 approval so far).
-    assert!(
-        client.get_upgrade_proposal().is_none(),
-        "proposal must not commit with only 1 of 2 required approvals in fresh round"
-    );
-
-    // signer2 approves to complete round 1.
-    client.propose_upgrade_wasm(&signer2, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_some(),
-        "proposal must commit after 2nd approval"
-    );
-}
-
-/// Threshold snapshot: changing threshold mid-round does not affect the current round.
-#[test]
-fn test_threshold_change_mid_round_does_not_affect_current_round() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let signer3 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-    signers.push_back(signer2.clone());
-    signers.push_back(signer3.clone());
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&3); // requires all 3
-
-    let hash = BytesN::from_array(&env, &[15u8; 32]);
-
-    // admin approves first — snapshot captures threshold=3.
-    client.propose_upgrade_wasm(&admin, &hash);
-    assert!(client.get_upgrade_proposal().is_none());
-
-    // Admin lowers threshold to 1 after the round has opened.
-    client.set_upgrade_threshold(&1);
-
-    // signer2 approves — with the NEW threshold=1 this would be sufficient,
-    // but the snapshot still requires 3.
-    client.propose_upgrade_wasm(&signer2, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_none(),
-        "proposal must not commit: snapshot threshold is 3, only 2 approvals so far"
-    );
-
-    // Third approval completes the snapshotted requirement.
-    client.propose_upgrade_wasm(&signer3, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_some(),
-        "proposal must commit after 3 of 3 approvals"
-    );
-}
-
-// ============== Batch Operations Tests ==============
-
-#[test]
-fn test_create_batch_escrow_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    // Mint enough tokens for multiple escrows
-    token_admin.mint(&buyer, &1_000_000_000);
-
-    let escrow_params = vec![
-        &env,
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 100_000_000,
-            order_id: 100,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 200_000_000,
-            order_id: 101,
-            release_window: Some(7200),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 150_000_000,
-            order_id: 102,
-            release_window: None, // Uses default
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-    ];
-
-    let batch_id = 1u64;
-    let results = client.create_batch_escrow(&batch_id, &escrow_params);
-
-    assert_eq!(results.len(), 3);
-    assert_eq!(results.get(0).unwrap(), 100);
-    assert_eq!(results.get(1).unwrap(), 101);
-    assert_eq!(results.get(2).unwrap(), 102);
-
-    // Verify escrows were created
-    let escrow1 = client.get_escrow(&100);
-    assert_eq!(escrow1.amount, 100_000_000);
-    assert_eq!(escrow1.status, EscrowStatus::Active);
-    assert_eq!(escrow1.batch_id, Some(batch_id));
-
-    let escrow2 = client.get_escrow(&101);
-    assert_eq!(escrow2.amount, 200_000_000);
-    assert_eq!(escrow2.status, EscrowStatus::Active);
-    assert_eq!(escrow2.batch_id, Some(batch_id));
-
-    let escrow3 = client.get_escrow(&102);
-    assert_eq!(escrow3.amount, 150_000_000);
-    assert_eq!(escrow3.release_window, 604800); // Default 7 days
-    assert_eq!(escrow3.batch_id, Some(batch_id));
-
-    // Verify events were emitted
-    let events = env.events().all();
-    let expected_topic: soroban_sdk::Val = Symbol::new(&env, "escrow").into_val(&env);
-    let batch_events: alloc::vec::Vec<_> = events
-        .iter()
-        .filter(|(_, topics, _)| {
-            topics.len() >= 2
-                && soroban_sdk::vec![&env, topics.get_unchecked(0)]
-                    == soroban_sdk::vec![&env, expected_topic]
-        })
-        .collect();
-    assert_eq!(
-        batch_events.len(),
-        6,
-        "Should emit batch event for each escrow"
-    );
-}
-
-#[test]
-#[should_panic]
-fn test_create_batch_escrow_fails_on_invalid_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000_000);
-
-    // Create batch with invalid amount (zero)
-    let escrow_params = vec![
-        &env,
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 0, // Invalid - zero amount
-            order_id: 100,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-    ];
-
-    client.create_batch_escrow(&1u64, &escrow_params);
-}
-
-#[test]
-#[should_panic]
-fn test_create_batch_escrow_fails_same_buyer_seller() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, _, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000_000);
-
-    // Create batch where buyer equals seller
-    let escrow_params = vec![
-        &env,
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: buyer.clone(), // Same as buyer!
-            token: token_id.clone(),
-            amount: 100,
-            order_id: 100,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-    ];
-
-    client.create_batch_escrow(&1u64, &escrow_params);
-}
-
-#[test]
-#[should_panic]
-fn test_create_batch_escrow_requires_authorization_for_each_distinct_buyer() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    let second_buyer = Address::generate(&env);
-    token_admin.mint(&buyer, &1_000_000_000);
-    token_admin.mint(&second_buyer, &1_000_000_000);
-
-    let escrow_params = vec![
-        &env,
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 100,
-            order_id: 100,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-        EscrowCreateParams {
-            buyer: second_buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 200,
-            order_id: 101,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-    ];
-
-    // Remove the second buyer's authorization so the batch should panic.
-    env.set_auths(&[]);
-    client.create_batch_escrow(&1u64, &escrow_params);
-}
-
-// ===== Issue #111 — batch escrow boundary scenarios =====
-
-#[test]
-fn test_create_batch_escrow_at_max_size() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000_000);
-
-    let mut batch_params = vec![&env];
-    for i in 0..MAX_BATCH_SIZE {
-        batch_params.push_back(EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 1_000,
-            order_id: 500 + i,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        });
-    }
-    assert_eq!(batch_params.len(), MAX_BATCH_SIZE);
-
-    let results = client.create_batch_escrow(&10u64, &batch_params);
-    assert_eq!(results.len(), MAX_BATCH_SIZE);
-
-    for i in 0..MAX_BATCH_SIZE {
-        let escrow = client.get_escrow(&(500 + i));
-        assert_eq!(escrow.status, EscrowStatus::Active);
-        assert_eq!(escrow.batch_id, Some(10u64));
-    }
-}
-
-#[test]
-fn test_create_batch_escrow_exceeds_max_size() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000_000);
-
-    let mut batch_params = vec![&env];
-    for i in 0..(MAX_BATCH_SIZE + 1) {
-        batch_params.push_back(EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 1_000,
-            order_id: 600 + i,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        });
-    }
-    assert_eq!(batch_params.len(), MAX_BATCH_SIZE + 1);
-
-    // The whole batch must be rejected — none of the escrows should be created.
-    let result = client.try_create_batch_escrow(&11u64, &batch_params);
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err(), Ok(Error::BatchLimitExceeded));
-
-    for i in 0..(MAX_BATCH_SIZE + 1) {
-        let escrow_result = client.try_get_escrow(&(600 + i));
-        assert!(
-            escrow_result.is_err(),
-            "no escrow should have been created when the batch exceeds MAX_BATCH_SIZE"
-        );
-    }
-}
-
-#[test]
-#[should_panic]
-fn test_create_batch_escrow_multi_buyer_unauthorized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    let second_buyer = Address::generate(&env);
-    token_admin.mint(&buyer, &1_000_000_000);
-    token_admin.mint(&second_buyer, &1_000_000_000);
-
-    let escrow_params = vec![
-        &env,
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 1_000,
-            order_id: 700,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-        EscrowCreateParams {
-            buyer: second_buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 2_000,
-            order_id: 701,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-    ];
-
-    // Strip all mocked authorizations so neither buyer — in particular the
-    // second, distinct buyer — has a valid auth entry for this call.
-    env.set_auths(&[]);
-    client.create_batch_escrow(&12u64, &escrow_params);
-}
-
-#[test]
-fn test_release_batch_funds_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _platform_wallet, _) =
-        setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000_000);
-
-    // Create multiple escrows
-    client.create_escrow(&buyer, &seller, &token_id, &100_000_000, &100, &None);
-    client.create_escrow(&buyer, &seller, &token_id, &200_000_000, &101, &None);
-    client.create_escrow(&buyer, &seller, &token_id, &150_000_000, &102, &None);
-
-    // Verify active obligations are set
-    assert!(client.has_active_escrows(&buyer));
-    assert!(client.has_active_escrows(&seller));
-
-    // Release batch
-    let order_ids = vec![&env, 100u32, 101u32, 102u32];
-    let batch_id = 1u64;
-    let results = client.release_batch_funds(&batch_id, &order_ids, &buyer);
-
-    assert_eq!(results.len(), 3);
-    assert_eq!(results.get(0).unwrap(), 100);
-    assert_eq!(results.get(1).unwrap(), 101);
-    assert_eq!(results.get(2).unwrap(), 102);
-
-    // Verify active obligations were decremented
-    assert!(!client.has_active_escrows(&buyer));
-    assert!(!client.has_active_escrows(&seller));
-
-    // Verify statuses
-    let escrow1 = client.get_escrow(&100);
-    assert_eq!(escrow1.status, EscrowStatus::Released);
-
-    let escrow2 = client.get_escrow(&101);
-    assert_eq!(escrow2.status, EscrowStatus::Released);
-
-    let escrow3 = client.get_escrow(&102);
-    assert_eq!(escrow3.status, EscrowStatus::Released);
-
-    // Verify batch events were emitted
-    let events = env.events().all();
-    let expected_topic: soroban_sdk::Val = Symbol::new(&env, "escrow").into_val(&env);
-    let batch_events: alloc::vec::Vec<_> = events
-        .iter()
-        .filter(|(_, topics, _)| {
-            topics.len() >= 2
-                && soroban_sdk::vec![&env, topics.get_unchecked(0)]
-                    == soroban_sdk::vec![&env, expected_topic]
-        })
-        .collect();
-    assert_eq!(
-        batch_events.len(),
-        6,
-        "Should emit batch event for each release"
-    );
-}
-
-#[test]
-#[should_panic]
-fn test_release_batch_funds_fails_escrow_not_found() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000_000);
-
-    // Create one escrow
-    client.create_escrow(&buyer, &seller, &token_id, &100, &100, &None);
-
-    // Try to release batch with non-existent escrow
-    let order_ids = vec![&env, 100u32, 999u32]; // 999 doesn't exist
-    client.release_batch_funds(&1u64, &order_ids, &buyer);
-}
-
-#[test]
-#[should_panic]
-fn test_release_batch_funds_fails_invalid_state() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000_000);
-
-    // Create escrow
-    client.create_escrow(&buyer, &seller, &token_id, &100, &100, &None);
-
-    // Release it first
-    client.release_funds(&100);
-
-    // Try to release again in batch
-    let order_ids = vec![&env, 100u32];
-    client.release_batch_funds(&1u64, &order_ids, &buyer);
-}
-
-#[test]
-#[should_panic]
-fn test_release_batch_funds_fails_unauthorized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000_000);
-
-    // Create escrow
-    client.create_escrow(&buyer, &seller, &token_id, &100, &100, &None);
-
-    // Try to release with different address
-    let unauthorized = Address::generate(&env);
-    let order_ids = vec![&env, 100u32];
-    client.release_batch_funds(&1u64, &order_ids, &unauthorized);
-}
-
-#[test]
-fn test_reentrancy_guard_prevents_recursive_call() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    // Manually set the guard in temporary storage
-    env.as_contract(&client.address, || {
-        env.storage().temporary().set(&DataKey::ReentryGuard, &true);
-    });
-
-    // Attempting to call a guarded function should now fail
-    let result = client.try_release_funds(&1);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_reentrancy_guard_blocks_release_and_refund_entrypoints() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &20_000_000, &1, &None);
-    client.create_escrow(&buyer, &seller, &token_id, &20_000_000, &2, &None);
-
-    env.as_contract(&client.address, || {
-        env.storage().temporary().set(&DataKey::ReentryGuard, &true);
-    });
-
-    let release_ids = vec![&env, 1u32];
-    let batch_result = client.try_release_batch_funds(&1u64, &release_ids, &buyer);
-    assert!(batch_result.is_err());
-
-    env.as_contract(&client.address, || {
-        env.storage().temporary().remove(&DataKey::ReentryGuard);
-        env.storage().temporary().set(&DataKey::ReentryGuard, &true);
-    });
-
-    let refund_result = client.try_refund(&2u64);
-    assert!(refund_result.is_err());
-
-    env.as_contract(&client.address, || {
-        env.storage().temporary().remove(&DataKey::ReentryGuard);
-    });
-}
-
-#[test]
-fn test_reentrancy_guard_cleared_after_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    // This should succeed and clear the guard
-    client.release_funds(&1);
-
-    // The guard should be gone
-    env.as_contract(&client.address, || {
-        assert!(!env.storage().temporary().has(&DataKey::ReentryGuard));
-    });
-}
-
-#[test]
-fn test_reentrancy_guard_cleared_after_batch_create_error() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    let invalid_params = vec![
-        &env,
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 0,
-            order_id: 100,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-    ];
-
-    let result = client.try_create_batch_escrow(&1u64, &invalid_params);
-    assert!(result.is_err());
-
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &101, &None);
-    let escrow = client.get_escrow(&101);
-    assert_eq!(escrow.status, EscrowStatus::Active);
-
-    env.as_contract(&client.address, || {
-        assert!(!env.storage().temporary().has(&DataKey::ReentryGuard));
-    });
-}
-
-#[test]
-fn test_reentrancy_guard_cleared_after_batch_release_error() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &25_000_000, &100, &None);
-    client.create_escrow(&buyer, &seller, &token_id, &25_000_000, &101, &None);
-
-    client.release_funds(&100);
-
-    let order_ids = vec![&env, 100u32];
-    let result = client.try_release_batch_funds(&1u64, &order_ids, &buyer);
-    assert!(result.is_err());
-
-    client.release_funds(&101);
-    let escrow = client.get_escrow(&101);
-    assert_eq!(escrow.status, EscrowStatus::Released);
-
-    env.as_contract(&client.address, || {
-        assert!(!env.storage().temporary().has(&DataKey::ReentryGuard));
-    });
-}
-
-#[test]
-fn test_extend_release_window_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let window = 3600;
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &Some(window));
-
-    let additional = 7200;
-    client.extend_release_window(&1, &additional);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.release_window, window + additional);
-
-    // Verify event
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
-    assert_eq!(
-        last_event.1,
-        vec![
-            &env,
-            Symbol::new(&env, "escrow").into_val(&env),
-            1u64.into_val(&env)
-        ]
-    );
-
-    let event: EscrowEvent = last_event.2.try_into_val(&env).unwrap();
-    assert_eq!(event.escrow_id, 1);
-    assert_eq!(event.action, EscrowAction::Extended);
-    assert_eq!(event.buyer, buyer);
-    assert_eq!(event.seller, seller);
-}
-
-#[test]
-#[should_panic]
-fn test_extend_release_window_unauthorized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    // Switch auth to seller
-    env.set_auths(&[]); // Clear auths
-    client.extend_release_window(&1, &3600);
-}
-
-#[test]
-#[should_panic]
-fn test_extend_release_window_too_long() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    // Max is 30 days (2592000). Default is 7 days (604800).
-    // Try adding 25 days (2160000) -> 604800 + 2160000 = 2764800 > 2592000
-    client.extend_release_window(&1, &2160000);
-}
-
-#[test]
-fn test_auto_release_respects_extension() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let window = 100;
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &Some(window));
-
-    client.extend_release_window(&1, &100);
-
-    // Advance time by 150 - should still fail auto_release (window is now 200)
-    env.ledger().with_mut(|li| {
-        li.timestamp += 150;
-    });
-
-    assert!(!client.can_auto_release(&1));
-    let result = client.try_auto_release(&1);
-    assert!(result.is_err());
-
-    // Advance time by another 100 (total 250) - should now succeed
-    env.ledger().with_mut(|li| {
-        li.timestamp += 100;
-    });
-
-    assert!(client.can_auto_release(&1));
-    client.auto_release(&1);
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Released);
-}
-
-// ============================================================
-// Issue #67 – Custom Release Window Constraints
-// ============================================================
-
-/// Default max window (MAX_TOTAL_RELEASE_WINDOW = 2_592_000) is applied when
-/// no admin has called set_max_release_window. An escrow with a window below
-/// the default must be created successfully.
-#[test]
-fn test_max_window_default_allows_normal_window() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // 7-day window (604800) is well below the 30-day default max (2_592_000)
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(604800));
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.release_window, 604800);
-}
-
-/// A zero release window must be rejected.
-#[test]
-#[should_panic]
-fn test_create_escrow_zero_window() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // window = 0 should panic with ReleaseWindowTooShort
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(0));
-}
-
-/// A window that exceeds the default maximum (2_592_000 seconds) must be rejected.
-#[test]
-#[should_panic]
-fn test_create_escrow_exceeds_default_max_window() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // 31 days in seconds > 30-day default max
-    let too_long: u32 = 31 * 24 * 60 * 60;
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(too_long));
-}
-
-/// Admin can tighten the maximum; subsequent escrows over the new limit fail.
-#[test]
-fn test_set_max_release_window_and_enforcement() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Set a tight maximum of 1 hour (3600 seconds)
-    client.set_max_release_window(&3600u32);
-
-    // Escrow with window exactly at the limit succeeds
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(3600));
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.release_window, 3600);
-}
-
-/// A window that exceeds the admin-configured maximum must be rejected.
-#[test]
-#[should_panic]
-fn test_create_escrow_exceeds_configured_max_window() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Admin sets a 1-hour max
-    client.set_max_release_window(&3600u32);
-
-    // Attempting 2 hours should panic with ReleaseWindowTooLong
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(7200));
-}
-
-/// set_max_release_window with zero must be rejected.
-#[test]
-#[should_panic]
-fn test_set_max_release_window_zero_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    client.set_max_release_window(&0u32);
-}
-
-/// set_max_release_window above the hard safety ceiling must be rejected.
-#[test]
-#[should_panic]
-fn test_set_max_release_window_above_absolute_ceiling_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    // 366 days > hardcoded 365-day ceiling.
-    client.set_max_release_window(&(366u32 * 24 * 60 * 60));
-}
-
-#[test]
-fn test_set_max_release_window_at_absolute_ceiling_succeeds() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    let ceiling = 365u32 * 24 * 60 * 60;
-    client.set_max_release_window(&ceiling);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &Some(ceiling));
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.release_window, ceiling);
-}
-
-// ============================================================
-// Issue #100 – Reputation System / cross-contract plumbing
-// ============================================================
-
-/// set_onboarding_contract stores the address without error.
-#[test]
-fn test_set_onboarding_contract() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let fake_onboarding = Address::generate(&env);
-    // Should not panic
-    client.set_onboarding_contract(&fake_onboarding);
-}
-
-/// Duplicate set_onboarding_contract with the same address performs only one
-/// storage write — the second call is a no-op (Issue #527 / #642).
-#[test]
-fn test_set_onboarding_contract_same_address_skips_storage_write() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let new_onboarding = Address::generate(&env);
-    let events_before = env.events().all().len();
-
-    client.set_onboarding_contract(&new_onboarding);
-    let events_after_first = env.events().all().len();
-    assert_eq!(events_after_first, events_before + 1);
-
-    client.set_onboarding_contract(&new_onboarding);
-    let events_after_second = env.events().all().len();
-    assert_eq!(events_after_second, events_after_first);
-
-    assert_eq!(client.get_onboarding_contract(), new_onboarding);
-}
-
-#[test]
-fn test_get_onboarding_client_uses_configured_address() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    // `get_onboarding_client` reads contract storage, so it has to be invoked
-    // inside the contract's storage context rather than from the test frame.
-    let initial = env.as_contract(&client.address, || {
-        CraftNexusContract::get_onboarding_client(&env)
-    });
-    let (initial_address, _) = initial.expect("setup registers an onboarding contract");
-    assert_eq!(initial_address, client.get_onboarding_contract());
-
-    // Re-pointing the registry must be reflected by the helper on the next read.
-    let onboarding = Address::generate(&env);
-    client.set_onboarding_contract(&onboarding);
-
-    let configured = env.as_contract(&client.address, || {
-        CraftNexusContract::get_onboarding_client(&env)
-    });
-    let (address, _client) = configured.expect("configured address should resolve");
-    assert_eq!(address, onboarding);
-}
-
-/// When no onboarding contract is set, release_funds completes without error.
-#[test]
-fn test_release_funds_no_onboarding_contract() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
-    client.release_funds(&1); // should succeed gracefully
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Released);
-}
-
-/// When no onboarding contract is set, refund completes without error.
-#[test]
-fn test_refund_no_onboarding_contract() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
-    let result = client.try_refund(&1u64);
-    assert!(result.is_ok());
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Refunded);
-}
-
-// ─── Issue #103: Token Whitelisting ──────────────────────────────────────────
-
-/// When no tokens have been whitelisted, any token is accepted (backward compat).
-#[test]
-fn test_whitelist_empty_allows_any_token() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Whitelist is empty — escrow creation must succeed for any token
-    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Active);
-}
-
-/// is_token_whitelisted returns true for any token when the whitelist is empty.
-#[test]
-fn test_is_token_whitelisted_empty_whitelist() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
-
-    assert!(client.is_token_whitelisted(&token_id));
-}
-
-/// Admin can whitelist a token; is_token_whitelisted returns true for it.
-#[test]
-fn test_whitelist_token_admin_can_add() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
-
-    client.whitelist_token(&token_id);
-    assert!(client.is_token_whitelisted(&token_id));
-}
-
-/// Once a token is whitelisted, a different (non-whitelisted) token is rejected.
-#[test]
-#[should_panic]
-fn test_create_escrow_non_whitelisted_token_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Whitelist the first token — enforcement is now active
-    client.whitelist_token(&token_id);
-
-    // Attempt to create an escrow with a different, non-whitelisted token
-    let other_token_admin = Address::generate(&env);
-    let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
-    let other_token_client = token::StellarAssetClient::new(&env, &other_token.address());
-    other_token_client.mint(&buyer, &100_000_000);
-
-    client.create_escrow(
-        &buyer,
-        &seller,
-        &other_token.address(),
-        &10_000,
-        &2,
-        &Some(3600),
-    );
-}
-
-/// Whitelisted token is accepted for escrow creation when whitelist is active.
-#[test]
-fn test_create_escrow_whitelisted_token_succeeds() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    client.whitelist_token(&token_id);
-    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Active);
-}
-
-/// Admin can remove a token from the whitelist; is_token_whitelisted returns false for it.
-#[test]
-fn test_remove_token_from_whitelist() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
-
-    client.whitelist_token(&token_id);
-    assert!(client.is_token_whitelisted(&token_id));
-
-    client.remove_token_from_whitelist(&token_id);
-    // Whitelist is now empty again — all tokens permitted
-    assert!(client.is_token_whitelisted(&token_id));
-}
-
-/// After removing the last token, escrow creation succeeds for any token again.
-#[test]
-fn test_empty_whitelist_after_removal_allows_any_token() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Add then immediately remove to leave whitelist empty
-    client.whitelist_token(&token_id);
-    client.remove_token_from_whitelist(&token_id);
-
-    // Should succeed — empty whitelist means no enforcement
-    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Active);
-}
-
-/// Batch escrow creation fails if a token in the batch is not whitelisted.
-#[test]
-fn test_batch_escrow_non_whitelisted_token_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Whitelist the first token — enforcement is now active
-    client.whitelist_token(&token_id);
-
-    // Build a batch with a non-whitelisted second token
-    let other_token_admin = Address::generate(&env);
-    let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
-
-    let params = soroban_sdk::vec![
-        &env,
-        EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: other_token.address(),
-            amount: 10_000,
-            order_id: 10,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        },
-    ];
-    let result = client.try_create_batch_escrow(&1u64, &params);
-    assert!(result.is_err());
-}
-
-// Ensure that removing a token from the whitelist does not prevent state
-// transitions (release/refund) for escrows that were created while the
-// token was whitelisted. This prevents funds from being locked if the
-// whitelist changes after escrow creation (Issue #201 acceptance).
-#[test]
-fn test_release_succeeds_after_whitelist_removal() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
-
-    // Mint funds to buyer and whitelist the token
-    token_admin.mint(&buyer, &100_000_000);
-    client.whitelist_token(&token_id);
-
-    // Create escrow while token is whitelisted
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-
-    // Admin removes token from whitelist (enforcement now changes)
-    client.remove_token_from_whitelist(&token_id);
-
-    // Release funds — must succeed even though token is no longer whitelisted
-    client.release_funds(&1);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Released);
-
-    let token_client = token::Client::new(&env, &token_id);
-    // Seller receives 50_000_000 - fee (5%) = 47_500_000
-    assert_eq!(token_client.balance(&seller), 47_500_000);
-    // Platform receives fee
-    assert_eq!(token_client.balance(&platform_wallet), 2_500_000);
-}
-
-/// Multiple tokens can be whitelisted independently.
-#[test]
-fn test_multiple_tokens_on_whitelist() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Register a second token
-    let token2_admin = Address::generate(&env);
-    let token2 = env.register_stellar_asset_contract_v2(token2_admin.clone());
-    let token2_client = token::StellarAssetClient::new(&env, &token2.address());
-    token2_client.mint(&buyer, &100_000_000);
-
-    client.whitelist_token(&token_id);
-    client.whitelist_token(&token2.address());
-
-    assert!(client.is_token_whitelisted(&token_id));
-    assert!(client.is_token_whitelisted(&token2.address()));
-
-    // Both should succeed in escrow creation
-    client.create_escrow(&buyer, &seller, &token_id, &10_000, &1, &Some(3600));
-    client.create_escrow(&buyer, &seller, &token2.address(), &10_000, &2, &Some(3600));
-    assert_eq!(client.get_escrow(&1).status, EscrowStatus::Active);
-    assert_eq!(client.get_escrow(&2).status, EscrowStatus::Active);
-}
-
-#[test]
-fn test_whitelist_stores_tokens_as_individual_keys() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
-
-    client.whitelist_token(&token_id);
-
-    assert!(env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .has(&DataKey::WhitelistedTokenIndexed(token_id.clone()))
-    }));
-    assert!(env.as_contract(&client.address, || {
-        !env.storage().persistent().has(&DataKey::WhitelistedTokens)
-    }));
-    let count: u32 = env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .get(&DataKey::WhitelistedTokenCount)
-            .unwrap_or(0u32)
-    });
-    assert_eq!(count, 1);
-}
-
-// ============================================================
-// Decimal validation on whitelist_token
-// ============================================================
-
-/// Tokens with 0 decimals (minimum boundary) are accepted.
-#[test]
-fn test_whitelist_token_accepts_zero_decimals() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    use crate::onboarding::decimal_test_token::{DecimalTestToken, DecimalTestTokenClient};
-    let admin = Address::generate(&env);
-    let contract_id = env.register_contract(None, DecimalTestToken);
-    DecimalTestTokenClient::new(&env, &contract_id).initialize(&admin, &0u32);
-
-    client.whitelist_token(&contract_id);
-    assert!(client.is_token_whitelisted(&contract_id));
-}
-
-/// Tokens with 7 decimals (standard Stellar) are accepted.
-#[test]
-fn test_whitelist_token_accepts_seven_decimals() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    use crate::onboarding::decimal_test_token::{DecimalTestToken, DecimalTestTokenClient};
-    let admin = Address::generate(&env);
-    let contract_id = env.register_contract(None, DecimalTestToken);
-    DecimalTestTokenClient::new(&env, &contract_id).initialize(&admin, &7u32);
-
-    client.whitelist_token(&contract_id);
-    assert!(client.is_token_whitelisted(&contract_id));
-}
-
-/// Tokens with 18 decimals (maximum boundary) are accepted.
-#[test]
-fn test_whitelist_token_accepts_eighteen_decimals() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    use crate::onboarding::decimal_test_token::{DecimalTestToken, DecimalTestTokenClient};
-    let admin = Address::generate(&env);
-    let contract_id = env.register_contract(None, DecimalTestToken);
-    DecimalTestTokenClient::new(&env, &contract_id).initialize(&admin, &18u32);
-
-    client.whitelist_token(&contract_id);
-    assert!(client.is_token_whitelisted(&contract_id));
-}
-
-/// Tokens with 19 decimals (one above the maximum) are rejected with
-/// InvalidTokenDecimals; the token must not appear in the whitelist.
-#[test]
-fn test_whitelist_token_rejects_nineteen_decimals() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    use crate::onboarding::decimal_test_token::{DecimalTestToken, DecimalTestTokenClient};
-    let admin = Address::generate(&env);
-    let contract_id = env.register_contract(None, DecimalTestToken);
-    DecimalTestTokenClient::new(&env, &contract_id).initialize(&admin, &19u32);
-
-    let result = client.try_whitelist_token(&contract_id);
-    assert_eq!(
-        result,
-        Err(Ok(Error::InvalidTokenDecimals)),
-        "expected InvalidTokenDecimals for 19-decimal token"
-    );
-    // Token must not have been added to the whitelist
-    assert_eq!(
-        client.get_whitelisted_token_count(),
-        0,
-        "whitelist count must stay 0 after rejection"
-    );
-}
-
-/// Tokens reporting 255 decimals (malformed metadata) are rejected with
-/// InvalidTokenDecimals.
-#[test]
-fn test_whitelist_token_rejects_255_decimals() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    use crate::onboarding::decimal_test_token::{DecimalTestToken, DecimalTestTokenClient};
-    let admin = Address::generate(&env);
-    let contract_id = env.register_contract(None, DecimalTestToken);
-    DecimalTestTokenClient::new(&env, &contract_id).initialize(&admin, &255u32);
-
-    let result = client.try_whitelist_token(&contract_id);
-    assert_eq!(
-        result,
-        Err(Ok(Error::InvalidTokenDecimals)),
-        "expected InvalidTokenDecimals for 255-decimal token"
-    );
-    assert_eq!(
-        client.get_whitelisted_token_count(),
-        0,
-        "whitelist count must stay 0 after rejection"
-    );
-}
-
-// ============================================================
-// Issue #643 – Fee token config migration audit
-// ============================================================
-
-#[test]
-fn test_migrate_fee_token_configs_migrates_twenty_tokens_and_emits_summary() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let mut fee_tokens = vec![&env];
-    for i in 0..20u32 {
-        let token = Address::generate(&env);
-        fee_tokens.push_back(token.clone());
-
-        env.as_contract(&client.address, || {
-            env.storage().persistent().set(
-                &DataKey::TotalFees(token.clone()),
-                &((i as i128 + 1) * 1_000),
-            );
-        });
-    }
-
-    env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .set(&DataKey::FeeTokenIndex, &fee_tokens);
-    });
-
-    let migrated = client.migrate_fee_token_configs();
-    assert_eq!(migrated, 20);
-
-    for i in 0..fee_tokens.len() {
-        let token = fee_tokens.get(i).unwrap();
-        let cfg = client.get_fee_token_config(&token).unwrap();
-        assert_eq!(
-            cfg,
-            FeeTokenInfo {
-                active: true,
-                custom_fee_bps: None,
-                accumulated: (i as i128 + 1) * 1_000,
-            }
-        );
-    }
-
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
-    assert_eq!(last_event.0, client.address);
-    assert_eq!(
-        last_event.1,
-        vec![&env, Symbol::new(&env, "fee_cfg_migrated").into_val(&env)]
-    );
-
-    let summary: FeeTokenConfigsMigratedEvent = last_event.2.try_into_val(&env).unwrap();
-    assert_eq!(
-        summary,
-        FeeTokenConfigsMigratedEvent {
-            scanned_tokens: 20,
-            migrated_configs: 20,
-            skipped_existing: 0,
+#[contract]
+/// CraftNexus escrow contract.
+///
+/// # Storage model
+/// - Escrows are stored under `(ESCROW, order_id)` as a single compact record.
+/// - Enumeration uses count + indexed keys (e.g. `EscrowCount` +
+///   `GlobalEscrowIdIndexed(i)`) to avoid unbounded `Vec` growth.
+///
+/// # TTL model
+/// - Persistent entries extend TTL on write via `extend_persistent`.
+/// - Hot index reads use `extend_persistent_read` with a lower threshold to
+///   reduce rent-refresh overhead while still preventing accidental expiry.
+///
+/// # Onboarding integration
+/// - The admin can register an onboarding contract address.
+/// - Cross-contract calls are wrapped in `try_invoke_contract` helpers so an
+///   onboarding failure never bricks escrow settlement.
+pub struct CraftNexusContract;
+
+impl CraftNexusContract {
+    pub fn enter_reentry_guard(env: &Env) {
+        if env.storage().temporary().has(&DataKey::ReentryGuard) {
+            env.panic_with_error(crate::Error::ReentryDetected);
         }
-    );
+        env.storage().temporary().set(&DataKey::ReentryGuard, &true);
+    }
+
+    pub fn exit_reentry_guard(env: &Env) {
+        env.storage().temporary().remove(&DataKey::ReentryGuard);
+    }
 }
 
-#[test]
-fn test_migrate_fee_token_configs_is_idempotent_and_preserves_existing_configs() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+/// Alias and compatibility layers
+pub const ESCROW_CONTRACT: CraftNexusContract = CraftNexusContract;
 
-    let mut fee_tokens = vec![&env];
-    for i in 0..20u32 {
-        let token = Address::generate(&env);
-        fee_tokens.push_back(token.clone());
+pub type EscrowContractClient<'a> = CraftNexusContractClient<'a>;
 
-        env.as_contract(&client.address, || {
+/// Guard to ensure reentry protection is cleared even if a panic or error occurs.
+/// This is essential to prevent contract locks from persisting across failed calls.
+/// Automatically removes the guard when dropped, ensuring cleanup in all control flows.
+struct ReentryGuardScope<'a> {
+    env: &'a Env,
+}
+
+impl<'a> ReentryGuardScope<'a> {
+    fn new(env: &'a Env) -> Self {
+        CraftNexusContract::enter_reentry_guard(env);
+        ReentryGuardScope { env }
+    }
+}
+
+impl<'a> Drop for ReentryGuardScope<'a> {
+    fn drop(&mut self) {
+        CraftNexusContract::exit_reentry_guard(self.env);
+    }
+}
+
+#[contractimpl]
+impl CraftNexusContract {
+    fn validate_ipfs_cid(cid: &String) -> bool {
+        let len = cid.len() as usize;
+        if len == 0 || len > 128 {
+            return false;
+        }
+
+        let mut buf = [0u8; 128];
+        cid.copy_into_slice(&mut buf[0..len]);
+        let cid_bytes = &buf[0..len];
+
+        let is_v0 = len == 46
+            && cid_bytes[0] == b'Q'
+            && cid_bytes[1] == b'm'
+            && cid_bytes.iter().all(|b| Self::is_base58_btc_char(*b));
+
+        if is_v0 {
+            return true;
+        }
+
+        // CIDv1: minimum 3 chars (multibase prefix + version byte + codec)
+        if len < 3 {
+            return false;
+        }
+
+        let prefix = cid_bytes[0];
+        let payload = &cid_bytes[1..];
+
+        match prefix {
+            // base32lower (most common CIDv1 encoding)
+            b'b' => {
+                if !(50..=100).contains(&len) || cid_bytes[1] != b'a' {
+                    return false;
+                }
+                payload
+                    .iter()
+                    .all(|b| matches!(*b, b'a'..=b'z' | b'2'..=b'7'))
+            }
+            // base16lower (hex)
+            b'f' => {
+                if !(60..=120).contains(&len) || cid_bytes[1] != b'0' || cid_bytes[2] != b'1' {
+                    return false;
+                }
+                payload
+                    .iter()
+                    .all(|b| matches!(*b, b'0'..=b'9' | b'a'..=b'f'))
+            }
+            // base58btc
+            b'z' => {
+                if !(40..=100).contains(&len) {
+                    return false;
+                }
+                payload.iter().all(|b| Self::is_base58_btc_char(*b))
+            }
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    fn is_base58_btc_char(byte: u8) -> bool {
+        BASE58_BTC_CHARSET[byte as usize]
+    }
+
+    /// Validate an optional IPFS CID string, panicking with `InvalidIpfsHash` if present but invalid.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `ipfs_hash` - Optional CID string to validate
+    ///
+    /// # Errors
+    /// Panics with `Error::InvalidIpfsHash` if the CID is present but fails `validate_ipfs_cid`.
+    ///
+    /// # Storage side-effects
+    /// None — this is a pure validation helper with no storage reads or writes.
+    #[inline(always)]
+    fn validate_optional_ipfs_hash(env: &Env, ipfs_hash: &Option<String>) {
+        if let Some(cid) = ipfs_hash {
+            if !Self::validate_ipfs_cid(cid) {
+                env.panic_with_error(crate::Error::InvalidIpfsHash);
+            }
+        }
+    }
+
+    /// Validate an optional metadata hash, panicking with `InvalidMetadataHash` if present but not 32 bytes.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `metadata_hash` - Optional raw bytes to validate
+    ///
+    /// # Errors
+    /// Panics with `Error::InvalidMetadataHash` if the hash is present but its length is not exactly 32 bytes.
+    ///
+    /// # Storage side-effects
+    /// None — this is a pure validation helper with no storage reads or writes.
+    #[inline(always)]
+    fn validate_optional_metadata_hash(env: &Env, metadata_hash: &Option<Bytes>) {
+        if let Some(hash) = metadata_hash {
+            if hash.len() != 32 {
+                env.panic_with_error(crate::Error::InvalidMetadataHash);
+            }
+        }
+    }
+
+    fn validate_optional_service_agreement_hash(env: &Env, hash: &Option<Bytes>) {
+        if let Some(h) = hash {
+            if h.len() != 32 {
+                env.panic_with_error(crate::Error::InvalidServiceAgreementHash);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn get_admin(env: &Env) -> Result<Address, Error> {
+        let config: PlatformConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlatformConfig)
+            .ok_or(Error::PlatformNotInitialized)?;
+        Ok(config.admin)
+    }
+
+    /// Validates admin address to ensure it's not zero/default and is properly initialized (#240)
+    /// This prevents common configuration errors and hardens against corruption.
+    ///
+    /// Storage-layout note: this validator sits on the hot path for any
+    /// admin-gated mutation. Checks are ordered cheapest-first so the
+    /// common case (a structurally valid candidate that differs from
+    /// the current contract address) returns without touching persistent
+    /// storage at all — a small but consistent gas saving across every
+    /// transfer / propose / accept_admin call.
+    fn validate_admin_address(env: &Env, admin: &Address) -> Result<(), Error> {
+        // Ensure the address is not the contract's own address — a common
+        // misconfiguration that would lock the contract out of admin
+        // operations forever.
+        let contract = env.current_contract_address();
+        if admin == &contract {
+            return Err(Error::InvalidAdminAddress);
+        }
+        // Note: Additional address validation could be performed here
+        // (e.g., checking if address exists on ledger, format validation, etc.)
+        Ok(())
+    }
+
+    /// Validates a proposed platform wallet address (#707).
+    ///
+    /// Rejects addresses that would cause `transfer_platform_fee` to panic at
+    /// the host level — specifically the contract's own address, which is
+    /// structurally valid but semantically meaningless as a fee destination and
+    /// would lock collected fees inside the escrow contract forever.
+    ///
+    /// Called by both `initialize` and `update_platform_wallet` so the
+    /// invariant is enforced at every write point rather than only at read time.
+    fn validate_platform_wallet(env: &Env, wallet: &Address) -> Result<(), Error> {
+        if wallet == &env.current_contract_address() {
+            return Err(Error::InvalidPlatformWallet);
+        }
+        Ok(())
+    }
+
+    /// Gets platform configuration with fallback mechanism for corruption recovery (#240)
+    /// Returns the primary config if valid, falls back to last-known good state if corrupted
+    #[allow(dead_code)]
+    fn get_platform_config_safe(env: &Env) -> Result<PlatformConfig, Error> {
+        let config: Option<PlatformConfig> = env.storage().persistent().get(&PLATFORM_FEE);
+
+        if let Some(cfg) = config {
+            // Validate that critical fields are initialized
+            if Self::validate_admin_address(env, &cfg.admin).is_ok() {
+                Self::extend_persistent(env, &PLATFORM_FEE);
+                return Ok(cfg);
+            }
+        }
+
+        // If primary config is missing or corrupted, attempt to recover using fallback admin
+        if let Some(fallback_admin) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::FallbackAdmin)
+        {
+            Self::extend_persistent(env, &DataKey::FallbackAdmin);
+            // Emit recovery event for audit trail
+            env.events().publish(
+                (Symbol::new(env, "admin_config_recovered"), true),
+                String::from_str(env, "Using fallback admin after config corruption detected"),
+            );
+            // Return a minimal valid config with fallback admin
+            // This ensures critical operations remain accessible even if config is corrupted
+            return Ok(PlatformConfig {
+                platform_fee_bps: 500, // 5% default fee
+                platform_wallet: fallback_admin.clone(),
+                admin: fallback_admin,
+                arbitrator: env.current_contract_address(),
+                moderator: None,
+                is_paused: true, // Safer to default to paused during recovery
+                min_stake_required: 0,
+                pending_admin: None,
+                wasm_upgrade_cooldown: DEFAULT_WASM_UPGRADE_COOLDOWN,
+                max_dispute_duration: DEFAULT_MAX_DISPUTE_DURATION,
+                stake_cooldown: DEFAULT_STAKE_COOLDOWN,
+                expired_dispute_fee_policy: ExpiredDisputeFeePolicy::RefundFullNoPlatformFee,
+                min_release_window: DEFAULT_MIN_RELEASE_WINDOW,
+                dispute_escalation_window: DEFAULT_DISPUTE_ESCALATION_WINDOW,
+                evidence_challenge_window: DEFAULT_EVIDENCE_CHALLENGE_WINDOW,
+            });
+        }
+
+        Err(Error::CorruptedPlatformConfig)
+    }
+
+    /// Emits audit event for admin changes to maintain a complete audit trail (#240)
+    fn emit_admin_changed(
+        env: &Env,
+        previous_admin: Address,
+        new_admin: Address,
+        change_type: &str,
+    ) {
+        env.events().publish(
+            (Symbol::new(env, "admin_changed"), change_type.as_bytes()),
+            (previous_admin, new_admin),
+        );
+    }
+
+    /// Stores fallback admin address for recovery purposes (#240)
+    /// This ensures that even if primary admin storage is corrupted, platform can be recovered
+    fn set_fallback_admin(env: &Env, admin: Address) -> Result<(), Error> {
+        Self::validate_admin_address(env, &admin)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::FallbackAdmin, &admin);
+        Self::extend_persistent(env, &DataKey::FallbackAdmin);
+        Ok(())
+    }
+
+    fn emit_escrow_created(env: &Env, event: EscrowEvent) {
+        env.events()
+            .publish((symbol_short!("escrow"), event.escrow_id), event);
+    }
+
+    fn emit_escrow_resolved_event(env: &Env, event: EscrowResolvedEvent) {
+        env.events().publish(
+            (Symbol::new(env, "escrow_resolved"), event.escrow_id),
+            event,
+        );
+    }
+
+    fn emit_reputation_update(env: &Env, event: ReputationUpdateEvent) {
+        env.events().publish(
+            (
+                Symbol::new(env, "stake_reputation_update"),
+                event.address.clone(),
+            ),
+            event,
+        );
+    }
+
+    fn emit_config_updated(
+        env: &Env,
+        field_name: &str,
+        old_value: ConfigValue,
+        new_value: ConfigValue,
+    ) {
+        env.events().publish(
+            (
+                Symbol::new(env, "admin_config_updated"),
+                Symbol::new(env, field_name),
+            ),
+            ConfigUpdatedEvent {
+                field_name: Symbol::new(env, field_name),
+                old_value,
+                new_value,
+            },
+        );
+    }
+
+    fn emit_artisan_fee_tier_updated(env: &Env, artisan: Address, fee_bps: u32) {
+        env.events().publish(
+            (Symbol::new(env, "admin_fee_tier_updated"), artisan.clone()),
+            ArtisanFeeTierUpdatedEvent { artisan, fee_bps },
+        );
+    }
+
+    fn emit_metadata_verified(env: &Env, order_id: u32, verifier: Address) {
+        env.events().publish(
+            (
+                Symbol::new(env, "escrow_metadata_verified"),
+                (order_id as u64),
+            ),
+            MetadataVerifiedEvent {
+                order_id: order_id as u64,
+                verifier,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    fn emit_platform_paused(env: &Env, initiator: Address) {
+        env.events().publish(
+            (Symbol::new(env, "admin_platform_paused"), initiator.clone()),
+            PlatformPausedEvent {
+                initiator,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    fn emit_platform_unpaused(env: &Env, initiator: Address) {
+        env.events().publish(
+            (
+                Symbol::new(env, "admin_platform_unpaused"),
+                initiator.clone(),
+            ),
+            PlatformUnpausedEvent {
+                initiator,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// Atomically appends one escrow ID to the indexed global registry and
+    /// increments `EscrowCount` (#515 / Issue #226).
+    fn update_escrow_indices_atomic(env: &Env, order_id: u32) {
+        // Issue #515 — O(1) indexed append replaces monolithic AllEscrowIds Vec
+        // rewrites. Legacy Vec entries are migrated lazily on first touch.
+        Self::migrate_legacy_all_escrow_ids(env);
+
+        let count_key = DataKey::EscrowCount;
+        let count = Self::get_persistent_u32(env, &count_key);
+
+        let index_key = DataKey::GlobalEscrowIdIndexed(count);
+        env.storage().persistent().set(&index_key, &order_id);
+        Self::extend_persistent(env, &index_key);
+
+        env.storage().persistent().set(&count_key, &(count + 1));
+        Self::extend_persistent(env, &count_key);
+    }
+
+    /// Atomically appends escrow IDs to the indexed global registry for batch
+    /// operations (#515). Each ID is stored under its own key so batch creates
+    /// avoid rewriting a growing Vec.
+    fn update_escrow_indices_batch_atomic(env: &Env, order_ids: &soroban_sdk::Vec<u32>) {
+        if order_ids.is_empty() {
+            return;
+        }
+
+        Self::migrate_legacy_all_escrow_ids(env);
+
+        let count_key = DataKey::EscrowCount;
+        let mut count = Self::get_persistent_u32(env, &count_key);
+
+        for i in 0..order_ids.len() {
+            if let Some(id) = order_ids.get(i) {
+                let index_key = DataKey::GlobalEscrowIdIndexed(count);
+                env.storage().persistent().set(&index_key, &id);
+                Self::extend_persistent(env, &index_key);
+                count += 1;
+            }
+        }
+
+        env.storage().persistent().set(&count_key, &count);
+        Self::extend_persistent(env, &count_key);
+    }
+
+    // IMPORTANT: this validation is intentionally scoped to escrow creation-time
+    // flows only. Do not call from payout/distribution paths, or dynamic minimum
+    // changes could trap dust balances in existing escrows.
+    fn check_min_amount(env: &Env, token: Address, amount: i128) -> Result<(), Error> {
+        if amount <= 0 {
+            return Err(Error::AmountBelowMinimum);
+        }
+
+        let min_amount: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MinEscrowAmount(token))
+            .unwrap_or(0); // If not set, allow any positive amount
+
+        if amount < min_amount {
+            return Err(Error::AmountBelowMinimum);
+        }
+
+        Ok(())
+    }
+
+    /// Records a stake operation in the history queue for audit trail and analytics (#237)
+    /// Implements bounded queue with automatic pruning to prevent unbounded storage growth
+    fn record_stake_history(
+        env: &Env,
+        artisan: &Address,
+        new_stake: i128,
+        operation: &str,
+    ) -> Result<(), Error> {
+        let count_key = DataKey::StakeHistoryCount(artisan.clone());
+        let _history_key = DataKey::StakeHistory(artisan.clone());
+
+        let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        // Check if we need to prune before adding new entry
+        if current_count >= MAX_STAKE_HISTORY_SIZE {
+            // Queue is full, cannot add more entries
+            return Err(Error::StakeQueueFull);
+        }
+
+        // If approaching capacity threshold, schedule pruning
+        if current_count >= STAKE_HISTORY_PRUNE_THRESHOLD {
+            // Keep only most recent 50% of entries to free up space
+            // This is done lazily - oldest entries will be overwritten on next full cycle
+            let new_count = current_count / 2;
+            env.storage().persistent().set(&count_key, &new_count);
+            Self::extend_persistent(env, &count_key);
+        }
+
+        // Record timestamp of this operation for maintenance checks
+        let modified_key = DataKey::StakeLastModified(artisan.clone());
+        env.storage()
+            .persistent()
+            .set(&modified_key, &env.ledger().timestamp());
+        Self::extend_persistent(env, &modified_key);
+
+        // Emit audit event
+        env.events().publish(
+            (Symbol::new(env, "stake_operation"), operation.as_bytes()),
+            (artisan.clone(), new_stake),
+        );
+
+        Ok(())
+    }
+
+    /// Prunes obsolete stake history entries when queue reaches capacity (#237)
+    /// Implements safe cleanup strategy that preserves recent entries for audit trail
+    #[allow(dead_code)]
+    fn prune_stake_history(env: &Env, artisan: &Address) {
+        let count_key = DataKey::StakeHistoryCount(artisan.clone());
+        let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        if current_count > 0 {
+            // Keep most recent 50 entries, discard older ones
+            let retained_count = current_count.min(50);
+            env.storage().persistent().set(&count_key, &retained_count);
+            Self::extend_persistent(env, &count_key);
+        }
+    }
+
+    #[inline(always)]
+    fn update_active_obligations(env: &Env, user: &Address, delta: i32) {
+        let key = DataKey::ActiveObligations(user.clone());
+        let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_val = if delta > 0 {
+            count.saturating_add(delta as u32)
+        } else {
+            count.saturating_sub((-delta) as u32)
+        };
+        env.storage().persistent().set(&key, &new_val);
+        Self::extend_persistent(env, &key);
+    }
+
+    #[inline(always)]
+    fn update_active_dispute_count(env: &Env, delta: i32) {
+        let key = DataKey::ActiveDisputeCount;
+        let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_val = if delta > 0 {
+            count.saturating_add(delta as u32)
+        } else {
+            count.saturating_sub((-delta) as u32)
+        };
+        env.storage().persistent().set(&key, &new_val);
+        Self::extend_persistent(env, &key);
+    }
+
+    pub fn get_active_dispute_count(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ActiveDisputeCount)
+            .unwrap_or(0)
+    }
+
+    #[inline(always)]
+    fn get_total_volume(env: &Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TotalVolume)
+            .unwrap_or(0)
+    }
+
+    #[inline(always)]
+    fn read_persistent<K, V>(env: &Env, key: &K) -> Option<V>
+    where
+        K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>,
+        V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>,
+    {
+        let value = env.storage().persistent().get::<K, V>(key);
+        if value.is_some() {
+            Self::extend_persistent(env, key);
+        }
+        value
+    }
+
+    #[inline(always)]
+    fn update_total_locked(env: &Env, token: &Address, delta: i128) {
+        let key = DataKey::TotalLocked(token.clone());
+        let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_total = current.saturating_add(delta);
+        env.storage().persistent().set(&key, &new_total);
+        Self::extend_persistent(env, &key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ReconciliationReport(token.clone()));
+    }
+
+    #[inline(always)]
+    fn update_total_staked(env: &Env, token: &Address, delta: i128) {
+        let key = DataKey::TotalStaked(token.clone());
+        let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_total = current.saturating_add(delta);
+        env.storage().persistent().set(&key, &new_total);
+        Self::extend_persistent(env, &key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ReconciliationReport(token.clone()));
+    }
+
+    /// Extend the TTL of a persistent storage entry using standardized values.
+    #[inline(always)]
+    fn extend_persistent(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
+    }
+
+    #[inline(always)]
+    fn extend_persistent_read(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
+    }
+
+    /// Read a persistent `u32` and extend its TTL when the key exists (#515).
+    #[inline(always)]
+    fn get_persistent_u32(env: &Env, key: &DataKey) -> u32 {
+        Self::read_persistent(env, key).unwrap_or(0u32)
+    }
+
+    /// Read a persistent `u64` and extend its TTL when the key exists (#431 / key index #30).
+    #[inline(always)]
+    fn get_persistent_u64(env: &Env, key: &DataKey) -> u64 {
+        match env.storage().persistent().get(key) {
+            Some(value) => {
+                Self::extend_persistent(env, key);
+                value
+            }
+            None => 0u64,
+        }
+    }
+
+    #[inline(always)]
+    fn get_whitelist_count(env: &Env) -> u32 {
+        let count_key = DataKey::WhitelistedTokenCount;
+        Self::read_persistent(env, &count_key).unwrap_or(0u32)
+    }
+
+    #[inline(always)]
+    fn set_whitelist_count(env: &Env, count: u32) {
+        let count_key = DataKey::WhitelistedTokenCount;
+        env.storage().persistent().set(&count_key, &count);
+        Self::extend_persistent(env, &count_key);
+    }
+
+    fn migrate_legacy_whitelisted_tokens(env: &Env) {
+        let legacy_key = DataKey::WhitelistedTokens;
+        if !env.storage().persistent().has(&legacy_key) {
+            return;
+        }
+
+        let legacy_whitelist: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&legacy_key)
+            .unwrap_or(Map::new(env));
+
+        let mut count = Self::get_whitelist_count(env);
+        for (token, enabled) in legacy_whitelist.iter() {
+            if enabled {
+                let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+                if !env.storage().persistent().has(&token_key) {
+                    env.storage().persistent().set(&token_key, &true);
+                    Self::extend_persistent(env, &token_key);
+                    count += 1;
+                }
+            }
+        }
+
+        if count > 0 {
+            Self::set_whitelist_count(env, count);
+        } else {
             env.storage()
                 .persistent()
-                .set(&DataKey::TotalFees(token.clone()), &((i as i128 + 1) * 500));
-        });
+                .remove(&DataKey::WhitelistedTokenCount);
+        }
+
+        env.storage().persistent().remove(&legacy_key);
     }
 
-    env.as_contract(&client.address, || {
+    /// Migrate legacy `AllEscrowIds` Vec storage to indexed keys (#515).
+    fn migrate_legacy_all_escrow_ids(env: &Env) {
+        let legacy_key = DataKey::AllEscrowIds;
+        if !env.storage().persistent().has(&legacy_key) {
+            return;
+        }
+
+        let all_ids: soroban_sdk::Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&legacy_key)
+            .unwrap_or(soroban_sdk::Vec::new(env));
+
+        for i in 0..all_ids.len() {
+            if let Some(id) = all_ids.get(i) {
+                let index_key = DataKey::GlobalEscrowIdIndexed(i);
+                if !env.storage().persistent().has(&index_key) {
+                    env.storage().persistent().set(&index_key, &id);
+                    Self::extend_persistent(env, &index_key);
+                }
+            }
+        }
+
+        let count_key = DataKey::EscrowCount;
+        let stored_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        if stored_count < all_ids.len() {
+            env.storage().persistent().set(&count_key, &all_ids.len());
+            Self::extend_persistent(env, &count_key);
+        }
+
+        env.storage().persistent().remove(&legacy_key);
+    }
+
+    /// Returns the configured maximum release window (in seconds).
+    /// Falls back to MAX_TOTAL_RELEASE_WINDOW (30 days) if not set by admin.
+    #[inline(always)]
+    fn get_max_release_window(env: &Env) -> u32 {
+        let key = DataKey::MaxReleaseWindow;
+        Self::read_persistent(env, &key).unwrap_or(MAX_TOTAL_RELEASE_WINDOW)
+    }
+
+    /// Returns the configured onboarding contract address, if any (#243).
+    fn get_onboarding_address(env: &Env) -> Option<Address> {
         env.storage()
             .persistent()
-            .set(&DataKey::FeeTokenIndex, &fee_tokens);
-
-        let preset_one = fee_tokens.get(3).unwrap();
-        let preset_two = fee_tokens.get(11).unwrap();
-
-        env.storage().persistent().set(
-            &DataKey::FeeTokenConfig(preset_one.clone()),
-            &FeeTokenInfo {
-                active: false,
-                custom_fee_bps: Some(250),
-                accumulated: 777_777,
-            },
-        );
-        env.storage().persistent().set(
-            &DataKey::FeeTokenConfig(preset_two.clone()),
-            &FeeTokenInfo {
-                active: true,
-                custom_fee_bps: Some(900),
-                accumulated: 888_888,
-            },
-        );
-    });
-
-    let migrated_first = client.migrate_fee_token_configs();
-    assert_eq!(migrated_first, 18);
-
-    let preset_one = fee_tokens.get(3).unwrap();
-    let preset_two = fee_tokens.get(11).unwrap();
-    assert_eq!(
-        client.get_fee_token_config(&preset_one).unwrap(),
-        FeeTokenInfo {
-            active: false,
-            custom_fee_bps: Some(250),
-            accumulated: 777_777,
-        }
-    );
-    assert_eq!(
-        client.get_fee_token_config(&preset_two).unwrap(),
-        FeeTokenInfo {
-            active: true,
-            custom_fee_bps: Some(900),
-            accumulated: 888_888,
-        }
-    );
-
-    for i in 0..fee_tokens.len() {
-        let token = fee_tokens.get(i).unwrap();
-        let cfg = client.get_fee_token_config(&token).unwrap();
-        if token != preset_one && token != preset_two {
-            assert_eq!(
-                cfg,
-                FeeTokenInfo {
-                    active: true,
-                    custom_fee_bps: None,
-                    accumulated: (i as i128 + 1) * 500,
-                }
-            );
-        }
+            .get::<DataKey, Address>(&DataKey::OnboardingContractAddress)
     }
 
-    let migrated_second = client.migrate_fee_token_configs();
-    assert_eq!(migrated_second, 0);
-
-    for i in 0..fee_tokens.len() {
-        let token = fee_tokens.get(i).unwrap();
-        assert!(client.get_fee_token_config(&token).is_some());
+    /// Build a client for the configured onboarding contract, if one is set.
+    ///
+    /// This helper is used by the escrow contract’s safe cross-contract
+    /// integration so onboarding updates remain behind a single, explicit
+    /// entry point instead of being spread across ad-hoc address lookups.
+    fn get_onboarding_client(env: &Env) -> Option<(Address, OnboardingClient<'_>)> {
+        Self::get_onboarding_address(env).map(|address| {
+            let client = OnboardingClient::new(env, &address);
+            (address, client)
+        })
     }
 
-    let events = env.events().all();
-    let latest_event = events.last().unwrap();
-    let latest_summary: FeeTokenConfigsMigratedEvent = latest_event.2.try_into_val(&env).unwrap();
-    assert_eq!(
-        latest_summary,
-        FeeTokenConfigsMigratedEvent {
-            scanned_tokens: 20,
-            migrated_configs: 0,
-            skipped_existing: 20,
-        }
-    );
-}
-
-// ============================================================
-// Issue #111 – Batch Optimization Tests (Additional)
-// ============================================================
-
-/// Test batch creation consolidates storage updates (Issue #111)
-#[test]
-fn test_create_batch_escrow_consolidates_storage() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &500_000);
-
-    let mut batch_params = vec![&env];
-    for i in 0..10 {
-        batch_params.push_back(EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 5_000,
-            order_id: 300 + i,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: None,
-            service_agreement_hash: None,
-        });
-    }
-
-    let results = client.create_batch_escrow(&2u64, &batch_params);
-    assert_eq!(results.len(), 10);
-
-    // Verify buyer's escrow list contains all 10
-    let buyer_escrows = client.get_escrows_by_buyer(&buyer, &0, &100, &false);
-    assert_eq!(buyer_escrows.len(), 10);
-
-    // Verify seller's escrow list contains all 10
-    let seller_escrows = client.get_escrows_by_seller(&seller, &0, &100, &false);
-    assert_eq!(seller_escrows.len(), 10);
-}
-
-// ============================================================
-// Issue #122 – Metadata Privacy Tests
-// ============================================================
-
-/// Test metadata reveal verification with valid content (Issue #122)
-#[test]
-fn test_verify_metadata_reveal_success() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Create content and compute its hash
-    let content = Bytes::from_slice(&env, b"test metadata content");
-    let content_hash = env.crypto().sha256(&content);
-    let content_hash_bytes: Bytes = content_hash.into();
-
-    let escrow = client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &500,
-        &1,
-        &Some(3600),
-        &None,
-        &Some(content_hash_bytes.clone()),
-        &None,
-    );
-
-    assert_eq!(escrow.metadata_hash, Some(content_hash_bytes));
-
-    // Verify the metadata reveal
-    let proof = MetadataRevealProof {
-        content: content.clone(),
-        secret: None,
-    };
-
-    let is_valid = client.verify_metadata_reveal(&1, &proof, &buyer);
-    assert!(is_valid);
-}
-
-#[test]
-fn test_verify_metadata_reveal_authorized_emits_metadata_verified_event() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    let content = Bytes::from_slice(&env, b"test metadata content");
-    let content_hash = env.crypto().sha256(&content);
-    let content_hash_bytes: Bytes = content_hash.into();
-
-    client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &500,
-        &1,
-        &Some(3600),
-        &None,
-        &Some(content_hash_bytes.clone()),
-        &None,
-    );
-
-    let proof = MetadataRevealProof {
-        content: content.clone(),
-        secret: None,
-    };
-
-    let is_valid = client.verify_metadata_reveal_recorded(&1, &proof, &buyer);
-    assert!(is_valid);
-
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
-    assert_eq!(
-        last_event.1,
-        vec![
-            &env,
-            Symbol::new(&env, "escrow_metadata_verified").into_val(&env),
-            (1u64).into_val(&env),
-        ]
-    );
-
-    let event: MetadataVerifiedEvent = last_event.2.try_into_val(&env).unwrap();
-    assert_eq!(event.order_id, 1);
-    assert_eq!(event.verifier, buyer);
-    assert_eq!(event.timestamp, 1711368000);
-}
-
-#[test]
-fn test_set_paused_emits_platform_status_events() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    client.set_paused(&true);
-
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
-    assert_eq!(
-        last_event.1,
-        vec![
-            &env,
-            Symbol::new(&env, "admin_platform_paused").into_val(&env),
-            admin.clone().into_val(&env),
-        ]
-    );
-
-    let paused_event: PlatformPausedEvent = last_event.2.try_into_val(&env).unwrap();
-    assert_eq!(paused_event.initiator, admin.clone());
-    assert_eq!(paused_event.timestamp, 1711368000);
-
-    client.set_paused(&false);
-
-    let events = env.events().all();
-    let last_event = events.last().unwrap();
-    assert_eq!(
-        last_event.1,
-        vec![
-            &env,
-            Symbol::new(&env, "admin_platform_unpaused").into_val(&env),
-            admin.clone().into_val(&env),
-        ]
-    );
-
-    let unpaused_event: PlatformUnpausedEvent = last_event.2.try_into_val(&env).unwrap();
-    assert_eq!(unpaused_event.initiator, admin);
-    assert_eq!(unpaused_event.timestamp, 1711368000);
-}
-
-/// Test metadata reveal verification with invalid content (Issue #122)
-#[test]
-fn test_verify_metadata_reveal_invalid_content() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    let content = Bytes::from_slice(&env, b"test metadata content");
-    let content_hash = env.crypto().sha256(&content);
-    let content_hash_bytes: Bytes = content_hash.into();
-
-    client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &500,
-        &1,
-        &Some(3600),
-        &None,
-        &Some(content_hash_bytes),
-        &None,
-    );
-
-    // Try to verify with different content
-    let wrong_content = Bytes::from_slice(&env, b"wrong content");
-    let proof = MetadataRevealProof {
-        content: wrong_content,
-        secret: None,
-    };
-
-    let is_valid = client.verify_metadata_reveal(&1, &proof, &buyer);
-    assert!(!is_valid);
-}
-
-/// Test metadata reveal verification without metadata hash (Issue #122)
-#[test]
-fn test_verify_metadata_reveal_no_hash() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Create escrow without metadata hash
-    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &Some(3600));
-
-    let content = Bytes::from_slice(&env, b"test metadata content");
-    let proof = MetadataRevealProof {
-        content,
-        secret: None,
-    };
-
-    let is_valid = client.verify_metadata_reveal(&1, &proof, &buyer);
-    assert!(!is_valid);
-}
-
-/// Test get_escrow_metadata returns only metadata fields (Issue #122)
-#[test]
-fn test_get_escrow_metadata_privacy() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    let content = Bytes::from_slice(&env, b"private metadata");
-    let content_hash = env.crypto().sha256(&content);
-    let content_hash_bytes: Bytes = content_hash.into();
-
-    client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &500,
-        &1,
-        &Some(3600),
-        &None,
-        &Some(content_hash_bytes.clone()),
-        &None,
-    );
-
-    let metadata = client.get_escrow_metadata(&1);
-    assert_eq!(metadata.metadata_hash, Some(content_hash_bytes));
-    assert_eq!(metadata.ipfs_hash, None);
-}
-
-// ============================================================
-// Issue #121 – Comprehensive Test Suite
-// ============================================================
-
-/// Test escrow with IPFS hash validation (Issue #121)
-#[test]
-fn test_create_escrow_with_ipfs_hash_validation() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Valid CIDv0 (46 chars starting with Qm)
-    let ipfs_hash = String::from_str(&env, "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9");
-
-    let escrow = client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &500,
-        &1,
-        &Some(3600),
-        &Some(ipfs_hash.clone()),
-        &None,
-        &None,
-    );
-
-    assert_eq!(escrow.ipfs_hash, Some(ipfs_hash));
-}
-
-/// Test escrow creation with both IPFS and metadata hash (Issue #121)
-#[test]
-fn test_create_escrow_with_both_metadata_types() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    let ipfs_hash = String::from_str(&env, "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9");
-    let content = Bytes::from_slice(&env, b"metadata");
-    let metadata_hash = env.crypto().sha256(&content);
-    let metadata_hash_bytes: Bytes = metadata_hash.into();
-
-    let escrow = client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &500,
-        &1,
-        &Some(3600),
-        &Some(ipfs_hash.clone()),
-        &Some(metadata_hash_bytes.clone()),
-        &None,
-    );
-
-    assert_eq!(escrow.ipfs_hash, Some(ipfs_hash));
-    assert_eq!(escrow.metadata_hash, Some(metadata_hash_bytes));
-}
-
-/// Test batch creation with metadata (Issue #121)
-#[test]
-fn test_create_batch_escrow_with_metadata() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &500_000);
-
-    let content = Bytes::from_slice(&env, b"batch metadata");
-    let metadata_hash = env.crypto().sha256(&content);
-    let metadata_hash_bytes: Bytes = metadata_hash.into();
-
-    let mut batch_params = vec![&env];
-    for i in 0..3 {
-        batch_params.push_back(EscrowCreateParams {
-            buyer: buyer.clone(),
-            seller: seller.clone(),
-            token: token_id.clone(),
-            amount: 10_000,
-            order_id: 500 + i,
-            release_window: Some(3600),
-            ipfs_hash: None,
-            metadata_hash: Some(metadata_hash_bytes.clone()),
-            service_agreement_hash: None,
-        });
-    }
-
-    let results = client.create_batch_escrow(&3u64, &batch_params);
-    assert_eq!(results.len(), 3);
-
-    // Verify metadata was stored
-    for i in 0..3 {
-        let metadata = client.get_escrow_metadata(&(500 + i));
-        assert_eq!(metadata.metadata_hash, Some(metadata_hash_bytes.clone()));
-    }
-}
-
-// ============================================================
-// DevEx #119 – Dry-Run Batch Validation
-// ============================================================
-
-#[test]
-fn test_validate_batch_creation() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
-
-    let invalid_amount = EscrowCreateParams {
-        buyer: buyer.clone(),
-        seller: seller.clone(),
-        token: token_id.clone(),
-        amount: 0,
-        order_id: 1,
-        release_window: Some(3600),
-        ipfs_hash: None,
-        metadata_hash: None,
-        service_agreement_hash: None,
-    };
-
-    let invalid_parties = EscrowCreateParams {
-        buyer: buyer.clone(),
-        seller: buyer.clone(),
-        token: token_id.clone(),
-        amount: 1000,
-        order_id: 2,
-        release_window: Some(3600),
-        ipfs_hash: None,
-        metadata_hash: None,
-        service_agreement_hash: None,
-    };
-
-    let valid_param = EscrowCreateParams {
-        buyer: buyer.clone(),
-        seller: seller.clone(),
-        token: token_id.clone(),
-        amount: 1000,
-        order_id: 3,
-        release_window: Some(3600),
-        ipfs_hash: None,
-        metadata_hash: None,
-        service_agreement_hash: None,
-    };
-
-    let mut batch_params = soroban_sdk::Vec::new(&env);
-    batch_params.push_back(invalid_amount);
-    batch_params.push_back(invalid_parties);
-    batch_params.push_back(valid_param);
-
-    let errors = client.validate_batch_creation(&batch_params);
-
-    assert_eq!(errors.len(), 2);
-    assert_eq!(errors.get(0).unwrap(), Error::AmountBelowMinimum);
-    assert_eq!(errors.get(1).unwrap(), Error::SameBuyerSeller);
-    assert!(errors.get(2).is_none());
-}
-
-#[test]
-fn test_validate_batch_creation_rejects_invalid_metadata_hash_length() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
-
-    let mut batch_params = soroban_sdk::Vec::new(&env);
-    batch_params.push_back(EscrowCreateParams {
-        buyer,
-        seller,
-        token: token_id,
-        amount: 1000,
-        order_id: 1,
-        release_window: Some(3600),
-        ipfs_hash: None,
-        metadata_hash: Some(Bytes::from_array(&env, &[9; 31])),
-        service_agreement_hash: None,
-    });
-
-    let errors = client.validate_batch_creation(&batch_params);
-
-    assert_eq!(errors.len(), 1);
-    assert_eq!(errors.get(0).unwrap(), Error::InvalidMetadataHash);
-}
-
-#[test]
-#[should_panic]
-fn test_validate_batch_creation_exceeds_limit() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
-
-    let valid_param = EscrowCreateParams {
-        buyer: buyer.clone(),
-        seller: seller.clone(),
-        token: token_id.clone(),
-        amount: 1000,
-        order_id: 1,
-        release_window: Some(3600),
-        ipfs_hash: None,
-        metadata_hash: None,
-        service_agreement_hash: None,
-    };
-
-    let mut batch_params = soroban_sdk::Vec::new(&env);
-    for _ in 0..101 {
-        // MAX_BATCH_SIZE is 100
-        batch_params.push_back(valid_param.clone());
-    }
-
-    client.validate_batch_creation(&batch_params);
-}
-
-// ── Storage Explorer tests ───────────────────────────────────────────
-
-#[test]
-fn test_get_escrow_count_empty() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    assert_eq!(client.get_escrow_count(), 0);
-}
-
-#[test]
-fn test_get_escrow_count_increments() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &1_000_000);
-
-    assert_eq!(client.get_escrow_count(), 0);
-
-    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &Some(3600));
-    assert_eq!(client.get_escrow_count(), 1);
-
-    client.create_escrow(&buyer, &seller, &token_id, &500, &2, &Some(3600));
-    assert_eq!(client.get_escrow_count(), 2);
-
-    client.create_escrow(&buyer, &seller, &token_id, &500, &3, &Some(3600));
-    assert_eq!(client.get_escrow_count(), 3);
-}
-
-#[test]
-fn test_get_escrow_count_tracks_100_global_indices() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    for order_id in 1u32..=100 {
-        client.create_escrow(&buyer, &seller, &token_id, &100, &order_id, &Some(3600));
-    }
-
-    assert_eq!(client.get_escrow_count(), 100);
-
-    let count_key = DataKey::EscrowCount;
-    let stored_count: u32 = env.as_contract(&client.address, || {
-        env.storage().persistent().get(&count_key).unwrap_or(0u32)
-    });
-    assert_eq!(stored_count, 100);
-
-    for index in 0u32..100 {
-        let index_key = DataKey::GlobalEscrowIdIndexed(index);
-        let stored_id: u32 = env.as_contract(&client.address, || {
-            env.storage().persistent().get(&index_key).unwrap()
-        });
-        assert_eq!(stored_id, index + 1);
-    }
-
-    let first_page = client.get_all_escrow_ids_iterative(&0, &20);
-    assert_eq!(first_page.len(), 20);
-    assert_eq!(first_page.get(0), Some(1u32));
-    assert_eq!(first_page.get(19), Some(20u32));
-
-    let last_page = client.get_all_escrow_ids_iterative(&4, &20);
-    assert_eq!(last_page.len(), 20);
-    assert_eq!(last_page.get(0), Some(81u32));
-    assert_eq!(last_page.get(19), Some(100u32));
-}
-
-#[test]
-fn test_get_all_escrow_ids_iterative_empty() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let ids = client.get_all_escrow_ids_iterative(&0, &10);
-    assert_eq!(ids.len(), 0);
-}
-
-#[test]
-fn test_get_all_escrow_ids_iterative_single_page() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &1_000_000);
-
-    client.create_escrow(&buyer, &seller, &token_id, &100, &10, &Some(3600));
-    client.create_escrow(&buyer, &seller, &token_id, &100, &20, &Some(3600));
-    client.create_escrow(&buyer, &seller, &token_id, &100, &30, &Some(3600));
-
-    let ids = client.get_all_escrow_ids_iterative(&0, &10);
-    assert_eq!(ids.len(), 3);
-    assert_eq!(ids.get(0), Some(10u32));
-    assert_eq!(ids.get(1), Some(20u32));
-    assert_eq!(ids.get(2), Some(30u32));
-}
-
-#[test]
-fn test_get_all_escrow_ids_iterative_pagination() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &1_000_000);
-
-    // Create 5 escrows
-    for i in 1u32..=5 {
-        client.create_escrow(&buyer, &seller, &token_id, &100, &i, &Some(3600));
-    }
-
-    // Page 0, limit 2 → IDs 1, 2
-    let page0 = client.get_all_escrow_ids_iterative(&0, &2);
-    assert_eq!(page0.len(), 2);
-    assert_eq!(page0.get(0), Some(1u32));
-    assert_eq!(page0.get(1), Some(2u32));
-
-    // Page 1, limit 2 → IDs 3, 4
-    let page1 = client.get_all_escrow_ids_iterative(&1, &2);
-    assert_eq!(page1.len(), 2);
-    assert_eq!(page1.get(0), Some(3u32));
-    assert_eq!(page1.get(1), Some(4u32));
-
-    // Page 2, limit 2 → ID 5 (partial page)
-    let page2 = client.get_all_escrow_ids_iterative(&2, &2);
-    assert_eq!(page2.len(), 1);
-    assert_eq!(page2.get(0), Some(5u32));
-
-    // Page 3, limit 2 → empty (out of range)
-    let page3 = client.get_all_escrow_ids_iterative(&3, &2);
-    assert_eq!(page3.len(), 0);
-}
-
-#[test]
-fn test_get_all_escrow_ids_iterative_limit_capped_at_max_batch_size() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Create 5 escrows, request with limit > MAX_BATCH_SIZE (100)
-    for i in 1u32..=5 {
-        client.create_escrow(&buyer, &seller, &token_id, &100, &i, &Some(3600));
-    }
-
-    // limit=200 is silently capped to 100; all 5 escrows fit on page 0
-    let ids = client.get_all_escrow_ids_iterative(&0, &200);
-    assert_eq!(ids.len(), 5);
-}
-
-#[test]
-fn test_get_escrow_count_batch_creation() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &1_000_000);
-
-    let params = EscrowCreateParams {
-        buyer: buyer.clone(),
-        seller: seller.clone(),
-        token: token_id.clone(),
-        amount: 100,
-        order_id: 0,
-        release_window: Some(3600),
-        ipfs_hash: None,
-        metadata_hash: None,
-        service_agreement_hash: None,
-    };
-
-    let mut batch = soroban_sdk::Vec::new(&env);
-    for i in 1u32..=3 {
-        let mut p = params.clone();
-        p.order_id = i;
-        batch.push_back(p);
-    }
-
-    client.create_batch_escrow(&1u64, &batch);
-
-    assert_eq!(client.get_escrow_count(), 3);
-
-    let ids = client.get_all_escrow_ids_iterative(&0, &10);
-    assert_eq!(ids.len(), 3);
-}
-
-#[test]
-fn test_legacy_all_escrow_ids_migrates_on_get_escrow_count() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let legacy_key = DataKey::AllEscrowIds;
-    let count_key = DataKey::EscrowCount;
-    let mut legacy_ids = soroban_sdk::Vec::new(&env);
-    for order_id in [11u32, 22, 33, 44] {
-        legacy_ids.push_back(order_id);
-    }
-
-    env.as_contract(&client.address, || {
-        env.storage().persistent().set(&legacy_key, &legacy_ids);
-        env.storage().persistent().set(&count_key, &1u32);
-    });
-
-    assert_eq!(client.get_escrow_count(), 4);
-
-    let stored_count: u32 = env.as_contract(&client.address, || {
-        env.storage().persistent().get(&count_key).unwrap()
-    });
-    assert_eq!(stored_count, 4);
-
-    let has_legacy = env.as_contract(&client.address, || {
-        env.storage().persistent().has(&legacy_key)
-    });
-    assert!(!has_legacy);
-
-    for (index, expected_id) in [11u32, 22, 33, 44].into_iter().enumerate() {
-        let index_key = DataKey::GlobalEscrowIdIndexed(index as u32);
-        let stored_id: u32 = env.as_contract(&client.address, || {
-            env.storage().persistent().get(&index_key).unwrap()
-        });
-        assert_eq!(stored_id, expected_id);
-    }
-}
-
-#[test]
-fn test_legacy_all_escrow_ids_migrates_on_iterative_read() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let legacy_key = DataKey::AllEscrowIds;
-    let count_key = DataKey::EscrowCount;
-    let mut legacy_ids = soroban_sdk::Vec::new(&env);
-    for order_id in 1u32..=5 {
-        legacy_ids.push_back(order_id * 10);
-    }
-
-    env.as_contract(&client.address, || {
-        env.storage().persistent().set(&legacy_key, &legacy_ids);
-        env.storage().persistent().remove(&count_key);
-    });
-
-    let page = client.get_all_escrow_ids_iterative(&0, &10);
-    assert_eq!(page.len(), 5);
-    assert_eq!(page.get(0), Some(10u32));
-    assert_eq!(page.get(4), Some(50u32));
-
-    let stored_count: u32 = env.as_contract(&client.address, || {
-        env.storage().persistent().get(&count_key).unwrap()
-    });
-    assert_eq!(stored_count, 5);
-
-    let has_legacy = env.as_contract(&client.address, || {
-        env.storage().persistent().has(&legacy_key)
-    });
-    assert!(!has_legacy);
-}
-
-#[test]
-fn test_legacy_all_escrow_ids_migration_is_idempotent_after_first_read() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let legacy_key = DataKey::AllEscrowIds;
-    let count_key = DataKey::EscrowCount;
-    let mut legacy_ids = soroban_sdk::Vec::new(&env);
-    for order_id in [5u32, 15, 25] {
-        legacy_ids.push_back(order_id);
-    }
-
-    env.as_contract(&client.address, || {
-        env.storage().persistent().set(&legacy_key, &legacy_ids);
-        env.storage().persistent().remove(&count_key);
-    });
-
-    let first_page = client.get_all_escrow_ids_iterative(&0, &10);
-    let second_page = client.get_all_escrow_ids_iterative(&0, &10);
-    assert_eq!(first_page, second_page);
-    assert_eq!(client.get_escrow_count(), 3);
-
-    let has_legacy = env.as_contract(&client.address, || {
-        env.storage().persistent().has(&legacy_key)
-    });
-    assert!(!has_legacy);
-
-    for (index, expected_id) in [5u32, 15, 25].into_iter().enumerate() {
-        let index_key = DataKey::GlobalEscrowIdIndexed(index as u32);
-        let stored_id: u32 = env.as_contract(&client.address, || {
-            env.storage().persistent().get(&index_key).unwrap()
-        });
-        assert_eq!(stored_id, expected_id);
-    }
-}
-
-#[test]
-fn test_legacy_all_escrow_ids_migration_preserves_existing_indexed_entries() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    let legacy_key = DataKey::AllEscrowIds;
-    let count_key = DataKey::EscrowCount;
-    let existing_index_key = DataKey::GlobalEscrowIdIndexed(0);
-    let missing_index_key = DataKey::GlobalEscrowIdIndexed(1);
-    let tail_index_key = DataKey::GlobalEscrowIdIndexed(2);
-    let mut legacy_ids = soroban_sdk::Vec::new(&env);
-    for order_id in [10u32, 20, 30] {
-        legacy_ids.push_back(order_id);
-    }
-
-    env.as_contract(&client.address, || {
-        env.storage().persistent().set(&legacy_key, &legacy_ids);
-        env.storage().persistent().set(&existing_index_key, &999u32);
-        env.storage().persistent().set(&count_key, &1u32);
-    });
-
-    let page = client.get_all_escrow_ids_iterative(&0, &10);
-    assert_eq!(page.len(), 3);
-    assert_eq!(page.get(0), Some(999u32));
-    assert_eq!(page.get(1), Some(20u32));
-    assert_eq!(page.get(2), Some(30u32));
-
-    let stored_count: u32 = env.as_contract(&client.address, || {
-        env.storage().persistent().get(&count_key).unwrap()
-    });
-    assert_eq!(stored_count, 3);
-
-    let first_id: u32 = env.as_contract(&client.address, || {
-        env.storage().persistent().get(&existing_index_key).unwrap()
-    });
-    let second_id: u32 = env.as_contract(&client.address, || {
-        env.storage().persistent().get(&missing_index_key).unwrap()
-    });
-    let third_id: u32 = env.as_contract(&client.address, || {
-        env.storage().persistent().get(&tail_index_key).unwrap()
-    });
-    assert_eq!(first_id, 999u32);
-    assert_eq!(second_id, 20u32);
-    assert_eq!(third_id, 30u32);
-
-    let has_legacy = env.as_contract(&client.address, || {
-        env.storage().persistent().has(&legacy_key)
-    });
-    assert!(!has_legacy);
-}
-
-#[test]
-fn test_partial_refund_negotiation_flow() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-
-    // 1. Dispute the escrow
-    client.dispute_escrow(&1, &Symbol::new(&env, "Partial_refund_requested"), &buyer);
-
-    // 2. Buyer proposes a 300 refund
-    client.propose_partial_refund(&1, &300, &buyer);
-
-    // 3. Seller accepts the proposal
-    client.accept_partial_refund(&1);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Resolved);
-
-    let token_client = token::Client::new(&env, &token_id);
-    // Buyer gets 300
-    assert_eq!(token_client.balance(&buyer), 300);
-    // Seller gets 700 - 35 (5% fee) = 665
-    assert_eq!(token_client.balance(&seller), 665);
-}
-
-#[test]
-fn test_propose_partial_refund_by_seller() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-
-    client.dispute_escrow(&1, &Symbol::new(&env, "Partial_refund_offered"), &seller);
-
-    // Seller proposes a 400 refund
-    client.propose_partial_refund(&1, &400, &seller);
-
-    // Buyer accepts
-    client.accept_partial_refund(&1);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Resolved);
-
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&buyer), 400);
-    // 600 - 30 (5% fee) = 570
-    assert_eq!(token_client.balance(&seller), 570);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #1)")]
-fn test_propose_partial_refund_unauthorized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-
-    client.dispute_escrow(&1, &Symbol::new(&env, "Dispute"), &buyer);
-
-    let unauthorized = Address::generate(&env);
-    client.propose_partial_refund(&1, &500, &unauthorized);
-}
-
-#[test]
-#[should_panic(expected = "HostError: Error(Contract, #21)")]
-fn test_propose_partial_refund_already_exists() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-
-    client.dispute_escrow(&1, &Symbol::new(&env, "Dispute"), &buyer);
-
-    client.propose_partial_refund(&1, &300, &buyer);
-    client.propose_partial_refund(&1, &400, &seller); // Fails
-}
-
-#[test]
-fn test_validate_ipfs_cid_v0_and_v1_accepts_valid_cids() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    let cid_v0 = String::from_str(&env, "QmYwAPJzv5CZsnAzt8auVTL3u2M6YvM7NfF4hB9m8C3vM9");
-    let cid_v1 = String::from_str(
-        &env,
-        "bafybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4",
-    );
-
-    let escrow_v0 = client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &1000,
-        &1,
-        &Some(3600),
-        &Some(cid_v0.clone()),
-        &None,
-        &None,
-    );
-    let escrow_v1 = client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &1000,
-        &2,
-        &Some(3600),
-        &Some(cid_v1.clone()),
-        &None,
-        &None,
-    );
-
-    assert_eq!(escrow_v0.ipfs_hash, Some(cid_v0));
-    assert_eq!(escrow_v1.ipfs_hash, Some(cid_v1));
-}
-
-#[test]
-fn test_validate_ipfs_cid_v1_stricter() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-    client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &1000,
-        &1,
-        &Some(3600),
-        &Some(String::from_str(
-            &env,
-            "QmXoypizjW3WknFiJnKLwHCnL72vedxjQkDDP1mXWo6uco",
-        )),
-        &None,
-        &None,
-    );
-
-    // Valid CIDv1 base32 (sha256) - 59 chars, starts with 'ba'
-    client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &1000,
-        &2,
-        &Some(3600),
-        &Some(String::from_str(
-            &env,
-            "bafybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4",
-        )),
-        &None,
-        &None,
-    );
-}
-
-#[test]
-#[should_panic]
-fn test_validate_ipfs_cid_v1_too_short() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // CIDv1 base32 too short (only 10 chars)
-    client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &1000,
-        &1,
-        &Some(3600),
-        &Some(String::from_str(&env, "bafybeigdy")),
-        &None,
-        &None,
-    );
-}
-
-#[test]
-#[should_panic]
-fn test_validate_ipfs_cid_v1_wrong_version() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-    token_admin.mint(&buyer, &100_000_000);
-
-    // CIDv1 base32 starts with 'bb' (wrong version byte bits)
-    client.create_escrow_with_metadata(
-        &buyer,
-        &seller,
-        &token_id,
-        &1000,
-        &1,
-        &Some(3600),
-        &Some(String::from_str(
-            &env,
-            "bbfybeigdyrzt5scf7nqm765as5a42n367d5e46as5a42n367d5e46as5a4",
-        )),
-        &None,
-        &None,
-    );
-}
-
-// ===== IPFS CID validation: boundary and fuzz tests =====
-
-#[test]
-fn test_validate_ipfs_cid_boundary_45_char_cidv0_rejected() {
-    let env = Env::default();
-    let mut cid_str = alloc::string::String::from("Qm");
-    for _ in 0..43 {
-        cid_str.push('a');
-    }
-    assert_eq!(cid_str.len(), 45);
-
-    let cid = String::from_str(&env, &cid_str);
-    assert!(!CraftNexusContract::validate_ipfs_cid(&cid));
-}
-
-#[test]
-fn test_validate_ipfs_cid_boundary_46_char_cidv0_accepted() {
-    let env = Env::default();
-    let mut cid_str = alloc::string::String::from("Qm");
-    for _ in 0..44 {
-        cid_str.push('a');
-    }
-    assert_eq!(cid_str.len(), 46);
-
-    let cid = String::from_str(&env, &cid_str);
-    assert!(CraftNexusContract::validate_ipfs_cid(&cid));
-}
-
-#[test]
-fn test_validate_ipfs_cid_boundary_58_char_cidv1_accepted() {
-    let env = Env::default();
-    let mut cid_str = alloc::string::String::from("ba");
-    for _ in 0..56 {
-        cid_str.push('b');
-    }
-    assert_eq!(cid_str.len(), 58);
-
-    let cid = String::from_str(&env, &cid_str);
-    assert!(CraftNexusContract::validate_ipfs_cid(&cid));
-}
-
-#[test]
-fn test_validate_ipfs_cid_boundary_59_char_cidv1_accepted() {
-    let env = Env::default();
-    let mut cid_str = alloc::string::String::from("ba");
-    for _ in 0..57 {
-        cid_str.push('b');
-    }
-    assert_eq!(cid_str.len(), 59);
-
-    let cid = String::from_str(&env, &cid_str);
-    assert!(CraftNexusContract::validate_ipfs_cid(&cid));
-}
-
-#[test]
-fn test_validate_ipfs_cid_rejects_invalid_base58_chars() {
-    let env = Env::default();
-
-    // '0', 'O', 'I', 'l' are excluded from the Base58btc alphabet and must
-    // cause rejection even though the rest of the CID is otherwise valid.
-    for bad_char in ['0', 'O', 'I', 'l'] {
-        let mut cid_str = alloc::string::String::from("Qm");
-        cid_str.push(bad_char);
-        for _ in 0..43 {
-            cid_str.push('a');
-        }
-        assert_eq!(cid_str.len(), 46);
-
-        let cid = String::from_str(&env, &cid_str);
-        assert!(
-            !CraftNexusContract::validate_ipfs_cid(&cid),
-            "CID containing invalid base58 char must be rejected"
-        );
-    }
-}
-
-#[test]
-fn test_validate_ipfs_cid_fuzz_never_panics() {
-    use arbitrary::{Arbitrary, Unstructured};
-
-    let env = Env::default();
-
-    // Deterministic pseudo-random sweep (not a true fuzzer, but reproducible
-    // across runs) feeding arbitrary::Arbitrary-generated byte strings into
-    // the validator to confirm it never panics, regardless of content.
-    for seed in 0u32..256 {
-        let raw: alloc::vec::Vec<u8> = (0..300u32)
-            .map(|i| {
-                let mixed = seed
-                    .wrapping_mul(2654435761)
-                    .wrapping_add(i.wrapping_mul(40503));
-                (mixed >> 8) as u8
-            })
-            .collect();
-
-        let mut unstructured = Unstructured::new(&raw);
-        let bytes: alloc::vec::Vec<u8> =
-            Arbitrary::arbitrary(&mut unstructured).unwrap_or_default();
-
-        // Every u8 maps to a valid Unicode scalar (Latin-1 range), so this
-        // never panics on construction; it exists purely to turn arbitrary
-        // bytes into a String for the validator to chew on.
-        let text: alloc::string::String = bytes.iter().take(200).map(|b| *b as char).collect();
-        let cid = String::from_str(&env, &text);
-
-        // The validator must never panic, regardless of input shape.
-        let _ = CraftNexusContract::validate_ipfs_cid(&cid);
-    }
-}
-
-#[test]
-fn test_accept_partial_refund_with_custom_fee_tier() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    // Set custom fee tier for seller to 2% (200 bps)
-    client.set_artisan_fee_tier(&seller, &200);
-
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-
-    client.dispute_escrow(&1, &Symbol::new(&env, "Dispute"), &buyer);
-    client.propose_partial_refund(&1, &500, &buyer);
-
-    // Seller accepts. Gross for seller is 500.
-    // 2% of 500 is 10.
-    // Seller should get 490.
-    client.accept_partial_refund(&1);
-
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&seller), 490);
-}
-
-#[test]
-fn test_partial_refund_full_gross_amount_is_valid() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Full_gross_refund"), &buyer);
-
-    // refund_amount is interpreted as gross and is valid when it equals escrow.amount.
-    client.propose_partial_refund(&1, &1000, &buyer);
-    client.accept_partial_refund(&1);
-
-    let token_client = token::Client::new(&env, &token_id);
-    assert_eq!(token_client.balance(&buyer), 1000);
-    assert_eq!(token_client.balance(&seller), 0);
-}
-
-#[test]
-fn test_get_escrows_by_buyer_requires_auth() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, _, _, _, _, _) = setup_test(&env, true);
-
-    client.get_escrows_by_buyer(&buyer, &0, &10, &false);
-    let auths = env.auths();
-    assert_eq!(auths.len(), 1);
-    assert_eq!(auths.get(0).unwrap().0, buyer);
-}
-
-#[test]
-fn test_get_escrows_by_seller_requires_auth() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, seller, _, _, _, _) = setup_test(&env, true);
-
-    client.get_escrows_by_seller(&seller, &0, &10, &false);
-    let auths = env.auths();
-    assert_eq!(auths.len(), 1);
-    assert_eq!(auths.get(0).unwrap().0, seller);
-}
-
-#[test]
-fn test_platform_config_ttl_extension_on_read() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    // Read the platform config to ensure it is initialized and TTL is extended
-    let config = client.get_platform_config();
-
-    // Advance ledger timestamp by a large amount (e.g., 20 days)
-    env.ledger().with_mut(|li| {
-        li.timestamp += 20 * 24 * 60 * 60; // 20 days in seconds
-    });
-
-    // Read again - should still succeed because the TTL was extended on read
-    let config_after = client.get_platform_config();
-    assert_eq!(config.admin, config_after.admin);
-}
-
-// ===== Issue #656: funding_deadline / cancel_unfunded_escrow / auto_cancel_unfunded =====
-
-/// Helper: create an unfunded escrow and return the escrow struct.
-fn create_unfunded(
-    client: &CraftNexusContractClient,
-    buyer: &Address,
-    seller: &Address,
-    token: &Address,
-) -> super::Escrow {
-    client.create_unfunded_escrow(
-        &1u32,
-        buyer,
-        seller,
-        token,
-        &1_000_000i128,
-        &3600u32, // 1-hour release window
-        &None,
-        &None,
-        &None,
-    )
-}
-
-/// The funding_deadline field should equal created_at + UNFUNDED_CANCEL_TIMEOUT (24 h).
-#[test]
-fn test_funding_deadline_set_on_create() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
-
-    let escrow = create_unfunded(&client, &buyer, &seller, &token_id);
-
-    assert!(!escrow.funded);
-    let deadline = escrow
-        .funding_deadline
-        .expect("funding_deadline must be set");
-    // created_at is stored as u32 (truncated ledger timestamp); deadline is created_at + 86400
-    assert_eq!(deadline, escrow.created_at as u64 + 24 * 60 * 60);
-}
-
-/// Buyer may cancel an unfunded escrow voluntarily before the deadline.
-#[test]
-fn test_buyer_can_cancel_before_deadline() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
-
-    create_unfunded(&client, &buyer, &seller, &token_id);
-
-    // Time is still within the 24-hour window; buyer cancels voluntarily.
-    let result = client.cancel_unfunded_escrow(&1u32, &buyer);
-    assert_eq!(result, ());
-}
-
-/// Non-buyer caller is rejected before the deadline.
-#[test]
-#[should_panic]
-fn test_seller_cannot_cancel_before_deadline() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
-
-    create_unfunded(&client, &buyer, &seller, &token_id);
-
-    // Seller tries to cancel before deadline — must panic with Unauthorized.
-    client.cancel_unfunded_escrow(&1u32, &seller);
-}
-
-/// After the deadline the seller can cancel the unfunded escrow.
-#[test]
-fn test_seller_can_cancel_after_deadline() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
-
-    create_unfunded(&client, &buyer, &seller, &token_id);
-
-    // Advance ledger past the 24-hour funding deadline.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 24 * 60 * 60 + 1;
-    });
-
-    let result = client.cancel_unfunded_escrow(&1u32, &seller);
-    assert_eq!(result, ());
-}
-
-/// After the deadline the platform admin can cancel the unfunded escrow.
-#[test]
-fn test_admin_can_cancel_after_deadline() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, admin) = setup_test(&env, true);
-
-    create_unfunded(&client, &buyer, &seller, &token_id);
-
-    // Advance ledger past the 24-hour funding deadline.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 24 * 60 * 60 + 1;
-    });
-
-    let result = client.cancel_unfunded_escrow(&1u32, &admin);
-    assert_eq!(result, ());
-}
-
-/// A funded escrow cannot be cancelled via cancel_unfunded_escrow.
-#[test]
-#[should_panic]
-fn test_cancel_funded_escrow_is_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000);
-    // create_escrow funds immediately
-    client.create_escrow(&buyer, &seller, &token_id, &1_000_000i128, &1u32, &None);
-
-    // Must panic: the escrow is funded
-    client.cancel_unfunded_escrow(&1u32, &buyer);
-}
-
-/// auto_cancel_unfunded skips escrows before deadline, cancels those past it,
-/// and returns the correct count.
-#[test]
-fn test_auto_cancel_unfunded_batch() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, admin) = setup_test(&env, true);
-
-    // Create 3 unfunded escrows at the current timestamp.
-    for id in 1u32..=3 {
-        client.create_unfunded_escrow(
-            &id,
-            &buyer,
-            &seller,
-            &token_id,
-            &1_000_000i128,
-            &3600u32,
-            &None,
-            &None,
-            &None,
-        );
-    }
-
-    // Advance past the deadline so all 3 are eligible.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 24 * 60 * 60 + 1;
-    });
-
-    let cancelled = client.auto_cancel_unfunded(&admin, &soroban_sdk::vec![&env, 1u32, 2u32, 3u32]);
-    assert_eq!(cancelled, 3);
-}
-
-/// auto_cancel_unfunded skips escrows that have not yet expired.
-#[test]
-fn test_auto_cancel_unfunded_skips_fresh_escrows() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, admin) = setup_test(&env, true);
-
-    client.create_unfunded_escrow(
-        &1u32,
-        &buyer,
-        &seller,
-        &token_id,
-        &1_000_000i128,
-        &3600u32,
-        &None,
-        &None,
-        &None,
-    );
-
-    // Do NOT advance time — escrow is still within the deadline window.
-    let cancelled = client.auto_cancel_unfunded(&admin, &soroban_sdk::vec![&env, 1u32]);
-    assert_eq!(cancelled, 0);
-}
-
-/// auto_cancel_unfunded is rejected for non-admin callers.
-#[test]
-#[should_panic]
-fn test_auto_cancel_unfunded_unauthorized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, _, _, _) = setup_test(&env, true);
-
-    create_unfunded(&client, &buyer, &seller, &token_id);
-
-    env.ledger().with_mut(|li| {
-        li.timestamp += 24 * 60 * 60 + 1;
-    });
-
-    // Buyer is not admin — must panic.
-    client.auto_cancel_unfunded(&buyer, &soroban_sdk::vec![&env, 1u32]);
-}
-
-/// Issue #640 — get_escrows_by_buyer and get_escrows_by_seller must paginate
-/// results to avoid memory exhaustion. This test creates 200 escrows
-/// and verifies correct subsets are returned across multiple pages, and
-/// page_size limit is capped at MAX_PAGE_SIZE (100).
-#[test]
-fn test_get_escrows_pagination_large_dataset() {
-    let env = Env::default();
-    env.mock_all_auths();
-    env.budget().reset_unlimited();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    // Mint enough tokens for 200 escrows
-    token_admin.mint(&buyer, &(200 * 1_000_000_000i128));
-
-    // Create 200 escrows individually (one per call since batch max is 20)
-    for i in 0..200u32 {
-        client.create_escrow(&buyer, &seller, &token_id, &1_000, &(i + 1), &Some(3600));
-    }
-
-    // Page 0: page_size=50 should return IDs 1..=50
-    let page0 = client.get_escrows_by_buyer(&buyer, &0, &50, &false);
-    assert_eq!(page0.len(), 50, "page0 should have 50 items");
-    assert_eq!(page0.get_unchecked(0), 1u64);
-    assert_eq!(page0.get_unchecked(49), 50u64);
-
-    // Page 1: page_size=50 should return IDs 51..=100
-    let page1 = client.get_escrows_by_buyer(&buyer, &1, &50, &false);
-    assert_eq!(page1.len(), 50, "page1 should have 50 items");
-    assert_eq!(page1.get_unchecked(0), 51u64);
-    assert_eq!(page1.get_unchecked(49), 100u64);
-
-    // Page 4: out of range
-    let page4 = client.get_escrows_by_buyer(&buyer, &4, &50, &false);
-    assert_eq!(page4.len(), 0, "page4 should be empty");
-
-    // page_size capped at MAX_PAGE_SIZE (100): requesting 200 returns only 100
-    let capped = client.get_escrows_by_buyer(&buyer, &0, &200, &false);
-    assert_eq!(
-        capped.len(),
-        100,
-        "page_size should be capped at MAX_PAGE_SIZE=100"
-    );
-
-    // Verify seller pagination returns same count
-    let seller_page0 = client.get_escrows_by_seller(&seller, &0, &50, &false);
-    assert_eq!(seller_page0.len(), 50, "seller page0 should have 50 items");
-    let seller_page1 = client.get_escrows_by_seller(&seller, &1, &50, &false);
-    assert_eq!(seller_page1.len(), 50, "seller page1 should have 50 items");
-}
-
-#[test]
-fn test_fund_audit_escrow_release_and_refund() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Escrow 1: funding & release
-    client.create_escrow(&buyer, &seller, &token_id, &40_000_000, &1, &None);
-    client.release_funds(&1);
-
-    // Check buyer history: funding entry
-    let buyer_count = client.get_fund_audit_count(&buyer);
-    assert_eq!(buyer_count, 1);
-    let buyer_history = client.get_fund_audit_history(&buyer);
-    assert_eq!(
-        buyer_history.get(0).unwrap().reason,
-        Symbol::new(&env, "escrow_funded")
-    );
-
-    // Check seller history: release entry
-    let seller_count = client.get_fund_audit_count(&seller);
-    assert_eq!(seller_count, 1);
-    let seller_history = client.get_fund_audit_history(&seller);
-    let seller_entry = seller_history.get(0).unwrap();
-    assert_eq!(seller_entry.actor, seller);
-    assert_eq!(seller_entry.reason, Symbol::new(&env, "escrow_released"));
-    assert!(seller_entry.amount > 0);
-    assert!(seller_entry.balance_impact > 0);
-
-    // Escrow 2: funding & refund
-    client.create_escrow(&buyer, &seller, &token_id, &30_000_000, &2, &None);
-    client.refund(&2);
-
-    // Check buyer history now has 3 entries: funded (1), funded (2), refund (2)
-    assert_eq!(client.get_fund_audit_count(&buyer), 3);
-    let buyer_history_updated = client.get_fund_audit_history(&buyer);
-    let refund_entry = buyer_history_updated.get(2).unwrap();
-    assert_eq!(refund_entry.reason, Symbol::new(&env, "refund"));
-    assert_eq!(refund_entry.amount, 30_000_000);
-    assert_eq!(refund_entry.balance_impact, 30_000_000);
-}
-
-#[test]
-fn test_fund_audit_staking_flow() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&seller, &50_000_000);
-
-    // Stake
-    client.stake_tokens(&seller, &token_id, &20_000_000);
-    assert_eq!(client.get_fund_audit_count(&seller), 1);
-    let stake_history = client.get_fund_audit_history(&seller);
-    let stake_entry = stake_history.get(0).unwrap();
-    assert_eq!(stake_entry.actor, seller);
-    assert_eq!(stake_entry.amount, 20_000_000);
-    assert_eq!(stake_entry.reason, Symbol::new(&env, "stake_deposit"));
-    assert_eq!(stake_entry.balance_impact, -20_000_000);
-
-    // Fast forward timestamp past stake cooldown
-    env.ledger().with_mut(|li| {
-        li.timestamp += 8 * 86400;
-    });
-
-    // Unstake
-    client.unstake_tokens(&seller, &token_id);
-    assert_eq!(client.get_fund_audit_count(&seller), 2);
-    let unstake_history = client.get_fund_audit_history(&seller);
-    let unstake_entry = unstake_history.get(1).unwrap();
-    assert_eq!(unstake_entry.reason, Symbol::new(&env, "stake_unstaked"));
-    assert_eq!(unstake_entry.amount, 20_000_000);
-    assert_eq!(unstake_entry.balance_impact, 20_000_000);
-}
-
-#[test]
-fn test_fund_audit_recurring_escrow_flow() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Create recurring escrow: 10_000_000 total, 100s frequency, 2 cycles
-    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &10_000_000, &100, &2);
-    assert_eq!(client.get_fund_audit_count(&buyer), 1);
-    let buyer_hist = client.get_fund_audit_history(&buyer);
-    assert_eq!(
-        buyer_hist.get(0).unwrap().reason,
-        Symbol::new(&env, "recurring_escrow_locked")
-    );
-
-    // Fast forward timestamp past cycle frequency
-    env.ledger().with_mut(|li| {
-        li.timestamp += 100;
-    });
-
-    // Release next cycle
-    client.release_next_cycle(&rec.id);
-    assert_eq!(client.get_fund_audit_count(&seller), 1);
-    let seller_hist = client.get_fund_audit_history(&seller);
-    assert_eq!(
-        seller_hist.get(0).unwrap().reason,
-        Symbol::new(&env, "recurring_release")
-    );
-
-    // Cancel remaining
-    client.cancel_recurring_escrow(&rec.id);
-    assert_eq!(client.get_fund_audit_count(&buyer), 2);
-    let buyer_cancel_hist = client.get_fund_audit_history(&buyer);
-    assert_eq!(
-        buyer_cancel_hist.get(1).unwrap().reason,
-        Symbol::new(&env, "recurring_cancel_refund")
-    );
-}
-
-#[test]
-fn test_fund_audit_pagination_and_immutability() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &500_000_000);
-
-    for i in 1u32..=5u32 {
-        let amt = (i as i128) * 10_000_000;
-        client.create_escrow(&buyer, &seller, &token_id, &amt, &i, &None);
-    }
-
-    assert_eq!(client.get_fund_audit_count(&buyer), 5);
-
-    // Test page 0 (offset 0, limit 2)
-    let page0 = client.get_fund_audit_history_paginated(&buyer, &0, &2);
-    assert_eq!(page0.len(), 2);
-    assert_eq!(page0.get(0).unwrap().amount, 10_000_000);
-    assert_eq!(page0.get(1).unwrap().amount, 20_000_000);
-
-    // Test page 1 (offset 2, limit 2)
-    let page1 = client.get_fund_audit_history_paginated(&buyer, &2, &2);
-    assert_eq!(page1.len(), 2);
-    assert_eq!(page1.get(0).unwrap().amount, 30_000_000);
-    assert_eq!(page1.get(1).unwrap().amount, 40_000_000);
-
-    // Test page 2 (offset 4, limit 2 -> returns remaining 1)
-    let page2 = client.get_fund_audit_history_paginated(&buyer, &4, &2);
-    assert_eq!(page2.len(), 1);
-    assert_eq!(page2.get(0).unwrap().amount, 50_000_000);
-
-    // Test out of bounds (offset 10, limit 2 -> empty)
-    let page_oob = client.get_fund_audit_history_paginated(&buyer, &10, &2);
-    assert_eq!(page_oob.len(), 0);
-}
-
-#[test]
-#[should_panic]
-fn test_stake_below_minimum_threshold_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    // Admin sets minimum stake required to 10_000_000
-    client.set_min_stake_required(&10_000_000);
-
-    token_admin.mint(&seller, &20_000_000);
-    // Staking 5_000_000 when min required is 10_000_000 should panic
-    client.stake_tokens(&seller, &token_id, &5_000_000);
-}
-
-#[test]
-#[should_panic]
-fn test_unstake_with_active_obligations_below_min_stake_rejected() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    client.set_min_stake_required(&10_000_000);
-
-    token_admin.mint(&seller, &20_000_000);
-    token_admin.mint(&buyer, &20_000_000);
-
-    // Stake 15_000_000 in two deposits so partial unstaking is possible
-    client.stake_tokens(&seller, &token_id, &15_000_000);
-
-    // Create an active escrow (seller has active obligations)
-    client.create_escrow(&buyer, &seller, &token_id, &5_000_000, &1, &None);
-    assert!(client.has_active_escrows(&seller));
-
-    env.ledger().with_mut(|li| {
-        li.timestamp += DEFAULT_STAKE_COOLDOWN as u64 + 1;
-    });
-
-    // Unstaking matured 15_000_000 while active escrow exists leaves 0 stake (< 10_000_000 min requirement)
-    client.unstake_tokens(&seller, &token_id);
-}
-
-#[test]
-fn test_partial_unstake_consistent_collateral_rules() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    client.set_min_stake_required(&10_000_000);
-
-    token_admin.mint(&seller, &50_000_000);
-    token_admin.mint(&buyer, &50_000_000);
-
-    // Stake 25_000_000 — this opens the first cooldown window.
-    client.stake_tokens(&seller, &token_id, &25_000_000);
-    assert_eq!(client.get_stake(&seller), 25_000_000);
-
-    // Advance past the first cooldown and unstake 25_000_000.
-    // Now the queue is empty; the next deposit will open a fresh cooldown.
-    env.ledger().with_mut(|li| {
-        li.timestamp += DEFAULT_STAKE_COOLDOWN as u64 + 1;
-    });
-    client.unstake_tokens(&seller, &token_id);
-    assert_eq!(client.get_stake(&seller), 0);
-
-    // Stake 25_000_000 again — opens a new cooldown window starting now.
-    client.stake_tokens(&seller, &token_id, &25_000_000);
-    assert_eq!(client.get_stake(&seller), 25_000_000);
-
-    // Advance 100 s and add a second deposit of 10_000_000.
-    // This inherits the existing cooldown_end (anti-gaming rule), so both
-    // deposits mature at the same time.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 100;
-    });
-    client.stake_tokens(&seller, &token_id, &10_000_000);
-    assert_eq!(client.get_stake(&seller), 35_000_000);
-
-    // Advance past the shared cooldown. Both deposits mature together.
-    env.ledger().with_mut(|li| {
-        li.timestamp += DEFAULT_STAKE_COOLDOWN as u64;
-    });
-
-    // Both deposits mature; total released = 35_000_000; remaining = 0.
-    // The collateral check does not block unstake because no active obligations exist.
-    client.unstake_tokens(&seller, &token_id);
-    assert_eq!(client.get_stake(&seller), 0);
-    assert_eq!(client.is_account_under_collateralized(&seller), false);
-}
-
-#[test]
-fn test_is_account_under_collateralized_detection() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&seller, &20_000_000);
-    token_admin.mint(&buyer, &20_000_000);
-
-    // Stake 5_000_000 (when min stake is 0)
-    client.stake_tokens(&seller, &token_id, &5_000_000);
-
-    // Create an escrow
-    client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
-
-    // Initially min stake is 0, so not under-collateralized
-    assert_eq!(client.is_account_under_collateralized(&seller), false);
-
-    // Admin raises min stake required to 10_000_000
-    client.set_min_stake_required(&10_000_000);
-
-    // Now seller has active obligation but stake (5M) < min_stake_required (10M)
-    assert_eq!(client.is_account_under_collateralized(&seller), true);
-}
-
-// ===== Deterministic Fee Splitting Engine Tests =====
-
-fn assert_fee_split_balances(
-    _token_client: &token::Client,
-    contract_client: &CraftNexusContractClient,
-    order_id: u32,
-    escrow_amount: i128,
-    expected_platform: i128,
-    expected_seller: i128,
-    expected_buyer: i128,
-) {
-    let escrow = contract_client.get_escrow(&order_id);
-    assert!(
-        escrow.status == EscrowStatus::Released
-            || escrow.status == EscrowStatus::Resolved
-            || escrow.status == EscrowStatus::Refunded,
-        "escrow must be in terminal state, got {:?}",
-        escrow.status
-    );
-
-    assert_eq!(
-        expected_platform + expected_seller + expected_buyer,
-        escrow_amount,
-        "fee split must balance to escrow amount"
-    );
-}
-
-#[test]
-fn test_fee_policy_version_exposed() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, _) = setup_test(&env, true);
-
-    assert_eq!(client.get_fee_policy_version(), 1);
-}
-
-#[test]
-fn test_release_funds_balances_to_escrow_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let amount = 1_000_000i128;
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
-    client.release_funds(&1);
-
-    let token_client = token::Client::new(&env, &token_id);
-    let platform_balance = token_client.balance(&platform_wallet);
-    let seller_balance = token_client.balance(&seller);
-
-    assert_fee_split_balances(
-        &token_client,
-        &client,
-        1,
-        amount,
-        platform_balance,
-        seller_balance,
-        0,
-    );
-}
-
-#[test]
-fn test_auto_release_balances_to_escrow_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let amount = 2_000_000i128;
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
-
-    env.ledger().with_mut(|li| {
-        li.timestamp += 604_801;
-    });
-    client.auto_release(&1);
-
-    let token_client = token::Client::new(&env, &token_id);
-    let platform_balance = token_client.balance(&platform_wallet);
-    let seller_balance = token_client.balance(&seller);
-
-    assert_fee_split_balances(
-        &token_client,
-        &client,
-        1,
-        amount,
-        platform_balance,
-        seller_balance,
-        0,
-    );
-}
-
-#[test]
-fn test_batch_release_balances_to_escrow_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-    let amounts = [1_000_000i128, 2_000_000i128, 3_000_000i128];
-    for (i, amount) in amounts.iter().enumerate() {
-        client.create_escrow(&buyer, &seller, &token_id, amount, &(i as u32 + 1), &None);
-    }
-
-    let order_ids: soroban_sdk::Vec<u32> = soroban_sdk::vec![&env, 1u32, 2u32, 3u32];
-    client.release_batch_funds(&1u64, &order_ids, &buyer);
-
-    let token_client = token::Client::new(&env, &token_id);
-    for (i, amount) in amounts.iter().enumerate() {
-        let order_id = i as u32 + 1;
-        let platform_fee = amount * 500 / 10_000;
-        assert_fee_split_balances(
-            &token_client,
-            &client,
-            order_id,
-            *amount,
-            platform_fee,
-            amount - platform_fee,
-            0,
-        );
-    }
-}
-
-#[test]
-fn test_refund_balances_to_escrow_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _platform_wallet, _) =
-        setup_test(&env, true);
-
-    let amount = 1_500_000i128;
-    token_admin.mint(&buyer, &amount);
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
-    client.refund(&1);
-
-    let token_client = token::Client::new(&env, &token_id);
-    let buyer_balance = token_client.balance(&buyer);
-
-    assert_fee_split_balances(&token_client, &client, 1, amount, 0, 0, buyer_balance);
-}
-
-#[test]
-fn test_dispute_release_to_seller_balances_to_escrow_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, admin) =
-        setup_test(&env, true);
-
-    let amount = 800_000i128;
-    token_admin.mint(&buyer, &amount);
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "late_delivery"), &buyer);
-
-    client.resolve_dispute(&1, &Resolution::ReleaseToSeller, &admin);
-
-    let token_client = token::Client::new(&env, &token_id);
-    let platform_balance = token_client.balance(&platform_wallet);
-    let seller_balance = token_client.balance(&seller);
-
-    assert_fee_split_balances(
-        &token_client,
-        &client,
-        1,
-        amount,
-        platform_balance,
-        seller_balance,
-        0,
-    );
-}
-
-#[test]
-fn test_dispute_refund_to_buyer_balances_to_escrow_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _platform_wallet, admin) =
-        setup_test(&env, true);
-
-    let amount = 800_000i128;
-    token_admin.mint(&buyer, &amount);
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "item_not_as_described"), &buyer);
-
-    client.resolve_dispute(&1, &Resolution::RefundToBuyer, &admin);
-
-    let token_client = token::Client::new(&env, &token_id);
-    let buyer_balance = token_client.balance(&buyer);
-
-    assert_fee_split_balances(&token_client, &client, 1, amount, 0, 0, buyer_balance);
-}
-
-#[test]
-fn test_expired_dispute_all_policies_balance_to_escrow_amount() {
-    let policies = [
-        ExpiredDisputeFeePolicy::RefundFullNoPlatformFee,
-        ExpiredDisputeFeePolicy::RefundMinusPlatformFee,
-        ExpiredDisputeFeePolicy::DeductFeeFromSeller,
-        ExpiredDisputeFeePolicy::SplitFee,
-    ];
-
-    for (i, &policy) in policies.iter().enumerate() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CraftNexusContract);
-        let client = CraftNexusContractClient::new(&env, &contract_id);
-        let buyer = Address::generate(&env);
-        let seller = Address::generate(&env);
-        let platform_wallet = Address::generate(&env);
-        let admin = Address::generate(&env);
-        let arbitrator = Address::generate(&env);
-        let token_admin = Address::generate(&env);
-        let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-        let token_addr = token_contract.address();
-        let token_asset = token::StellarAssetClient::new(&env, &token_addr);
-        let amount = 2_500_000i128;
-        token_asset.mint(&buyer, &amount);
-
-        client.initialize(
-            &platform_wallet,
-            &admin,
-            &arbitrator,
-            &500,
-            &None::<Address>,
-        );
-        client.set_min_escrow_amount(&token_addr, &0);
-        client.set_min_release_window(&1);
-        client.update_expired_dispute_policy(&policy);
-
-        client.create_escrow(
-            &buyer,
-            &seller,
-            &token_addr,
-            &amount,
-            &(i as u32 + 1),
-            &Some(604800),
-        );
-        client.dispute_escrow(&(i as u32 + 1), &Symbol::new(&env, "test"), &buyer);
-
-        env.ledger().with_mut(|li| {
-            li.timestamp += 30 * 24 * 60 * 60 + 1;
-        });
-
-        client.resolve_expired_dispute(&(i as u32 + 1));
-
-        let token_client = token::Client::new(&env, &token_addr);
-        let platform_delta = token_client.balance(&platform_wallet);
-        let buyer_delta = token_client.balance(&buyer);
-        let seller_delta = token_client.balance(&seller);
-
-        let sum = platform_delta + buyer_delta + seller_delta;
-        assert_eq!(
-            sum, amount,
-            "policy {:?} must balance to escrow amount",
-            policy
-        );
-    }
-}
-
-#[test]
-fn test_partial_refund_balances_to_escrow_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
-
-    let amount = 1_200_000i128;
-    let refund_gross = 700_000i128;
-    token_admin.mint(&buyer, &amount);
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "partial"), &buyer);
-    client.propose_partial_refund(&1, &refund_gross, &buyer);
-    client.accept_partial_refund(&1);
-
-    let token_client = token::Client::new(&env, &token_id);
-    let platform_balance = token_client.balance(&platform_wallet);
-    let buyer_balance = token_client.balance(&buyer);
-    let seller_balance = token_client.balance(&seller);
-
-    assert_fee_split_balances(
-        &token_client,
-        &client,
-        1,
-        amount,
-        platform_balance,
-        seller_balance,
-        buyer_balance,
-    );
-}
-
-#[test]
-fn test_recurring_escrow_cycle_balances_to_cycle_amount() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1_000_000);
-    client.create_recurring_escrow(&buyer, &seller, &token_id, &1_000_000, &3600, &2);
-
-    env.ledger().with_mut(|li| {
-        li.timestamp += 3601;
-    });
-
-    client.release_next_cycle(&1);
-
-    let token_client = token::Client::new(&env, &token_id);
-    let platform_balance = token_client.balance(&platform_wallet);
-    let seller_balance = token_client.balance(&seller);
-
-    let cycle_amount = 500_000i128; // 1_000_000 / 2
-    assert_eq!(
-        platform_balance + seller_balance,
-        cycle_amount,
-        "recurring cycle split must consume the cycle amount"
-    );
-}
-
-#[test]
-fn test_allocation_invariant_never_violated() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &100_000_000);
-
-    // Sweep a representative range of amounts.
-    for amount in [
-        1, 19, 20, 39, 40, 99, 100, 999, 1000, 9999, 10_000, 99_999, 100_000, 999_999, 1_000_000,
-    ]
-    .iter()
-    {
-        let order_id = *amount as u32;
-        client.create_escrow(&buyer, &seller, &token_id, amount, &order_id, &None);
-
-        // ReleaseFunds
-        client.release_funds(&order_id);
-        let escrow = client.get_escrow(&order_id);
-        assert_eq!(escrow.status, EscrowStatus::Released);
-    }
-}
-
-#[test]
-fn test_partial_refund_rejects_amount_above_escrow() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Over_refund"), &buyer);
-
-    let result = client.try_propose_partial_refund(&1, &1001, &buyer);
-    assert_eq!(result.unwrap_err(), Ok(Error::InvalidRefundAmount));
-
-    let zero = client.try_propose_partial_refund(&1, &0, &buyer);
-    assert_eq!(zero.unwrap_err(), Ok(Error::InvalidRefundAmount));
-}
-
-fn assert_panic_contract_error<T>(
-    result: Result<T, Result<soroban_sdk::Error, soroban_sdk::InvokeError>>,
-    error: Error,
-) {
-    let expected = soroban_sdk::Error::from_contract_error(error as u32);
-    assert!(
-        matches!(result, Err(Ok(err)) if err == expected),
-        "expected contract error {:?}",
-        error
-    );
-}
-
-#[test]
-fn test_partial_refund_cancel_allows_new_proposal_but_not_replay() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Replay"), &buyer);
-
-    client.propose_partial_refund(&1, &300, &buyer);
-    client.cancel_partial_refund(&1);
-    client.propose_partial_refund(&1, &400, &seller);
-    client.accept_partial_refund(&1);
-
-    let escrow = client.get_escrow(&1);
-    assert_eq!(escrow.status, EscrowStatus::Resolved);
-    let receipt = client.get_settlement_receipt(&1).expect("receipt");
-    assert_eq!(receipt.path, SettlementPath::PartialRefundAccepted);
-
-    let second = client.try_accept_partial_refund(&1);
-    assert!(second.is_err());
-    let duplicate_path = client.try_resolve_dispute(
-        &1,
-        &Resolution::RefundToBuyer,
-        &client.get_platform_config().admin,
-    );
-    assert!(duplicate_path.is_err());
-}
-
-#[test]
-fn test_dispute_cannot_be_resolved_twice_via_partial_and_arbitration() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &50_000_000);
-    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Split"), &buyer);
-    client.resolve_dispute_partial(&1, &25_000_000, &admin);
-
-    let receipt = client.get_settlement_receipt(&1).expect("receipt");
-    assert_eq!(receipt.path, SettlementPath::ArbitratedPartial);
-
-    assert_panic_contract_error(
-        client.try_resolve_dispute(&1, &Resolution::RefundToBuyer, &admin),
-        Error::SettlementAlreadyFinalized,
-    );
-    assert_eq!(
-        client.try_accept_partial_refund(&1).unwrap_err(),
-        Ok(Error::SettlementAlreadyFinalized)
-    );
-    assert_eq!(
-        client
-            .try_propose_partial_refund(&1, &100, &buyer)
-            .unwrap_err(),
-        Ok(Error::SettlementAlreadyFinalized)
-    );
-}
-
-#[test]
-fn test_settlement_finalized_is_checked_before_challenge_window() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
-
-    client.set_evidence_challenge_window(&86_400);
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Window"), &buyer);
-    client.propose_partial_refund(&1, &300, &buyer);
-    client.accept_partial_refund(&1);
-
-    assert_panic_contract_error(
-        client.try_resolve_dispute(&1, &Resolution::RefundToBuyer, &admin),
-        Error::SettlementAlreadyFinalized,
-    );
-    assert_panic_contract_error(
-        client.try_resolve_dispute_partial(&1, &400, &admin),
-        Error::SettlementAlreadyFinalized,
-    );
-}
-
-#[test]
-fn test_arbitrator_resolution_blocked_after_max_dispute_duration() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Late"), &buyer);
-
-    let max_duration = client.get_max_dispute_duration();
-    env.ledger().with_mut(|li| {
-        li.timestamp += max_duration as u64;
-    });
-
-    assert_panic_contract_error(
-        client.try_resolve_dispute(&1, &Resolution::RefundToBuyer, &admin),
-        Error::ArbitratorDeadlineExceeded,
-    );
-    assert_panic_contract_error(
-        client.try_resolve_dispute_partial(&1, &400, &admin),
-        Error::ArbitratorDeadlineExceeded,
-    );
-
-    client.resolve_expired_dispute(&1);
-    let receipt = client.get_settlement_receipt(&1).expect("receipt");
-    assert_eq!(receipt.path, SettlementPath::ExpiredDispute);
-
-    assert_panic_contract_error(
-        client.try_resolve_dispute(&1, &Resolution::ReleaseToSeller, &admin),
-        Error::SettlementAlreadyFinalized,
-    );
-}
-
-#[test]
-fn test_blacklisted_arbitrator_cannot_use_partial_resolution_path() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
-
-    token_admin.mint(&buyer, &1000);
-    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
-    client.dispute_escrow(&1, &Symbol::new(&env, "Blacklist"), &buyer);
-
-    let arbitrator = client.get_platform_config().arbitrator;
-    client.blacklist_arbitrator(&arbitrator);
-
-    assert_panic_contract_error(
-        client.try_resolve_dispute(&1, &Resolution::RefundToBuyer, &arbitrator),
-        Error::ArbitratorBlacklisted,
-    );
-    assert_panic_contract_error(
-        client.try_resolve_dispute_partial(&1, &400, &arbitrator),
-        Error::ArbitratorBlacklisted,
-    );
-
-    client.resolve_dispute_partial(&1, &400, &admin);
-    let receipt = client.get_settlement_receipt(&1).expect("receipt");
-    assert_eq!(receipt.path, SettlementPath::ArbitratedPartial);
-}
-
-// ─── Onboarding State Consistency Tests ──────────────────────────────────────
-//
-// These tests verify that the marketplace correctly enforces canonical onboarding
-// state before any privileged escrow operation, satisfying the acceptance criteria
-// described in issue "Strengthen Onboarding and Verification State Consistency
-// Across Contract Versions".
-
-#[cfg(not(target_family = "wasm"))]
-mod onboarding_state_consistency {
-    use super::*;
-    use crate::onboarding::{OnboardingContract, OnboardingContractClient, UserRole};
-    use soroban_sdk::{token, Address, Env, String};
-
-    /// Build a fully wired two-contract environment: real OnboardingContract +
-    /// CraftNexusContract, with both buyer and seller already onboarded.
-    fn setup_wired(
+    fn authorize_onboarding_state(
         env: &Env,
-    ) -> (
-        CraftNexusContractClient<'static>,
-        OnboardingContractClient<'static>,
-        Address, // buyer
-        Address, // seller
-        Address, // token
-        token::StellarAssetClient<'static>,
+        user: &Address,
+        operation_id: Bytes,
+        expected_role: UserRole,
     ) {
-        env.mock_all_auths();
-        env.budget().reset_unlimited();
-
-        let onboarding_id = env.register_contract(None, OnboardingContract);
-        let onboarding_client = OnboardingContractClient::new(env, &onboarding_id);
-
-        let escrow_id = env.register_contract(None, CraftNexusContract);
-        let escrow_client = CraftNexusContractClient::new(env, &escrow_id);
-
-        let admin = Address::generate(env);
-        let platform_wallet = Address::generate(env);
-        let arbitrator = Address::generate(env);
-
-        onboarding_client.initialize(&admin);
-        onboarding_client.set_escrow_contract(&escrow_id);
-
-        escrow_client.initialize(
-            &platform_wallet,
-            &admin,
-            &arbitrator,
-            &500,
-            &Some(onboarding_id.clone()),
+        let escrow_address = env.current_contract_address();
+        let (onboarding_address, onboarding) = match Self::get_onboarding_client(env) {
+            Some(client) => client,
+            None => return,
+        };
+        let attestation = onboarding.get_onboarding_attestation(
+            user,
+            &operation_id,
+            &escrow_address,
         );
-        escrow_client.set_min_release_window(&1);
-        escrow_client.set_evidence_challenge_window(&0);
+        if attestation.account != *user
+            || attestation.role != expected_role
+            || attestation.status != ProfileStatus::Active
+        {
+            env.panic_with_error(crate::Error::OnboardingAuthorizationFailed);
+        }
+        match env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            &onboarding_address,
+            &Symbol::new(env, "validate_onboarding_attestation"),
+            (attestation,).into_val(env),
+        ) {
+            Ok(Ok(true)) => {}
+            _ => env.panic_with_error(crate::Error::OnboardingAuthorizationFailed),
+        }
+    }
 
-        let buyer = Address::generate(env);
-        let seller = Address::generate(env);
+    fn onboarding_operation_id(env: &Env, action: &[u8], order_id: u32) -> Bytes {
+        let mut operation_id = Bytes::from_slice(env, action);
+        operation_id.extend_from_slice(&order_id.to_be_bytes());
+        operation_id
+    }
 
-        onboarding_client.onboard_user(
-            &buyer,
-            &String::from_str(env, "buyer_user"),
-            &UserRole::Buyer,
+    fn onboarding_operation_id_u64(env: &Env, action: &[u8], identifier: u64) -> Bytes {
+        let mut operation_id = Bytes::from_slice(env, action);
+        operation_id.extend_from_slice(&identifier.to_be_bytes());
+        operation_id
+    }
+
+    fn onboarding_cycle_operation_id(env: &Env, id: u64, cycle: u64) -> Bytes {
+        let mut operation_id = Bytes::from_slice(env, b"release_next_cycle:");
+        operation_id.extend_from_slice(&id.to_be_bytes());
+        operation_id.extend_from_slice(&cycle.to_be_bytes());
+        operation_id
+    }
+
+    /// Public read-only accessor for the registered onboarding contract
+    /// address. Returns `OnboardingContractNotSet` rather than `None` so that
+    /// SDK clients receive a typed error instead of a silent unwrap on a
+    /// `None`. Use `has_onboarding_contract` for a boolean check (#243).
+    pub fn get_onboarding_contract(env: Env) -> Result<Address, Error> {
+        Self::get_onboarding_address(&env).ok_or(Error::OnboardingContractNotSet)
+    }
+
+    /// True iff `set_onboarding_contract` has been called. Useful for
+    /// dashboards and integration tests that need to assert configuration
+    /// without surfacing an error path (#243).
+    pub fn has_onboarding_contract(env: Env) -> bool {
+        Self::get_onboarding_address(&env).is_some()
+    }
+
+    /// Check if a user has any active escrows or recurring escrows.
+    pub fn has_active_escrows(env: Env, user: Address) -> bool {
+        let key = DataKey::ActiveObligations(user);
+        Self::get_persistent_u32(&env, &key) > 0
+    }
+
+    /// Emit a structured warning event when a cross-contract call to the
+    /// onboarding contract fails. Indexers can subscribe to `OB_FAIL` to flag
+    /// integration drift between the escrow and onboarding contracts.
+    fn emit_onboarding_call_failed(env: &Env, method: Symbol, address: Address) {
+        env.events().publish(
+            (ONBOARD_CALL_FAILED, method),
+            (address, env.ledger().timestamp()),
         );
-        onboarding_client.onboard_user(
-            &seller,
-            &String::from_str(env, "seller_user"),
-            &UserRole::Artisan,
-        );
+    }
 
-        let token_admin = Address::generate(env);
-        let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-        let token_admin_client = token::StellarAssetClient::new(env, &token_contract.address());
+    /// Safely call `update_reputation` on the registered onboarding contract.
+    ///
+    /// Returns `Ok(true)` on a successful cross-contract call, `Ok(false)` if
+    /// the call failed (so the caller can decide whether to fall back to
+    /// emitting events) or no contract is configured. Never panics, never
+    /// propagates the host trap — the escrow flow MUST keep moving even if
+    /// the onboarding contract is broken or pointing at a malicious
+    /// implementation (#243).
+    #[allow(dead_code)]
+    fn safe_update_reputation(
+        env: &Env,
+        address: Address,
+        successful_delta: u32,
+        disputed_delta: u32,
+    ) -> bool {
+        // Issue #527 — short-circuit on the no-op call before paying
+        // for the persistent storage read of the onboarding contract
+        // address. If both reputation deltas are 0 the cross-contract
+        // call has no effect; returning `true` here saves a storage
+        // decode + a host `try_invoke_contract` on every escrow
+        // settlement where reputation didn't change.
+        if successful_delta == 0 && disputed_delta == 0 {
+            return true;
+        }
 
-        (
-            escrow_client,
-            onboarding_client,
-            buyer,
-            seller,
-            token_contract.address(),
-            token_admin_client,
+        let (onboarding_address, _onboarding) = match Self::get_onboarding_client(env) {
+            Some(client) => client,
+            None => return false,
+        };
+
+        let method = Symbol::new(env, "update_reputation");
+        let args: Vec<Val> = (address.clone(), successful_delta, disputed_delta).into_val(env);
+
+        match env.try_invoke_contract::<(), soroban_sdk::Error>(&onboarding_address, &method, args)
+        {
+            Ok(Ok(())) => true,
+            _ => {
+                Self::emit_onboarding_call_failed(env, method, onboarding_address);
+                false
+            }
+        }
+    }
+
+    /// Safely call `update_user_metrics` on the registered onboarding contract.
+    /// Mirrors `safe_update_reputation`'s contract: never panics, returns
+    /// `false` on missing config or cross-contract failure (#243).
+    #[allow(dead_code)]
+    fn safe_update_user_metrics(
+        env: &Env,
+        address: Address,
+        escrow_count_delta: u32,
+        volume_delta: i128,
+        token_address: Address,
+    ) -> bool {
+        let (onboarding_address, _onboarding) = match Self::get_onboarding_client(env) {
+            Some(client) => client,
+            None => return false,
+        };
+
+        let method = Symbol::new(env, "update_user_metrics");
+        let args: Vec<Val> = (
+            address.clone(),
+            escrow_count_delta,
+            volume_delta,
+            token_address.clone(),
         )
+            .into_val(env);
+
+        match env.try_invoke_contract::<(), soroban_sdk::Error>(&onboarding_address, &method, args)
+        {
+            Ok(Ok(())) => true,
+            _ => {
+                Self::emit_onboarding_call_failed(env, method, onboarding_address);
+                false
+            }
+        }
     }
 
-    // ── Acceptance criterion 1: active users can create escrow ─────────────
+    #[allow(dead_code)]
+    fn safe_update_active_contracts(env: &Env, user: Address, delta: i32) -> bool {
+        if delta == 0 {
+            return true;
+        }
 
-    /// Both buyer and seller are active — escrow creation must succeed.
-    #[test]
-    fn test_onboarding_state_valid_users_create_escrow_succeeds() {
-        let env = Env::default();
-        let (escrow, _, buyer, seller, token_id, token_admin) = setup_wired(&env);
-        token_admin.mint(&buyer, &100_000_000);
+        let (onboarding_address, _onboarding) = match Self::get_onboarding_client(env) {
+            Some(client) => client,
+            None => return false,
+        };
 
-        let result = escrow.try_create_escrow(
-            &buyer,
-            &seller,
-            &token_id,
-            &10_000i128,
-            &1u32,
-            &Some(3600u32),
-        );
-        assert!(result.is_ok(), "active users should be allowed to create escrow");
+        let method = Symbol::new(env, "update_active_contracts");
+        let args: Vec<Val> = (user.clone(), delta).into_val(env);
+
+        match env.try_invoke_contract::<(), soroban_sdk::Error>(&onboarding_address, &method, args)
+        {
+            Ok(Ok(())) => true,
+            _ => {
+                Self::emit_onboarding_call_failed(env, method, onboarding_address);
+                false
+            }
+        }
     }
 
-    // ── Acceptance criterion 2: deactivated profile blocks escrow creation ─
+    /// Safely query the onboarding contract for a single user's canonical state.
+    ///
+    /// Returns `Ok((is_active, role, is_verified, state_version))` on success,
+    /// `Err(())` when no onboarding contract is configured or the cross-contract
+    /// call fails. Never panics — callers decide how to handle a missing or
+    /// unreachable onboarding contract.
+    ///
+    /// All four cross-contract reads are issued as separate `try_invoke_contract`
+    /// calls so a partial failure is observable and distinguishable from a full
+    /// outage.
+    fn safe_check_onboarding_state(
+        env: &Env,
+        user: &Address,
+    ) -> Result<(bool, UserRole, bool, u32), ()> {
+        let (onboarding_address, _) = match Self::get_onboarding_client(env) {
+            Some(c) => c,
+            None => return Err(()),
+        };
 
-    /// Deactivating the seller immediately prevents new escrow creation.
-    #[test]
-    fn test_onboarding_state_deactivated_seller_blocks_create_escrow() {
-        let env = Env::default();
-        let (escrow, onboarding, buyer, seller, token_id, token_admin) = setup_wired(&env);
-        token_admin.mint(&buyer, &100_000_000);
+        // is_profile_active
+        let active_method = Symbol::new(env, "is_profile_active");
+        let active_args: Vec<Val> = (user.clone(),).into_val(env);
+        let is_active: bool = match env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            &onboarding_address,
+            &active_method,
+            active_args,
+        ) {
+            Ok(Ok(v)) => v,
+            _ => {
+                Self::emit_onboarding_call_failed(
+                    env,
+                    active_method,
+                    onboarding_address.clone(),
+                );
+                return Err(());
+            }
+        };
 
-        // Deactivate the seller before attempting escrow creation.
-        onboarding.deactivate_profile(&seller);
+        // get_user_role
+        let role_method = Symbol::new(env, "get_user_role");
+        let role_args: Vec<Val> = (user.clone(),).into_val(env);
+        let role: UserRole = match env.try_invoke_contract::<UserRole, soroban_sdk::Error>(
+            &onboarding_address,
+            &role_method,
+            role_args,
+        ) {
+            Ok(Ok(v)) => v,
+            _ => {
+                Self::emit_onboarding_call_failed(
+                    env,
+                    role_method,
+                    onboarding_address.clone(),
+                );
+                return Err(());
+            }
+        };
 
-        let result = escrow.try_create_escrow(
-            &buyer,
-            &seller,
-            &token_id,
-            &10_000i128,
-            &1u32,
-            &Some(3600u32),
-        );
-        assert_panic_contract_error(result, Error::OnboardingProfileInactive);
+        // is_user_verified
+        let verified_method = Symbol::new(env, "is_user_verified");
+        let verified_args: Vec<Val> = (user.clone(),).into_val(env);
+        let is_verified: bool = match env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            &onboarding_address,
+            &verified_method,
+            verified_args,
+        ) {
+            Ok(Ok(v)) => v,
+            _ => {
+                Self::emit_onboarding_call_failed(
+                    env,
+                    verified_method,
+                    onboarding_address.clone(),
+                );
+                return Err(());
+            }
+        };
+
+        // get_user_state_version
+        let version_method = Symbol::new(env, "get_user_state_version");
+        let version_args: Vec<Val> = (user.clone(),).into_val(env);
+        let state_version: u32 = match env.try_invoke_contract::<u32, soroban_sdk::Error>(
+            &onboarding_address,
+            &version_method,
+            version_args,
+        ) {
+            Ok(Ok(v)) => v,
+            _ => {
+                Self::emit_onboarding_call_failed(
+                    env,
+                    version_method,
+                    onboarding_address,
+                );
+                return Err(());
+            }
+        };
+
+        Ok((is_active, role, is_verified, state_version))
     }
 
-    /// Deactivating the buyer immediately prevents new escrow creation.
-    #[test]
-    fn test_onboarding_state_deactivated_buyer_blocks_create_escrow() {
-        let env = Env::default();
-        let (escrow, onboarding, buyer, seller, token_id, token_admin) = setup_wired(&env);
-        token_admin.mint(&buyer, &100_000_000);
+    /// Validate onboarding state for both buyer and seller before a privileged
+    /// marketplace operation (escrow creation).
+    ///
+    /// # Behaviour
+    ///
+    /// When no onboarding contract is configured the check is a no-op — the
+    /// platform operates in open mode and all accounts are permitted.
+    ///
+    /// When an onboarding contract is configured each user must satisfy all of:
+    /// - Profile exists (state_version > 0; a zero version means no profile).
+    /// - Profile is currently active (not deactivated, flagged, or under review).
+    /// - Role is not `UserRole::None` — the user must have completed onboarding
+    ///   with a recognized role.
+    /// - Profile is verified (`is_verified == true`) when the platform requires
+    ///   verification for privileged operations.
+    ///
+    /// The state_version check is deferred here: a zero version is treated as
+    /// "profile not found". Any non-zero version is accepted because version
+    /// staleness at the point of escrow creation is only relevant if the caller
+    /// supplies an explicit expected version. Role and active-status changes
+    /// are reflected immediately because they are read live from the canonical
+    /// onboarding source.
+    ///
+    /// # Errors
+    ///
+    /// Panics with the appropriate [`Error`] variant on any validation failure:
+    /// - [`Error::OnboardingProfileNotFound`] — no profile (state_version == 0).
+    /// - [`Error::OnboardingProfileInactive`] — profile is not active.
+    /// - [`Error::OnboardingRoleMismatch`] — role is `None` (not properly onboarded).
+    fn validate_onboarding_state(env: &Env, buyer: &Address, seller: &Address) {
+        // No-op when no onboarding contract is configured.
+        if Self::get_onboarding_address(env).is_none() {
+            return;
+        }
 
-        onboarding.deactivate_profile(&buyer);
+        for user in [buyer, seller] {
+            let (is_active, role, _is_verified, state_version) =
+                match Self::safe_check_onboarding_state(env, user) {
+                    Ok(state) => state,
+                    Err(()) => {
+                        // Cross-contract call failed — emit warning but allow the
+                        // operation to proceed so a temporarily unreachable onboarding
+                        // contract cannot permanently brick escrow creation.
+                        Self::emit_onboarding_call_failed(
+                            env,
+                            Symbol::new(env, "check_state"),
+                            user.clone(),
+                        );
+                        continue;
+                    }
+                };
 
-        let result = escrow.try_create_escrow(
-            &buyer,
-            &seller,
-            &token_id,
-            &10_000i128,
-            &1u32,
-            &Some(3600u32),
-        );
-        assert_panic_contract_error(result, Error::OnboardingProfileInactive);
+            // A state_version of 0 means the profile does not exist.
+            if state_version == 0 {
+                env.panic_with_error(Error::OnboardingProfileNotFound);
+            }
+
+            // Profile must be in an active state.
+            if !is_active {
+                env.panic_with_error(Error::OnboardingProfileInactive);
+            }
+
+            // User must have a recognized onboarding role.
+            if role == UserRole::None {
+                env.panic_with_error(Error::OnboardingRoleMismatch);
+            }
+        }
     }
 
-    // ── Acceptance criterion 3: missing profile (state_version == 0) ───────
-
-    /// A user that never onboarded has state_version == 0 — escrow creation
-    /// must be rejected with OnboardingProfileNotFound.
-    #[test]
-    fn test_onboarding_state_no_profile_buyer_blocks_create_escrow() {
-        let env = Env::default();
-        let (escrow, _, _buyer, seller, token_id, token_admin) = setup_wired(&env);
-
-        // Fabricate a completely new address that has never been onboarded.
-        let unknown_buyer = Address::generate(&env);
-        token_admin.mint(&unknown_buyer, &100_000_000);
-
-        let result = escrow.try_create_escrow(
-            &unknown_buyer,
-            &seller,
-            &token_id,
-            &10_000i128,
-            &1u32,
-            &Some(3600u32),
-        );
-        assert_panic_contract_error(result, Error::OnboardingProfileNotFound);
+    /// Set the configurable maximum release window (admin only).
+    ///
+    /// # Arguments
+    /// * `max_window` - Maximum allowed release window in seconds.
+    ///   Must be > 0 and <= ABSOLUTE_MAX_RELEASE_WINDOW.
+    pub fn set_max_release_window(env: Env, max_window: u32) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+        if max_window == 0 {
+            env.panic_with_error(crate::Error::ReleaseWindowTooShort);
+        }
+        if max_window > ABSOLUTE_MAX_RELEASE_WINDOW {
+            env.panic_with_error(crate::Error::ReleaseWindowTooLong);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::MaxReleaseWindow, &max_window);
     }
 
-    /// Same for seller: an un-onboarded seller must be rejected.
-    #[test]
-    fn test_onboarding_state_no_profile_seller_blocks_create_escrow() {
-        let env = Env::default();
-        let (escrow, _, buyer, _seller, token_id, token_admin) = setup_wired(&env);
-        token_admin.mint(&buyer, &100_000_000);
+    /// Set the minimum release window to prevent "flash" auto-releases (admin only).
+    ///
+    /// # Arguments
+    /// * `min_window` - Minimum allowed release window in seconds
+    ///
+    /// # Panics
+    /// - If min_window is 0
+    /// - If min_window exceeds the current max_release_window
+    pub fn set_min_release_window(env: Env, min_window: u32) -> Result<(), Error> {
+        let mut config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
 
-        let unknown_seller = Address::generate(&env);
+        if min_window == 0 {
+            env.panic_with_error(crate::Error::ReleaseWindowTooShort);
+        }
 
-        let result = escrow.try_create_escrow(
-            &buyer,
-            &unknown_seller,
-            &token_id,
-            &10_000i128,
-            &1u32,
-            &Some(3600u32),
+        let max_window = Self::get_max_release_window(&env);
+        if min_window > max_window {
+            return Err(Error::ReleaseWindowTooLong);
+        }
+
+        let old_min = config.min_release_window;
+        config.min_release_window = min_window;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &config);
+
+        Self::emit_config_updated(
+            &env,
+            "min_release_window",
+            ConfigValue::U32(old_min),
+            ConfigValue::U32(min_window),
         );
-        assert_panic_contract_error(result, Error::OnboardingProfileNotFound);
+
+        Ok(())
     }
 
-    // ── Acceptance criterion 4: no-op when no onboarding contract configured
-
-    /// When the escrow contract is initialized without an onboarding contract
-    /// address, validate_onboarding_state must be a complete no-op and escrow
-    /// creation must succeed for any caller.
-    #[test]
-    fn test_onboarding_state_no_contract_configured_is_noop() {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.budget().reset_unlimited();
-
-        let escrow_id = env.register_contract(None, CraftNexusContract);
-        let escrow = CraftNexusContractClient::new(&env, &escrow_id);
-
-        let admin = Address::generate(&env);
-        let platform_wallet = Address::generate(&env);
-        let arbitrator = Address::generate(&env);
-        let buyer = Address::generate(&env);
-        let seller = Address::generate(&env);
-
-        // Initialize WITHOUT an onboarding contract.
-        escrow.initialize(&platform_wallet, &admin, &arbitrator, &500, &None);
-        escrow.set_min_release_window(&1);
-        escrow.set_evidence_challenge_window(&0);
-
-        let token_admin = Address::generate(&env);
-        let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-        let token_admin_client = token::StellarAssetClient::new(&env, &token_contract.address());
-        token_admin_client.mint(&buyer, &100_000_000);
-
-        // Neither buyer nor seller is onboarded — but there is no onboarding
-        // contract, so the check must pass transparently.
-        let result = escrow.try_create_escrow(
-            &buyer,
-            &seller,
-            &token_contract.address(),
-            &10_000i128,
-            &1u32,
-            &Some(3600u32),
-        );
-        assert!(
-            result.is_ok(),
-            "create_escrow must succeed when no onboarding contract is configured"
-        );
+    /// Get the current minimum release window
+    pub fn get_min_release_window(env: Env) -> u32 {
+        let config = Self::get_platform_config_internal(&env);
+        config.min_release_window
     }
 
-    // ── Acceptance criterion 5: reactivated profile can create escrow again ─
+    /// Register the deployed OnboardingContract address so the escrow contract
+    /// can make cross-contract reputation / metrics updates (admin only).
+    ///
+    /// (#243) Rejects pointing the onboarding contract at the escrow itself —
+    /// a self-call would create a re-entrancy hazard if the trait surface ever
+    /// expands. Cross-contract calls into the configured address remain
+    /// indirect via `safe_update_reputation` / `safe_update_user_metrics`,
+    /// which trap-isolate failures so a misbehaving onboarding contract
+    /// cannot brick escrow operations. Emits a `config_updated` event with
+    /// the previous and new addresses for audit trails.
+    pub fn set_onboarding_contract(env: Env, contract_address: Address) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
 
-    /// After deactivation, a reactivated profile must be allowed to create
-    /// escrows again without any stale-state rejection.
-    #[test]
-    fn test_onboarding_state_reactivated_profile_can_create_escrow() {
-        let env = Env::default();
-        let (escrow, onboarding, buyer, seller, token_id, token_admin) = setup_wired(&env);
-        token_admin.mint(&buyer, &100_000_000);
+        if contract_address == env.current_contract_address() {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
 
-        // Deactivate seller then reactivate.
-        onboarding.deactivate_profile(&seller);
-        onboarding.reactivate_profile(&seller);
+        let previous = Self::get_onboarding_address(&env);
 
-        let result = escrow.try_create_escrow(
-            &buyer,
-            &seller,
-            &token_id,
-            &10_000i128,
-            &1u32,
-            &Some(3600u32),
-        );
-        assert!(
-            result.is_ok(),
-            "reactivated seller should be permitted to participate in escrow"
+        // Issue #527 — short-circuit on the no-op call before paying
+        // for the persistent storage write and TTL extension.
+        if let Some(ref current) = previous {
+            if *current == contract_address {
+                return;
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::OnboardingContractAddress, &contract_address);
+        Self::extend_persistent(&env, &DataKey::OnboardingContractAddress);
+
+        let old_value = match previous {
+            Some(addr) => ConfigValue::Address(addr),
+            None => ConfigValue::String(String::from_str(&env, "unset")),
+        };
+        Self::emit_config_updated(
+            &env,
+            "onboarding_contract",
+            old_value,
+            ConfigValue::Address(contract_address),
         );
     }
 
-    // ── Acceptance criterion 6: create_unfunded_escrow also checks state ────
+    /// Clear the registered onboarding contract address (admin only) (#243).
+    /// After calling this, `get_onboarding_contract` returns
+    /// `OnboardingContractNotSet` and the safe cross-contract helpers become
+    /// no-ops — escrow flows continue to emit `ReputationUpdateEvent`s for
+    /// off-chain reconstruction (#211).
+    pub fn clear_onboarding_contract(env: Env) -> Result<(), Error> {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
 
-    /// validate_onboarding_state is also invoked by create_unfunded_escrow.
-    /// A deactivated seller must be rejected on that path too.
-    #[test]
-    fn test_onboarding_state_deactivated_blocks_unfunded_escrow() {
-        let env = Env::default();
-        let (escrow, onboarding, buyer, seller, token_id, _token_admin) = setup_wired(&env);
+        let previous = Self::get_onboarding_address(&env).ok_or(Error::OnboardingContractNotSet)?;
 
-        onboarding.deactivate_profile(&seller);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::OnboardingContractAddress);
 
-        let result = escrow.try_create_unfunded_escrow(
-            &1u32,
-            &buyer,
-            &seller,
-            &token_id,
-            &10_000i128,
-            &3600u32,
-            &None,
-            &None,
-            &None,
+        Self::emit_config_updated(
+            &env,
+            "onboarding_contract",
+            ConfigValue::Address(previous),
+            ConfigValue::String(String::from_str(&env, "unset")),
         );
-        assert_panic_contract_error(result, Error::OnboardingProfileInactive);
+        Ok(())
+    }
+
+    /// Add a token to the platform whitelist (admin only).
+    ///
+    /// Uses individual key-value pairs for scalability instead of a single Map.
+    /// Each token is stored as DataKey::WhitelistedTokenIndexed(token) -> true.
+    /// Once at least one token is whitelisted, only whitelisted tokens may be
+    /// used in escrow creation. The check is skipped when the whitelist is empty,
+    /// preserving backward compatibility.
+    ///
+    /// # Decimal validation
+    ///
+    /// The token's `decimals()` value must be in the range 0–18 (inclusive).
+    /// Tokens with more than 18 decimal places would overflow the volume
+    /// normalization arithmetic in the onboarding contract and are rejected
+    /// with [`Error::InvalidTokenDecimals`].
+    pub fn whitelist_token(env: Env, token: Address) -> Result<(), Error> {
+        let _guard = ReentryGuardScope::new(&env);
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        // Probe the SEP-41 read interface before persisting an administrator
+        // supplied address. Missing or malformed methods become a stable
+        // contract error instead of an opaque host panic.
+        let token_client = token::Client::new(&env, &token);
+        let decimals = token_client
+            .try_decimals()
+            .map_err(|_| Error::UnsupportedToken)?
+            .map_err(|_| Error::UnsupportedToken)?;
+        if decimals > 18 {
+            return Err(Error::InvalidTokenDecimals);
+        }
+        token_client
+            .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::UnsupportedToken)?
+            .map_err(|_| Error::UnsupportedToken)?;
+
+        Self::migrate_legacy_whitelisted_tokens(&env);
+        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+        let mut count = Self::get_whitelist_count(&env);
+
+        if !env.storage().persistent().has(&token_key) {
+            env.storage().persistent().set(&token_key, &true);
+            Self::extend_persistent(&env, &token_key);
+            count += 1;
+            Self::set_whitelist_count(&env, count);
+        }
+        Ok(())
+    }
+
+    /// Remove a token from the platform whitelist (admin only).
+    ///
+    /// Uses individual key-value pairs for scalability. Removes the specific
+    /// token entry and updates the count. If the resulting whitelist is empty,
+    /// whitelist enforcement is automatically disabled (all tokens permitted again).
+    pub fn remove_token_from_whitelist(env: Env, token: Address) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        Self::migrate_legacy_whitelisted_tokens(&env);
+        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+
+        if env.storage().persistent().has(&token_key) {
+            env.storage().persistent().remove(&token_key);
+            let count = Self::get_whitelist_count(&env);
+            if count > 0 {
+                Self::set_whitelist_count(&env, count - 1);
+            }
+        }
+    }
+
+    /// Check whether a specific token is on the whitelist.
+    ///
+    /// Returns `true` if the token is explicitly whitelisted, OR if the whitelist
+    /// is empty (enforcement not yet active). Uses individual key lookups for
+    /// scalability instead of loading the entire whitelist Map.
+    pub fn is_token_whitelisted(env: Env, token: Address) -> bool {
+        Self::migrate_legacy_whitelisted_tokens(&env);
+        let count = Self::get_whitelist_count(&env);
+        if count == 0 {
+            return true;
+        }
+
+        let token_key = DataKey::WhitelistedTokenIndexed(token);
+        let is_whitelisted = env.storage().persistent().has(&token_key);
+        if is_whitelisted {
+            Self::extend_persistent(&env, &token_key);
+        }
+        is_whitelisted
+    }
+
+    /// Internal helper: panics with TokenNotWhitelisted when enforcement is active
+    /// and the token is not on the whitelist.
+    /// NOTE: whitelist enforcement is intentionally performed only during
+    /// escrow creation (and related locking operations). State transitions
+    /// such as `release`, `refund`, or recurring cycle releases MUST NOT
+    /// re-check the whitelist to avoid locking funds for escrows created
+    /// before whitelist changes. Keep this helper private and call it only
+    /// in creation-time validation paths.
+    fn check_token_whitelisted(env: &Env, token: &Address) {
+        Self::migrate_legacy_whitelisted_tokens(env);
+        let count = Self::get_whitelist_count(env);
+        if count == 0 {
+            return;
+        }
+
+        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+        if !env.storage().persistent().has(&token_key) {
+            env.panic_with_error(crate::Error::TokenNotWhitelisted);
+        }
+    }
+
+    /// Get the count of whitelisted tokens.
+    ///
+    /// Returns 0 if no tokens are whitelisted (enforcement disabled).
+    /// This is more efficient than loading all tokens when only the count is needed.
+    pub fn get_whitelisted_token_count(env: Env) -> u32 {
+        Self::migrate_legacy_whitelisted_tokens(&env);
+        Self::get_whitelist_count(&env)
+    }
+
+    /// Migrate legacy whitelist storage to individual key-value pairs.
+    ///
+    /// This function reads the old WhitelistedTokens Map and converts each entry
+    /// to individual WhitelistedTokenIndexed keys. Should be called once during
+    /// contract upgrade to migrate existing data.
+    pub fn migrate_whitelist_storage(env: Env) -> u32 {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let legacy_key = DataKey::WhitelistedTokens;
+
+        // Check if legacy storage exists
+        if !env.storage().persistent().has(&legacy_key) {
+            return 0; // Nothing to migrate
+        }
+
+        let legacy_whitelist: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&legacy_key)
+            .unwrap_or(Map::new(&env));
+
+        let mut migrated_count = 0u32;
+
+        // Migrate each token to individual storage
+        let keys = legacy_whitelist.keys();
+        for i in 0..keys.len() {
+            if let Some(token) = keys.get(i) {
+                if let Some(is_whitelisted) = legacy_whitelist.get(token.clone()) {
+                    if is_whitelisted {
+                        let token_key = DataKey::WhitelistedTokenIndexed(token);
+                        env.storage().persistent().set(&token_key, &true);
+                        Self::extend_persistent(&env, &token_key);
+                        migrated_count += 1;
+                    }
+                }
+            }
+        }
+
+        // Update count
+        if migrated_count > 0 {
+            let count_key = DataKey::WhitelistedTokenCount;
+            env.storage().persistent().set(&count_key, &migrated_count);
+            Self::extend_persistent(&env, &count_key);
+        }
+
+        // Remove legacy storage
+        env.storage().persistent().remove(&legacy_key);
+
+        migrated_count
+    }
+
+    /// Migrate legacy ArtisanStakeQueue Vec storage to individual indexed entries.
+    ///
+    /// This function reads the old ArtisanStakeQueue Vec and converts each entry
+    /// to individual ArtisanStakeQueueIndexed keys. Should be called once during
+    /// contract upgrade to migrate existing data.
+    pub fn migrate_artisan_stake_queue(env: Env, artisan: Address) -> u32 {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let legacy_key = DataKey::ArtisanStakeQueue(artisan.clone());
+
+        // Check if legacy storage exists
+        if !env.storage().persistent().has(&legacy_key) {
+            return 0; // Nothing to migrate
+        }
+
+        let legacy_queue: soroban_sdk::Vec<StakeDeposit> = env
+            .storage()
+            .persistent()
+            .get(&legacy_key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+
+        let queue_len = legacy_queue.len();
+        if queue_len == 0 {
+            // Remove empty legacy queue
+            env.storage().persistent().remove(&legacy_key);
+            return 0;
+        }
+
+        // Migrate each deposit to individual indexed storage
+        for i in 0..queue_len {
+            if let Some(deposit) = legacy_queue.get(i) {
+                let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
+                env.storage().persistent().set(&deposit_key, &deposit);
+                Self::extend_persistent(&env, &deposit_key);
+            }
+        }
+
+        // Set count
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        env.storage().persistent().set(&count_key, &queue_len);
+        Self::extend_persistent(&env, &count_key);
+
+        // Remove legacy storage
+        env.storage().persistent().remove(&legacy_key);
+
+        queue_len
+    }
+
+    /// Migrate legacy artisan stake records from split `ArtisanStake` (i128) +
+    /// `ArtisanStakeToken` (Address) storage to the unified `ArtisanStakeData`
+    /// struct (#1034).
+    ///
+    /// This function is idempotent: it returns 0 if the record is already in
+    /// the new format. Should be called lazily during stake reads or writes
+    /// so existing artisan balances are preserved across contract upgrades.
+    pub fn migrate_legacy_artisan_stake(env: Env, artisan: Address) -> u32 {
+        let stake_key = DataKey::ArtisanStake(artisan.clone());
+        let token_key = DataKey::ArtisanStakeToken(artisan.clone());
+
+        if !env.storage().persistent().has(&token_key) {
+            return 0;
+        }
+
+        let old_amount: Option<i128> = env.storage().persistent().get(&stake_key);
+        let old_token: Option<Address> = env.storage().persistent().get(&token_key);
+
+        if let (Some(amount), Some(token)) = (old_amount, old_token) {
+            let new_stake = ArtisanStakeData { amount, token };
+            env.storage().persistent().set(&stake_key, &new_stake);
+            Self::extend_persistent(&env, &stake_key);
+            env.storage().persistent().remove(&token_key);
+            return 1;
+        }
+
+        0
+    }
+
+    /// Get the count of stake deposits in an artisan's queue.
+    ///
+    /// Returns 0 if no deposits exist. This is more efficient than loading
+    /// all deposits when only the count is needed.
+    pub fn get_artisan_stake_queue_count(env: Env, artisan: Address) -> u32 {
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        env.storage().persistent().get(&count_key).unwrap_or(0)
+    }
+
+    /// Get paginated stake deposits for an artisan (admin/debug helper).
+    ///
+    /// Returns up to `limit` deposits starting from `offset`. Useful for
+    /// inspecting queue state without loading the entire queue.
+    pub fn get_artisan_stake_deposits(
+        env: Env,
+        artisan: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<soroban_sdk::Vec<StakeDeposit>, Error> {
+        let limit = pagination_validation::validate_limit(
+            limit,
+            pagination_validation::MAX_ADMIN_PAGE_SIZE,
+        )?;
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        // Return empty if offset is past the end
+        if offset >= total_count {
+            return Ok(soroban_sdk::Vec::new(&env));
+        }
+
+        let mut deposits = soroban_sdk::Vec::new(&env);
+        let end = core::cmp::min(offset + limit, total_count);
+
+        for i in offset..end {
+            let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
+            if let Some(deposit) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, StakeDeposit>(&deposit_key)
+            {
+                deposits.push_back(deposit);
+            }
+        }
+
+        Ok(deposits)
+    }
+
+    fn assert_dispute_actor_permissions(
+        env: &Env,
+        config: &PlatformConfig,
+        escrow: &Escrow,
+        caller: &Address,
+        transition: DisputeTransition,
+    ) -> Result<(), Error> {
+        match transition {
+            DisputeTransition::Initiate
+            | DisputeTransition::SubmitEvidence
+            | DisputeTransition::Escalate
+            | DisputeTransition::ProposeRefund => {
+                if *caller != escrow.buyer && *caller != escrow.seller {
+                    return Err(Error::Unauthorized);
+                }
+            }
+            DisputeTransition::AcceptRefund(proposer) => {
+                // Must be the counterparty to the proposer
+                if proposer == escrow.buyer && *caller != escrow.seller {
+                    return Err(Error::Unauthorized);
+                }
+                if proposer == escrow.seller && *caller != escrow.buyer {
+                    return Err(Error::Unauthorized);
+                }
+                if *caller != escrow.buyer && *caller != escrow.seller {
+                    return Err(Error::Unauthorized);
+                }
+            }
+            DisputeTransition::CancelRefund(proposer) => {
+                // Must be the proposer
+                if *caller != proposer {
+                    return Err(Error::Unauthorized);
+                }
+            }
+            DisputeTransition::ResolveArbitrated => {
+                let is_privileged = *caller == config.admin
+                    || *caller == config.arbitrator
+                    || Some(caller.clone()) == config.moderator;
+                if !is_privileged {
+                    return Err(Error::Unauthorized);
+                }
+                if *caller != config.admin && Self::arbitrator_on_blacklist(env, caller) {
+                    return Err(Error::ArbitratorBlacklisted);
+                }
+            }
+        }
+        Ok(())
     }
 }
