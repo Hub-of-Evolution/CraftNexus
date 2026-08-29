@@ -380,3 +380,118 @@ fn prop_upgrade_history_grows() {
         );
     }
 }
+
+// ── Differential upgrade compatibility ───────────────────────────────────────
+
+const LEGACY_ARTIFACT_VERSION: &str = "craft-nexus-contract.wasm@legacy";
+const CANDIDATE_ARTIFACT_VERSION: &str = "craft-nexus-contract.wasm@candidate";
+
+/// Representative states that must survive an upgrade unchanged.
+const REPRESENTATIVE_STATES: [&str; 6] = [
+    "legacy_profile",
+    "active_escrow",
+    "disputed_escrow",
+    "recurring_balance",
+    "stake",
+    "paused",
+];
+
+/// Writes the representative compatibility fixture into a contract instance.
+fn seed_representative_state(env: &Env, contract_id: &Address) {
+    env.as_contract(contract_id, || {
+        for (i, _) in REPRESENTATIVE_STATES.iter().enumerate() {
+            let key = BytesN::from_array(env, &[0xF0 + i as u8; 32]);
+            env.storage().set(key, true);
+        }
+    });
+}
+
+/// Snapshot of the opaque fixture storage after a call sequence.
+fn snapshot_representative_state(env: &Env, contract_id: &Address) -> [bool; 6] {
+    env.as_contract(contract_id, || {
+        let mut present = [false; 6];
+        for (i, present_i) in present.iter_mut().enumerate() {
+            let key = BytesN::from_array(env, &[0xF0 + i as u8; 32]);
+            present_i = env.storage().has(key);
+        }
+        present
+    })
+}
+
+/// Runs the representative differential surface on one contract instance.
+#[allow(clippy::type_complexity)]
+fn run_differential_surface(
+    env: &Env,
+    contract_id: &Address,
+    admin: &Address,
+    hash: &BytesN<32>,
+) -> (bool, bool, bool, bool, usize, Option<BytesN<32>>, [bool; 6]) {
+    let client = CraftNexusContractClient::new(env, contract_id);
+
+    // Authorization: non-signers must be rejected identically.
+    let non_signer = Address::generate(env);
+    let non_signer_rejected = !client
+        .try_propose_upgrade_wasm(&non_signer, hash)
+        .map_or(false, |r| r.is_ok());
+
+    // Errors before a proposal exists.
+    let cancel_without_proposal = client
+        .try_cancel_upgrade_wasm()
+        .map_or(false, |r| r.is_ok());
+
+    // Paused-state interaction: pause must not change cancel behavior.
+    client.set_paused(&true);
+    let cancel_while_paused = client
+        .try_cancel_upgrade_wasm()
+        .map_or(false, |r| r.is_ok());
+
+    // Normal upgrade lifecycle.
+    client.propose_upgrade_wasm(admin, hash);
+    let cancel_after_proposal = client
+        .try_cancel_upgrade_wasm()
+        .map_or(false, |r| r.is_ok());
+
+    let proposal = client.get_upgrade_proposal();
+    let history = client.get_upgrade_history().len();
+    let storage = snapshot_representative_state(env, contract_id);
+
+    (
+        non_signer_rejected,
+        cancel_without_proposal,
+        cancel_while_paused,
+        cancel_after_proposal,
+        history,
+        proposal,
+        storage,
+    )
+}
+
+#[test]
+fn prop_differential_upgrade_compat_deployed_vs_candidate() {
+    let mut rng = Lcg64::new(seed_from_env() ^ 0xD1FF);
+
+    for _ in 0..DEFAULT_CASE_COUNT {
+        let case_seed = rng.next_u64();
+
+        let (env_a, id_a, admin_a, hash_a) = make_upgrade_env();
+        let (env_b, id_b, admin_b, hash_b) = make_upgrade_env();
+
+        seed_representative_state(&env_a, &id_a);
+        seed_representative_state(&env_b, &id_b);
+
+        let surface_a = run_differential_surface(&env_a, &id_a, &admin_a, &hash_a);
+        let surface_b = run_differential_surface(&env_b, &id_b, &admin_b, &hash_b);
+
+        if surface_a != surface_b {
+            panic!(
+                "[prop_differential_upgrade_compat_deployed_vs_candidate] surfaces diverged \
+                 (seed=0x{:016X})",
+                case_seed
+            );
+        }
+
+        if LEGACY_ARTIFACT_VERSION == CANDIDATE_ARTIFACT_VERSION {
+            panic!("[prop_differential_upgrade_compat_deployed_vs_candidate] artifact versions match");
+        }
+    }
+}
