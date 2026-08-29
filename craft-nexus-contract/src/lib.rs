@@ -37,6 +37,8 @@ mod test;
 mod pagination_boundary_test;
 #[cfg(test)]
 mod prop_test;
+#[cfg(test)]
+mod resource_aware_test;
 
 // Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
 // artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
@@ -45,6 +47,9 @@ pub mod onboarding;
 
 /// Centralized pagination input validation (Issue #1022).
 pub mod pagination_validation;
+
+/// Resource-aware model for batch-escrow continuations (Issue #1146).
+pub mod resource_model;
 
 /// Error codes grouped by category for off-chain triage.
 ///
@@ -266,6 +271,10 @@ pub enum Error {
     /// Requested WASM upgrade cooldown is below `MIN_WASM_UPGRADE_COOLDOWN`,
     /// which would let the mandatory review window be bypassed (#1062).
     UpgradeCooldownTooShort = 83,
+    /// The estimated resource footprint (CPU / memory / storage writes) of a
+    /// scheduled-continuation chunk exceeds the configured continuation budget.
+    /// No state is mutated when this is returned (Issue #1146).
+    ResourceLimitExceeded = 84,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -566,6 +575,10 @@ pub enum DataKey {
     WasmUpgradeProposal,
     /// Configurable maximum release window (in seconds)
     MaxReleaseWindow,
+    /// Admin-configurable estimated CPU ceiling (in host instruction units) that
+    /// a single scheduled-continuation chunk may spend before any escrow is
+    /// mutated. Guards over-budget continuations before funds move (Issue #1146).
+    ContinuationResourceBudget,
     /// Address of the deployed onboarding contract for cross-contract reputation calls
     OnboardingContractAddress,
     /// DEPRECATED legacy storage: Map of whitelisted token addresses (Address -> bool).
@@ -2984,6 +2997,39 @@ impl CraftNexusContract {
     pub fn get_min_release_window(env: Env) -> u32 {
         let config = Self::get_platform_config_internal(&env);
         config.min_release_window
+    }
+
+    /// Get the configured continuation resource budget (host CPU instructions)
+    /// for a single `continue_batch_escrow` chunk, or the default when unset.
+    pub fn get_continuation_resource_budget(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ContinuationResourceBudget)
+            .unwrap_or(resource_model::DEFAULT_CONTINUATION_CPU_BUDGET)
+    }
+
+    /// Set the estimated CPU ceiling (host instruction units) a single
+    /// `continue_batch_escrow` chunk may consume (admin only).
+    ///
+    /// Continuation chunks whose [`resource_model`] estimate exceeds this
+    /// budget are rejected with `Error::ResourceLimitExceeded` **before** any
+    /// escrow is created or funds move, so the job cursor stays put.
+    ///
+    /// # Panics
+    /// - If the caller is not the admin.
+    /// - If `budget` is below `MIN_CONTINUATION_CPU_BUDGET` (prevents an
+    ///   accidental zeroing of the scheduler).
+    pub fn set_continuation_resource_budget(env: Env, budget: u64) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if budget < resource_model::MIN_CONTINUATION_CPU_BUDGET {
+            env.panic_with_error(crate::Error::ResourceLimitExceeded);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ContinuationResourceBudget, &budget);
     }
 
     /// Register the deployed OnboardingContract address so the escrow contract
@@ -8535,6 +8581,16 @@ impl CraftNexusContract {
                 chunk.push_back(entry);
             }
         }
+
+        // Resource-aware gateway (Issue #1146): before this chunk mutates any
+        // escrow or moves funds, assert that its estimated resource footprint
+        // fits within the configured continuation budget. If it does not, we
+        // reject the chunk *before* mutation so the job cursor and all balances
+        // are left untouched, and the caller can retry with a smaller chunk or
+        // raise the budget.
+        let budget = Self::get_continuation_resource_budget(&env);
+        let estimate = resource_model::estimate_create_chunk(&env, &chunk);
+        resource_model::ensure_chunk_within_budget(&estimate, Some(budget))?;
 
         // The existing batch function commits the whole chunk atomically. If
         // it fails, this job cursor is not advanced.
