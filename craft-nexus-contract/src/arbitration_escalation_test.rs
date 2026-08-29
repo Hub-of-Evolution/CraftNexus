@@ -4,8 +4,19 @@ extern crate alloc;
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-    token, vec, Address, Env, IntoVal, String, Symbol,
+    token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
 };
+
+/// Recompute the on-chain `content_digest` for an evidence URI exactly as the
+/// contract does (SHA-256 over the first ≤256 payload bytes). Lets tests assert
+/// the persisted digest is stable, verifiable metadata (#1077).
+fn evidence_digest(env: &Env, uri: &String) -> BytesN<32> {
+    let len = (uri.len() as usize).min(256);
+    let mut buf = [0u8; 256];
+    uri.copy_into_slice(&mut buf[0..len]);
+    let bytes = Bytes::from_slice(env, &buf[0..len]);
+    env.crypto().sha256(&bytes).into()
+}
 
 fn setup(
     env: &Env,
@@ -398,4 +409,134 @@ fn test_prevent_evidence_reuse_across_disputes() {
     // Second use of exact same payload on order 2 fails
     let result = client.try_submit_evidence(&2, &buyer, &payload);
     assert!(result.is_err());
+}
+
+// ── Structured Evidence Records & Expiry (#1077 / #1078) ───────────────
+
+/// #1077 AC1 + AC3: every stored record is versioned, bound to exactly one
+/// dispute session, and carries a content digest equal to the SHA-256 of the
+/// payload — stable metadata indexers can rely on without recomputation.
+#[test]
+fn test_evidence_record_carries_version_and_content_digest() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
+    create_and_dispute(&env, &client, &buyer, &seller, &token, &token_admin, 1);
+
+    let uri = String::from_str(&env, "ipfs://versioned-evidence");
+    let id = client.submit_evidence(&1, &buyer, &uri);
+
+    let escrow = client.get_escrow(&1);
+    let dispute_session_id = escrow.dispute_initiated_at.unwrap();
+
+    let log = client.get_evidence(&1);
+    assert_eq!(log.len(), 1);
+    let entry = log.get(0).unwrap();
+
+    // Versioned for indexer schema stability (#1077 AC3).
+    assert_eq!(entry.version, EVIDENCE_SCHEMA_VERSION);
+    // Bound to exactly one dispute: (id, order, session) all pinned (#1077 AC1).
+    assert_eq!(entry.id, id);
+    assert_eq!(entry.order_id, 1);
+    assert_eq!(entry.dispute_session_id, dispute_session_id);
+    // Digest is the verifiable SHA-256 of the payload (#1077 AC3).
+    assert_eq!(entry.content_digest, evidence_digest(&env, &uri));
+}
+
+/// #1077 AC2: a duplicate content digest has defined, deterministic behavior —
+/// it is rejected with `EvidenceAlreadyUsed` on both the primary and the
+/// counter-evidence submission paths, never silently double-stored.
+#[test]
+fn test_duplicate_evidence_digest_is_rejected_deterministically() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
+    create_and_dispute(&env, &client, &buyer, &seller, &token, &token_admin, 1);
+
+    let uri = String::from_str(&env, "ipfs://same-bytes");
+    client.submit_evidence(&1, &buyer, &uri);
+
+    // Same payload again (identical digest) → defined rejection.
+    let dup = client.try_submit_evidence(&1, &seller, &uri);
+    assert!(matches!(dup, Err(Ok(Error::EvidenceAlreadyUsed))));
+
+    // The digest guard also covers the counter-evidence path: a fresh, valid
+    // parent still cannot smuggle a previously-used payload back in.
+    let parent = client.submit_evidence(&1, &buyer, &String::from_str(&env, "ipfs://parent"));
+    let dup_counter = client.try_submit_counter_evidence(&1, &seller, &uri, &parent);
+    assert!(matches!(dup_counter, Err(Ok(Error::EvidenceAlreadyUsed))));
+}
+
+/// #1078 AC1 + AC3: counter-evidence against a parent is accepted one second
+/// before the parent's expiry deadline and rejected with `EvidenceExpired` at
+/// the exact deadline (inclusive-end convention).
+#[test]
+fn test_counter_evidence_parent_expiry_exact_boundary() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
+    create_and_dispute(&env, &client, &buyer, &seller, &token, &token_admin, 1);
+
+    let submitted_at = env.ledger().timestamp();
+    let parent = client.submit_evidence(&1, &buyer, &String::from_str(&env, "ipfs://parent"));
+
+    let expiry = DEFAULT_EVIDENCE_EXPIRY_WINDOW;
+
+    // t = submitted_at + expiry - 1 → parent STILL VALID → counter accepted.
+    env.ledger().with_mut(|li| {
+        li.timestamp = submitted_at + expiry - 1;
+    });
+    let counter_ok = client.submit_counter_evidence(
+        &1,
+        &seller,
+        &String::from_str(&env, "ipfs://counter-before"),
+        &parent,
+    );
+    assert_eq!(counter_ok, 1);
+
+    // t = submitted_at + expiry → parent EXPIRED → counter rejected (#1078 AC1).
+    env.ledger().with_mut(|li| {
+        li.timestamp = submitted_at + expiry;
+    });
+    let counter_expired = client.try_submit_counter_evidence(
+        &1,
+        &seller,
+        &String::from_str(&env, "ipfs://counter-after"),
+        &parent,
+    );
+    assert!(matches!(counter_expired, Err(Ok(Error::EvidenceExpired))));
+}
+
+/// #1078 AC1 + AC2: resolving a dispute at the evidence-expiry deadline
+/// finalizes successfully AND persists the expiry sweep. Proven by rewinding
+/// the clock below the deadline afterwards: read-time invalidation cannot fire
+/// (now < expires_at), so a still-invalidated record can only have come from
+/// the sweep that ran at finalization.
+#[test]
+fn test_resolution_persists_expired_evidence_sweep() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, admin) = setup(&env);
+    create_and_dispute(&env, &client, &buyer, &seller, &token, &token_admin, 1);
+
+    let submitted_at = env.ledger().timestamp();
+    client.submit_evidence(&1, &buyer, &String::from_str(&env, "ipfs://to-expire"));
+
+    // Advance to the exact expiry deadline: evidence is expired, yet still
+    // inside the 30-day dispute window and past the 1-day challenge window.
+    env.ledger().with_mut(|li| {
+        li.timestamp = submitted_at + DEFAULT_EVIDENCE_EXPIRY_WINDOW;
+    });
+
+    client.resolve_dispute(&1, &Resolution::RefundToBuyer, &admin);
+    assert_eq!(client.get_escrow(&1).status, EscrowStatus::Resolved);
+
+    // Rewind below the deadline. If the sweep only lived in get_evidence's read
+    // path, the record would read back valid here; a persisted invalidation
+    // survives the rewind, proving finalization swept it (#1078 AC1/AC2).
+    env.ledger().with_mut(|li| {
+        li.timestamp = submitted_at;
+    });
+    let log = client.get_evidence(&1);
+    assert_eq!(log.len(), 1);
+    assert!(
+        log.get(0).unwrap().is_invalidated,
+        "resolution must persist evidence expiry at finalization"
+    );
 }

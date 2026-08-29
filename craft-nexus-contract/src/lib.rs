@@ -266,6 +266,12 @@ pub enum Error {
     /// Requested WASM upgrade cooldown is below `MIN_WASM_UPGRADE_COOLDOWN`,
     /// which would let the mandatory review window be bypassed (#1062).
     UpgradeCooldownTooShort = 83,
+    /// A batch continuation cursor does not match the persisted job: it was
+    /// minted for a different operation type, or its revision is ahead of the
+    /// job's committed checkpoint (a fabricated / future cursor). A cursor whose
+    /// revision is *behind* the checkpoint is not an error — it is treated as a
+    /// harmless idempotent replay (#1075/#1076).
+    BatchCursorMismatch = 84,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -380,6 +386,12 @@ const ABSOLUTE_MAX_RELEASE_WINDOW: u32 = time_policy::ABSOLUTE_MAX_RELEASE_WINDO
 
 /// Default evidence expiry / retention window (7 days in seconds) (#927)
 const DEFAULT_EVIDENCE_EXPIRY_WINDOW: u64 = time_policy::EVIDENCE_EXPIRY_WINDOW;
+/// Schema version stamped on every persisted [`DisputeEvidence`] record (#1077).
+///
+/// Bump this whenever the structured evidence layout changes so indexers can
+/// branch on `DisputeEvidence.version` (and the `dispute_evidence`/`submitted`
+/// event's version field) without inferring the shape from field presence.
+const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 /// Default challenge period window before a dispute can be resolved (1 day in seconds) (#942)
 const DEFAULT_EVIDENCE_CHALLENGE_WINDOW: u32 = time_policy::EVIDENCE_CHALLENGE_WINDOW as u32;
 /// Default dispute escalation window (3 days in seconds) (#941)
@@ -1539,8 +1551,28 @@ pub enum BatchJobStatus {
     Cancelled = 2,
 }
 
+/// Operation a resumable batch job performs.
+///
+/// Persisted on the [`BatchEscrowJob`] and echoed in every [`BatchCursor`] so a
+/// cursor minted for one operation type can never be replayed against a job of a
+/// different type (#1075). Discriminants are stable on the wire; today only
+/// escrow creation is resumable, but new resumable operations get their own
+/// variant here rather than overloading an existing one.
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum BatchOpType {
+    /// Resumable escrow creation (the only batch operation today).
+    EscrowCreation = 0,
+}
+
 /// Persisted state for a scheduled batch. The parameters are immutable so a
 /// continuation always operates on the same ordered input and cursor.
+///
+/// `revision` is a monotonic checkpoint counter: it starts at `0` and is
+/// incremented by exactly one each time a chunk is committed atomically. A
+/// [`BatchCursor`] carries the revision it expects to advance *from*, which is
+/// what makes continuation idempotent and replay-safe (#1075/#1076).
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -1549,6 +1581,41 @@ pub struct BatchEscrowJob {
     pub params: Vec<EscrowCreateParams>,
     pub next_index: u32,
     pub status: BatchJobStatus,
+    /// The operation this job performs; bound into every cursor.
+    pub op_type: BatchOpType,
+    /// Monotonic count of atomically committed chunks (checkpoint revision).
+    pub revision: u64,
+}
+
+/// Server-minted continuation token for a resumable batch job (#1075/#1076).
+///
+/// A cursor binds a continuation to exactly one `(job_id, owner, op_type)` and to
+/// a specific committed `revision` of the job. [`Contract::continue_batch_escrow`]
+/// validates the cursor against the persisted job before doing any work:
+///
+/// * a cursor whose `owner` differs from the job's owner is rejected
+///   (`BatchJobUnauthorized`) — a cursor cannot be used for another account;
+/// * a cursor whose `op_type` differs from the job's is rejected
+///   (`BatchCursorMismatch`) — a cursor cannot be used for another operation;
+/// * a cursor whose `revision` is **behind** the job's committed revision refers
+///   to an already-applied chunk and is a harmless no-op returning current
+///   progress (idempotent replay);
+/// * a cursor whose `revision` is **ahead** of the job is a fabricated / future
+///   cursor and is rejected (`BatchCursorMismatch`);
+/// * at the live revision, `next_index` must equal the job's checkpoint or the
+///   cursor is rejected (`BatchCursorMismatch`).
+///
+/// `next_index` is the position the cursor resumes from — observable and bounded
+/// progress for clients and indexers (#1075 AC3, #1076 AC3).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct BatchCursor {
+    pub job_id: u64,
+    pub owner: Address,
+    pub op_type: BatchOpType,
+    pub revision: u64,
+    pub next_index: u32,
 }
 
 /// Lightweight progress returned to clients and indexers without exposing the
@@ -1562,6 +1629,10 @@ pub struct BatchJobProgress {
     pub next_index: u32,
     pub total: u32,
     pub status: BatchJobStatus,
+    /// Operation type of the underlying job (mirrors the cursor binding).
+    pub op_type: BatchOpType,
+    /// Committed checkpoint revision after this call (see [`BatchEscrowJob`]).
+    pub revision: u64,
 }
 
 /// Policy for handling fees when a dispute expires without arbitrator resolution.
@@ -1636,6 +1707,12 @@ pub struct PlatformConfig {
 }
 
 /// Structured record of dispute evidence with metadata and expiry thresholds (#927).
+///
+/// Versioned for indexer stability (#1077): `version` identifies the record
+/// schema (see [`EVIDENCE_SCHEMA_VERSION`]) and `content_digest` is the SHA-256 of
+/// the evidence payload, persisted on the record itself so queries return stable
+/// metadata without recomputing the hash or reading the reuse-guard key. Each
+/// record is bound to exactly one dispute via `(order_id, dispute_session_id)`.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -1649,6 +1726,10 @@ pub struct DisputeEvidence {
     pub submitted_at: u64,
     pub expires_at: u64,
     pub is_invalidated: bool,
+    /// Structured-record schema version (#1077).
+    pub version: u32,
+    /// SHA-256 digest of `evidence_uri`; stable metadata for indexers (#1077).
+    pub content_digest: BytesN<32>,
 }
 
 /// Record of dispute escalation to arbitration (#941).
@@ -7268,6 +7349,11 @@ impl CraftNexusContract {
         Self::assert_arbitrator_resolution_window(&env, &snapshot, &config)
             .unwrap_or_else(|e| env.panic_with_error(e));
 
+        // #1078: sweep expired evidence to invalidated before finalizing so the
+        // resolved dispute never carries evidence past its retention deadline,
+        // and refresh the evidence-log TTL for this still-active record.
+        Self::expire_stale_evidence(&env, order_id);
+
         let (kind, path) = match resolution {
             Resolution::ReleaseToSeller => (
                 SettlementKind::ReleaseFunds,
@@ -7384,6 +7470,71 @@ impl CraftNexusContract {
         }
     }
 
+    /// Emit a versioned `dispute_evidence` / `submitted` event carrying stable
+    /// metadata for off-chain indexers (#1077 AC3).
+    ///
+    /// The first tuple element is [`EVIDENCE_SCHEMA_VERSION`] so indexers can
+    /// branch on the schema without inferring shape from field presence. The
+    /// payload is deliberately flat (no `String` body) so it stays cheap and the
+    /// digest is the canonical content reference.
+    fn emit_evidence_submitted(
+        env: &Env,
+        order_id: u32,
+        evidence_id: u64,
+        dispute_session_id: u64,
+        submitter: &Address,
+        content_digest: &BytesN<32>,
+        expires_at: u64,
+        parent_evidence_id: Option<u64>,
+    ) {
+        env.events().publish(
+            (
+                Symbol::new(env, "dispute_evidence"),
+                Symbol::new(env, "submitted"),
+            ),
+            (
+                EVIDENCE_SCHEMA_VERSION,
+                order_id,
+                evidence_id,
+                dispute_session_id,
+                submitter.clone(),
+                content_digest.clone(),
+                expires_at,
+                parent_evidence_id,
+            ),
+        );
+    }
+
+    /// Invalidate any expired evidence for an order and persist the sweep (#1078).
+    ///
+    /// Mirrors the read-time invalidation in [`Self::get_evidence`] but is called
+    /// from state-changing finalization paths (dispute resolution) so a finalized
+    /// dispute never carries evidence that was already past its retention deadline
+    /// (#1078 AC1 — expired evidence cannot be finalized). Refreshes the
+    /// evidence-log TTL for the still-active dispute record (#1078 AC2). No-op
+    /// when the order has no evidence log.
+    fn expire_stale_evidence(env: &Env, order_id: u32) {
+        let key = DataKey::EvidenceLog(order_id);
+        let log: Vec<DisputeEvidence> = match env.storage().persistent().get(&key) {
+            Some(existing) => existing,
+            None => return,
+        };
+        let now = env.ledger().timestamp();
+        let mut updated_log = Vec::new(env);
+        let mut modified = false;
+        for mut item in log.into_iter() {
+            if !item.is_invalidated && time_policy::is_deadline_reached(now, item.expires_at) {
+                item.is_invalidated = true;
+                modified = true;
+            }
+            updated_log.push_back(item);
+        }
+        if modified {
+            env.storage().persistent().set(&key, &updated_log);
+        }
+        Self::extend_persistent(env, &key);
+    }
+
     /// Submit evidence for a disputed escrow order (#927).
     ///
     /// Evidence is bound to the active dispute session, stamped with an expiry timestamp,
@@ -7406,17 +7557,20 @@ impl CraftNexusContract {
         }
         let dispute_session_id = escrow.dispute_initiated_at.unwrap_or(escrow.created_at as u64);
 
-        // Prevent evidence reuse across multiple disputes (#927)
+        // Prevent evidence reuse across multiple disputes (#927) and retain the
+        // digest as stable indexer metadata persisted on the record (#1077).
         let len = (evidence_uri.len() as usize).min(256);
         let mut buf = [0u8; 256];
         evidence_uri.copy_into_slice(&mut buf[0..len]);
         let bytes = Bytes::from_slice(&env, &buf[0..len]);
-        let hash: BytesN<32> = env.crypto().sha256(&bytes).into();
-        let hash_key = DataKey::UsedEvidenceHash(hash);
+        let content_digest: BytesN<32> = env.crypto().sha256(&bytes).into();
+        let hash_key = DataKey::UsedEvidenceHash(content_digest.clone());
         if env.storage().persistent().has(&hash_key) {
+            // Duplicate digest → defined, deterministic rejection (#1077 AC2).
             env.panic_with_error(crate::Error::EvidenceAlreadyUsed);
         }
         env.storage().persistent().set(&hash_key, &true);
+        Self::extend_persistent(&env, &hash_key);
 
         let key = DataKey::EvidenceLog(order_id);
         let mut log: Vec<DisputeEvidence> = env
@@ -7437,16 +7591,32 @@ impl CraftNexusContract {
             id,
             order_id,
             dispute_session_id,
-            submitter,
+            submitter: submitter.clone(),
             evidence_uri,
             parent_evidence_id: None,
             submitted_at,
             expires_at,
             is_invalidated: false,
+            version: EVIDENCE_SCHEMA_VERSION,
+            content_digest: content_digest.clone(),
         };
 
         log.push_back(evidence);
         env.storage().persistent().set(&key, &log);
+        // #1078: refresh the active dispute's evidence-log TTL on each write.
+        Self::extend_persistent(&env, &key);
+
+        // #1077: publish versioned, stable metadata for off-chain indexers.
+        Self::emit_evidence_submitted(
+            &env,
+            order_id,
+            id,
+            dispute_session_id,
+            &submitter,
+            &content_digest,
+            expires_at,
+            None,
+        );
         id
     }
 
@@ -7481,29 +7651,42 @@ impl CraftNexusContract {
         operation_id.extend_from_slice(&(log.len() as u32).to_be_bytes());
         Self::authorize_onboarding_state(&env, &submitter, operation_id, expected_role);
 
-        // Validate parent evidence ID exists in current dispute evidence log
+        // Validate parent evidence exists in the current dispute session and has
+        // not expired. A missing parent is a bad reference (InvalidEscrowState);
+        // an existing-but-expired parent means the caller is submitting
+        // counter-evidence against dead evidence, which is rejected (#1078).
+        let now = env.ledger().timestamp();
         let mut parent_found = false;
+        let mut parent_expired = false;
         for item in log.iter() {
             if item.id == parent_evidence_id && item.dispute_session_id == dispute_session_id {
                 parent_found = true;
+                parent_expired =
+                    item.is_invalidated || time_policy::is_deadline_reached(now, item.expires_at);
                 break;
             }
         }
         if !parent_found {
             env.panic_with_error(crate::Error::InvalidEscrowState);
         }
+        if parent_expired {
+            env.panic_with_error(crate::Error::EvidenceExpired);
+        }
 
-        // Prevent evidence reuse across multiple disputes (#927)
+        // Prevent evidence reuse across multiple disputes (#927) and retain the
+        // digest as stable indexer metadata persisted on the record (#1077).
         let len = (evidence_uri.len() as usize).min(256);
         let mut buf = [0u8; 256];
         evidence_uri.copy_into_slice(&mut buf[0..len]);
         let bytes = Bytes::from_slice(&env, &buf[0..len]);
-        let hash: BytesN<32> = env.crypto().sha256(&bytes).into();
-        let hash_key = DataKey::UsedEvidenceHash(hash);
+        let content_digest: BytesN<32> = env.crypto().sha256(&bytes).into();
+        let hash_key = DataKey::UsedEvidenceHash(content_digest.clone());
         if env.storage().persistent().has(&hash_key) {
+            // Duplicate digest → defined, deterministic rejection (#1077 AC2).
             env.panic_with_error(crate::Error::EvidenceAlreadyUsed);
         }
         env.storage().persistent().set(&hash_key, &true);
+        Self::extend_persistent(&env, &hash_key);
 
         let id = log.len() as u64;
         let submitted_at = env.ledger().timestamp();
@@ -7513,16 +7696,32 @@ impl CraftNexusContract {
             id,
             order_id,
             dispute_session_id,
-            submitter,
+            submitter: submitter.clone(),
             evidence_uri,
             parent_evidence_id: Some(parent_evidence_id),
             submitted_at,
             expires_at,
             is_invalidated: false,
+            version: EVIDENCE_SCHEMA_VERSION,
+            content_digest: content_digest.clone(),
         };
 
         log.push_back(evidence);
         env.storage().persistent().set(&key, &log);
+        // #1078: refresh the active dispute's evidence-log TTL on each write.
+        Self::extend_persistent(&env, &key);
+
+        // #1077: publish versioned, stable metadata for off-chain indexers.
+        Self::emit_evidence_submitted(
+            &env,
+            order_id,
+            id,
+            dispute_session_id,
+            &submitter,
+            &content_digest,
+            expires_at,
+            Some(parent_evidence_id),
+        );
         id
     }
 
@@ -7551,6 +7750,8 @@ impl CraftNexusContract {
 
         if modified {
             env.storage().persistent().set(&key, &updated_log);
+            // #1078: the sweep is a write to active dispute data — refresh its TTL.
+            Self::extend_persistent(&env, &key);
         }
 
         updated_log
@@ -8486,6 +8687,8 @@ impl CraftNexusContract {
             params: params.clone(),
             next_index: 0,
             status: BatchJobStatus::Pending,
+            op_type: BatchOpType::EscrowCreation,
+            revision: 0,
         };
         let key = DataKey::BatchEscrowJob(job_id);
         env.storage().persistent().set(&key, &job);
@@ -8500,32 +8703,111 @@ impl CraftNexusContract {
         Ok(job_id)
     }
 
-    /// Process the next deterministic chunk of a scheduled batch.
+    /// Build a client/indexer-facing progress snapshot from a stored job.
+    ///
+    /// Single source of truth for the shape returned by `continue_batch_escrow`,
+    /// `get_batch_escrow_progress`, and the idempotent-replay paths so all three
+    /// are byte-for-byte comparable.
+    fn batch_progress(job_id: u64, job: &BatchEscrowJob) -> BatchJobProgress {
+        BatchJobProgress {
+            id: job_id,
+            owner: job.owner.clone(),
+            next_index: job.next_index,
+            total: job.params.len(),
+            status: job.status,
+            op_type: job.op_type,
+            revision: job.revision,
+        }
+    }
+
+    /// Return the current continuation cursor for a scheduled batch (#1075).
+    ///
+    /// The cursor reflects the persisted checkpoint — `revision` and `next_index`
+    /// after the last committed chunk — so recovery can resume deterministically
+    /// from exactly where the job left off (#1076 AC3). Returns `None` when the
+    /// job does not exist.
+    pub fn get_batch_cursor(env: Env, job_id: u64) -> Option<BatchCursor> {
+        let key = DataKey::BatchEscrowJob(job_id);
+        let job: BatchEscrowJob = env.storage().persistent().get(&key)?;
+        Some(BatchCursor {
+            job_id,
+            owner: job.owner,
+            op_type: job.op_type,
+            revision: job.revision,
+            next_index: job.next_index,
+        })
+    }
+
+    /// Process the next deterministic chunk of a scheduled batch (#1075/#1076).
+    ///
+    /// The caller presents a [`BatchCursor`] minted by `schedule_batch_escrow` /
+    /// `get_batch_cursor`. The cursor is validated against the persisted job
+    /// before any work happens, which is what makes continuation safe to retry:
+    ///
+    /// * cross-account / cross-operation cursors are rejected (#1075 AC1);
+    /// * a cursor behind the committed revision (an already-applied chunk) is a
+    ///   harmless no-op returning current progress (#1075 AC2 / #1076 AC2);
+    /// * a cursor ahead of the committed revision is rejected as fabricated.
+    ///
+    /// The chunk is committed through [`Self::create_batch_escrow`], whose failure
+    /// rolls back the whole invocation. The checkpoint (`next_index` + bumped
+    /// `revision`) is persisted **only after** all financial effects succeed, so a
+    /// failed chunk never advances the cursor (#1076 AC1) and a committed chunk can
+    /// never be applied twice at the same revision (#1076 AC2).
     pub fn continue_batch_escrow(
         env: Env,
-        job_id: u64,
-        owner: Address,
+        cursor: BatchCursor,
         work_limit: u32,
     ) -> Result<BatchJobProgress, Error> {
+        // Bound the work per continuation first, so an out-of-range request is
+        // rejected identically whether or not the job exists.
         pagination_validation::validate_strict_limit(
             work_limit,
             pagination_validation::MAX_BATCH_WORK_LIMIT,
         )?;
 
-        let key = DataKey::BatchEscrowJob(job_id);
+        let key = DataKey::BatchEscrowJob(cursor.job_id);
         let mut job: BatchEscrowJob = env
             .storage()
             .persistent()
             .get(&key)
             .ok_or(Error::BatchJobNotFound)?;
-        if job.owner != owner {
+
+        // A cursor is bound to exactly one owner and one operation type; it can
+        // never be replayed against another account's job or a different op.
+        if cursor.owner != job.owner {
             return Err(Error::BatchJobUnauthorized);
         }
-        owner.require_auth();
+        if cursor.op_type != job.op_type {
+            return Err(Error::BatchCursorMismatch);
+        }
+        job.owner.require_auth();
+
+        // Revision gate — idempotent, bounded continuation:
+        //   behind → the referenced chunk was already committed; harmless no-op.
+        //   ahead  → fabricated / future cursor; reject.
+        //   equal  → the live checkpoint; process the next chunk below.
+        if cursor.revision < job.revision {
+            return Ok(Self::batch_progress(cursor.job_id, &job));
+        }
+        if cursor.revision > job.revision {
+            return Err(Error::BatchCursorMismatch);
+        }
+
+        // At the live revision, a terminal job yields its progress without work:
+        // a completed job replays harmlessly (#1075 AC2); a cancelled job is a
+        // genuine terminal error and stays an error.
         match job.status {
-            BatchJobStatus::Completed => return Err(Error::BatchJobCompleted),
+            BatchJobStatus::Completed => return Ok(Self::batch_progress(cursor.job_id, &job)),
             BatchJobStatus::Cancelled => return Err(Error::BatchJobCancelled),
             BatchJobStatus::Pending => {}
+        }
+
+        // Defensive cross-check: at the live revision the cursor's resume position
+        // must equal the persisted checkpoint. A mismatch means a hand-forged
+        // cursor; reject rather than process an unexpected range.
+        if cursor.next_index != job.next_index {
+            return Err(Error::BatchCursorMismatch);
         }
 
         let end = core::cmp::min(job.next_index + work_limit, job.params.len());
@@ -8536,10 +8818,12 @@ impl CraftNexusContract {
             }
         }
 
-        // The existing batch function commits the whole chunk atomically. If
-        // it fails, this job cursor is not advanced.
-        Self::create_batch_escrow(env.clone(), job_id, chunk)?;
+        // Atomic checkpoint: create_batch_escrow commits the whole chunk or
+        // returns Err, which rolls back the entire invocation (including any
+        // token transfers). Everything below persists only on success.
+        Self::create_batch_escrow(env.clone(), cursor.job_id, chunk)?;
         job.next_index = end;
+        job.revision = job.revision.saturating_add(1);
         if job.next_index == job.params.len() {
             job.status = BatchJobStatus::Completed;
         }
@@ -8550,16 +8834,16 @@ impl CraftNexusContract {
                 Symbol::new(&env, "batch_scheduler"),
                 Symbol::new(&env, "progress"),
             ),
-            (job_id, job.next_index, job.params.len(), job.status),
+            (
+                cursor.job_id,
+                job.next_index,
+                job.params.len(),
+                job.revision,
+                job.status,
+            ),
         );
 
-        Ok(BatchJobProgress {
-            id: job_id,
-            owner: job.owner,
-            next_index: job.next_index,
-            total: job.params.len(),
-            status: job.status,
-        })
+        Ok(Self::batch_progress(cursor.job_id, &job))
     }
 
     /// Cancel a pending batch without creating any escrow or moving funds.
@@ -8598,13 +8882,7 @@ impl CraftNexusContract {
     pub fn get_batch_escrow_progress(env: Env, job_id: u64) -> Option<BatchJobProgress> {
         let key = DataKey::BatchEscrowJob(job_id);
         let job: BatchEscrowJob = env.storage().persistent().get(&key)?;
-        Some(BatchJobProgress {
-            id: job_id,
-            owner: job.owner,
-            next_index: job.next_index,
-            total: job.params.len(),
-            status: job.status,
-        })
+        Some(Self::batch_progress(job_id, &job))
     }
 
     /// Release multiple escrows in a batch operation
