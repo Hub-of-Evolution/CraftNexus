@@ -340,13 +340,28 @@ This document catalogs all public contract errors, their meanings, triggering co
 **Description**: Batch operation exceeds the maximum allowed size.
 
 **Triggering Conditions**:
-- Batch size > `MAX_BATCH_SIZE (50)`
+- Batch item count > the configured batch size limit (default `20`; admin can
+  change via `set_batch_size_limit`)
 - Rate limit exceeded (disputes)
 
 **Suggested Client Action**:
-1. Reduce batch size to ≤ 50
+1. Reduce batch size to the configured limit
 2. Use scheduled batch for larger operations
 3. Implement pagination with `schedule_batch_escrow()`
+
+---
+
+#### Error 87: BatchResourceLimitExceeded
+**Description**: A batch call's expected storage work exceeds the configured
+batch resource budget (Issue #1074).
+
+**Triggering Conditions**:
+- `expected_storage_writes(batch_size) >` the configured batch resource budget
+- The batch is rejected **before** any escrow is created or funds move
+
+**Suggested Client Action**:
+1. Reduce the batch's item count
+2. Ask the admin to raise the budget via `set_batch_resource_budget`
 
 ---
 

@@ -46,6 +46,14 @@ pub mod onboarding;
 /// Centralized pagination input validation (Issue #1022).
 pub mod pagination_validation;
 
+/// Explicit bounds for batch operations (Issue #1074).
+///
+/// Batch methods validate item counts and expected storage work against
+/// admin-configurable ceilings *before* any financial mutation, so oversized
+/// requests are rejected deterministically instead of failing mid-loop against
+/// the Soroban resource envelope.
+pub mod batch_bounds;
+
 /// Error codes grouped by category for off-chain triage.
 ///
 /// # Categories
@@ -272,6 +280,11 @@ pub enum Error {
     /// An active dispute, recurring escrow, or pending upgrade exists that blocks
     /// the requested emergency operation from starting (#1072).
     EmergencyConflictActive = 86,
+    /// The estimated storage work (persistent writes) of a batch call exceeds
+    /// the configured batch resource budget. No escrow is created and no funds
+    /// move when this is returned: the batch is rejected *before* state changes
+    /// start (Issue #1074).
+    BatchResourceLimitExceeded = 87,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -572,6 +585,11 @@ pub enum DataKey {
     WasmUpgradeProposal,
     /// Configurable maximum release window (in seconds)
     MaxReleaseWindow,
+    /// Configurable maximum number of escrows accepted per batch call (Issue #1074).
+    BatchSizeLimit,
+    /// Configurable ceiling on the expected storage work (persistent writes) of
+    /// a single batch call (Issue #1074).
+    BatchResourceBudget,
     /// Address of the deployed onboarding contract for cross-contract reputation calls
     OnboardingContractAddress,
     /// DEPRECATED legacy storage: Map of whitelisted token addresses (Address -> bool).
@@ -3343,6 +3361,79 @@ impl CraftNexusContract {
     pub fn get_min_release_window(env: Env) -> u32 {
         let config = Self::get_platform_config_internal(&env);
         config.min_release_window
+    }
+
+    /// Get the configured maximum number of escrows accepted per batch call
+    /// (Issue #1074). Falls back to [`batch_bounds::DEFAULT_BATCH_SIZE_LIMIT`]
+    /// when no explicit ceiling has been configured.
+    pub fn get_batch_size_limit(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BatchSizeLimit)
+            .unwrap_or(batch_bounds::DEFAULT_BATCH_SIZE_LIMIT)
+    }
+
+    /// Set the maximum number of escrows accepted per batch call (admin only).
+    ///
+    /// Batch methods validate the item count against this ceiling *before* any
+    /// escrow is created or funds move, so oversized requests fail with
+    /// `Error::BatchLimitExceeded` before state changes (Issue #1074).
+    ///
+    /// # Panics
+    /// - If the caller is not the admin.
+    /// - If `limit` is below `batch_bounds::MIN_BATCH_SIZE_LIMIT` or above
+    ///   `batch_bounds::MAX_BATCH_SIZE_LIMIT`, which would permit batches that
+    ///   risk breaching the Soroban resource envelope.
+    pub fn set_batch_size_limit(env: Env, limit: u32) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if limit < batch_bounds::MIN_BATCH_SIZE_LIMIT
+            || limit > batch_bounds::MAX_BATCH_SIZE_LIMIT
+        {
+            env.panic_with_error(crate::Error::BatchLimitExceeded);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::BatchSizeLimit, &limit);
+        Self::extend_persistent(&env, &DataKey::BatchSizeLimit);
+    }
+
+    /// Get the configured ceiling on the expected storage work (persistent
+    /// writes) of a single batch call (Issue #1074). Falls back to
+    /// [`batch_bounds::DEFAULT_BATCH_STORAGE_WRITES_BUDGET`] when unset.
+    pub fn get_batch_resource_budget(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BatchResourceBudget)
+            .unwrap_or(batch_bounds::DEFAULT_BATCH_STORAGE_WRITES_BUDGET)
+    }
+
+    /// Set the ceiling on the expected storage work (persistent writes) of a
+    /// single batch call (admin only).
+    ///
+    /// A batch whose [`batch_bounds::expected_storage_writes`] exceeds this
+    /// budget is rejected with `Error::BatchResourceLimitExceeded` *before* any
+    /// escrow is created or funds move, giving the admin a deterministic
+    /// resource budget independent of the item-count ceiling (Issue #1074).
+    ///
+    /// # Panics
+    /// - If the caller is not the admin.
+    /// - If `budget` is below `batch_bounds::MIN_BATCH_STORAGE_WRITES_BUDGET`
+    ///   (prevents accidentally disabling batch creation).
+    pub fn set_batch_resource_budget(env: Env, budget: u64) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if budget < batch_bounds::MIN_BATCH_STORAGE_WRITES_BUDGET {
+            env.panic_with_error(crate::Error::BatchResourceLimitExceeded);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::BatchResourceBudget, &budget);
+        Self::extend_persistent(&env, &DataKey::BatchResourceBudget);
     }
 
     /// Register the deployed OnboardingContract address so the escrow contract
@@ -8563,7 +8654,8 @@ impl CraftNexusContract {
     ) -> Map<u32, Error> {
         let mut errors: Map<u32, Error> = Map::new(&env);
 
-        if escrows.len() > MAX_BATCH_SIZE {
+        // Issue #1074: honor the configured batch size ceiling.
+        if escrows.len() > Self::get_batch_size_limit(&env) {
             env.panic_with_error(crate::Error::BatchLimitExceeded);
         }
 
@@ -8590,19 +8682,37 @@ impl CraftNexusContract {
     /// - Batch size limit to prevent resource exhaustion
     ///
     /// # Arguments
-    /// * `escrows` - Vector of escrow creation parameters (max MAX_BATCH_SIZE items)
+    /// * `escrows` - Vector of escrow creation parameters. The item count and
+    ///   expected storage work are validated against the configured batch
+    ///   bounds (`get_batch_size_limit` / `get_batch_resource_budget`) before
+    ///   any escrow is created or funds move (Issue #1074).
     /// * `batch_id` - Unique identifier for this batch operation
     ///
     /// # Returns
     /// Vector of created escrow IDs
     ///
     /// # Errors
-    /// - BatchLimitExceeded if batch exceeds MAX_BATCH_SIZE
+    /// - BatchLimitExceeded if the batch item count exceeds the configured
+    ///   batch size limit
+    /// - BatchResourceLimitExceeded if the batch's expected storage work
+    ///   exceeds the configured batch resource budget
     /// - Any validation error from individual escrows
     pub fn create_escrows_batch(
         env: Env,
         params: soroban_sdk::Vec<EscrowCreateParams>,
     ) -> Result<soroban_sdk::Vec<u64>, Error> {
+        Self::check_not_paused(&env);
+
+        // Issue #1074: validate the work size BEFORE allocating the batch id so
+        // an oversized request fails without any state change at all.
+        // `create_batch_escrow` re-applies the same gate as defense-in-depth
+        // for direct callers and continuation chunks.
+        batch_bounds::ensure_batch_within_bounds(
+            params.len(),
+            Self::get_batch_size_limit(&env),
+            Self::get_batch_resource_budget(&env),
+        )?;
+
         let batch_id = env
             .storage()
             .instance()
@@ -8622,10 +8732,18 @@ impl CraftNexusContract {
         let _guard = ReentryGuardScope::new(&env);
         Self::check_not_paused(&env);
 
-        // Issue #111: Enforce batch size limit
-        if escrows.len() > MAX_BATCH_SIZE {
-            return Err(Error::BatchLimitExceeded);
-        }
+        // Issue #1074: bound the work size BEFORE any escrow is created or any
+        // funds move. The item count is compared against the admin-configurable
+        // batch size ceiling and the expected storage work against the
+        // admin-configurable resource budget. Rejecting here keeps the whole
+        // batch (and every continuation chunk, which funnels through this
+        // function) from mutating state or burning the Soroban budget on an
+        // oversized request.
+        batch_bounds::ensure_batch_within_bounds(
+            escrows.len(),
+            Self::get_batch_size_limit(&env),
+            Self::get_batch_resource_budget(&env),
+        )?;
 
         let mut results = soroban_sdk::Vec::new(&env);
 
@@ -8816,9 +8934,21 @@ impl CraftNexusContract {
         Self::check_not_paused(&env);
         owner.require_auth();
 
-        if params.is_empty() || params.len() > MAX_BATCH_SIZE {
+        if params.is_empty() {
             return Err(Error::BatchLimitExceeded);
         }
+
+        // Issue #1074: reject schedules whose estimated total work exceeds the
+        // configured bounds before persisting the job. The item count is
+        // checked against the admin-configurable batch size ceiling and the
+        // expected storage work against the admin-configurable resource
+        // budget. Continuation chunks later funnel through
+        // `create_batch_escrow`, which applies the same gate on every resume.
+        batch_bounds::ensure_batch_within_bounds(
+            params.len(),
+            Self::get_batch_size_limit(&env),
+            Self::get_batch_resource_budget(&env),
+        )?;
 
         let mut authorized_buyers: Map<Address, u32> = Map::new(&env);
         for i in 0..params.len() {
