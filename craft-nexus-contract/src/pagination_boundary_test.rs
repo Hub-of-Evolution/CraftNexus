@@ -36,7 +36,7 @@ fn setup_pagination_test(
     let seller = Address::generate(env);
     let platform_wallet = Address::generate(env);
     let arbitrator = Address::generate(env);
-    let onboarding_contract = Address::generate(env);
+    let onboarding = crate::test_utils::deploy_onboarding(env, &contract_id);
 
     env.ledger().with_mut(|li| {
         li.timestamp = 1711368000;
@@ -47,7 +47,7 @@ fn setup_pagination_test(
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &Some(onboarding.address.clone()),
     );
 
     let token_admin = Address::generate(env);
@@ -59,6 +59,8 @@ fn setup_pagination_test(
     client.set_evidence_challenge_window(&0);
 
     token_admin_client.mint(&buyer, &10_000_000);
+
+    crate::test_utils::onboard_buyer_and_seller(env, &onboarding, &buyer, &seller);
 
     (
         client,

@@ -85,9 +85,11 @@ fn test_onboarding_attestation_rejects_forgery_and_replay() {
 
     let (client, _) = setup_test(&env);
     let escrow_contract = Address::generate(&env);
-    client.set_escrow_contract(&escrow_contract);
     let user = Address::generate(&env);
+    // Onboard before configuring the escrow so `onboard_user`'s `is_paused`
+    // probe does not hit a not-yet-deployed escrow contract.
     client.onboard_user(&user, &String::from_str(&env, "attested"), &UserRole::Buyer);
+    client.set_escrow_contract(&escrow_contract);
     let operation_id = Bytes::from_slice(&env, b"operation-1");
 
     let attestation = client.get_onboarding_attestation(
@@ -110,9 +112,9 @@ fn test_onboarding_attestation_becomes_stale_after_role_change() {
 
     let (client, _) = setup_test(&env);
     let escrow_contract = Address::generate(&env);
-    client.set_escrow_contract(&escrow_contract);
     let user = Address::generate(&env);
     client.onboard_user(&user, &String::from_str(&env, "revision"), &UserRole::Buyer);
+    client.set_escrow_contract(&escrow_contract);
     let operation_id = Bytes::from_slice(&env, b"operation-2");
     let attestation = client.get_onboarding_attestation(
         &user,
@@ -3369,7 +3371,7 @@ fn test_verification_limits_do_not_duplicate_queue_records() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #27)")]
+#[should_panic(expected = "Error(Contract, #34)")]
 fn test_attempt_rate_policy_rejects_zero_active_window() {
     let env = Env::default();
     env.mock_all_auths();

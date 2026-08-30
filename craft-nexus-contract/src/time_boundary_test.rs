@@ -57,7 +57,7 @@ fn setup() -> TestEnv {
     let token_asset = token::StellarAssetClient::new(&env, &token_addr);
     token_asset.mint(&buyer, &100_000_000);
 
-    let onboarding_contract = Address::generate(&env);
+    let onboarding = crate::test_utils::deploy_onboarding(&env, &contract_id);
 
     env.ledger().with_mut(|li| {
         li.timestamp = 1711368000;
@@ -68,11 +68,12 @@ fn setup() -> TestEnv {
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &Some(onboarding.address.clone()),
     );
     client.set_min_escrow_amount(&token_addr, &0);
     client.set_min_release_window(&1);
     client.set_evidence_challenge_window(&0);
+    crate::test_utils::onboard_buyer_and_seller(&env, &onboarding, &buyer, &seller);
 
     TestEnv {
         env,
