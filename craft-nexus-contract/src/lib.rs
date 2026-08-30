@@ -37,6 +37,8 @@ mod test;
 mod pagination_boundary_test;
 #[cfg(test)]
 mod prop_test;
+#[cfg(test)]
+mod test_utils;
 
 // Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
 // artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
@@ -272,6 +274,21 @@ pub enum Error {
     /// An active dispute, recurring escrow, or pending upgrade exists that blocks
     /// the requested emergency operation from starting (#1072).
     EmergencyConflictActive = 86,
+    /// A clean reconciliation revision exists for this token but no longer
+    /// describes the current on-chain and tracked state (balance or a tracked
+    /// total moved since the revision was produced); a stale clean report can
+    /// never authorize a new sweep (#1069).
+    ReconciliationOutdated = 87,
+    /// The current reconciliation revision flagged an unresolved *customer*
+    /// liability: active escrow obligations diverge from the tracked locked
+    /// total, or the held balance cannot fully cover them. Sweeps are blocked
+    /// until this accounting category is resolved (#1069).
+    UnresolvedCustomerLiability = 88,
+    /// The current reconciliation revision flagged an unresolved *collateral*
+    /// liability: the tracked staked total diverges from the actual stake
+    /// records. Sweeps are blocked until this accounting category is resolved
+    /// (#1069).
+    UnresolvedCollateralLiability = 89,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -2465,7 +2482,7 @@ impl CraftNexusContract {
         match kind {
             EmergencyOpKind::AdminRecovery => {
                 // Recovery blocked if disputes exist, upgrades exist, or recurring escrows exist
-                if Self::get_active_dispute_count(env) > 0 {
+                if Self::get_active_dispute_count(env.clone()) > 0 {
                     return Err(Error::EmergencyConflictActive);
                 }
                 if env
@@ -2475,7 +2492,7 @@ impl CraftNexusContract {
                 {
                     return Err(Error::EmergencyConflictActive);
                 }
-                if Self::get_active_recurring_count(env) > 0 {
+                if Self::get_active_recurring_count(env.clone()) > 0 {
                     return Err(Error::EmergencyConflictActive);
                 }
             }
@@ -4520,7 +4537,20 @@ impl CraftNexusContract {
         Self::check_not_paused(&env);
         buyer.require_auth();
 
-        // Issue #1057: Block deactivated accounts from creating escrows
+        // Reject duplicate order identifiers before onboarding authorization so
+        // a conflicting retry is reported as `EscrowAlreadyExists` instead of
+        // tripping the attestation replay guard (#1027).
+        Self::assert_escrow_not_exists(&env, order_id);
+
+        // Issue #1057: Block deactivated / missing accounts from creating
+        // escrows. Validate onboarding state (profile exists + active +
+        // recognized role) BEFORE the attestation flow so missing/deactivated
+        // profiles surface as the escrow contract's own errors rather than a
+        // raw onboarding error from `get_onboarding_attestation`. Because
+        // `validate_onboarding_state` distinguishes a missing profile
+        // (NotFound) from an inactive one (Inactive), it runs before
+        // `assert_account_active`.
+        Self::validate_onboarding_state(&env, &buyer, &seller);
         Self::assert_account_active(&env, &buyer);
 
         let operation_id = Self::onboarding_operation_id(&env, b"create_escrow:", order_id);
@@ -4568,8 +4598,6 @@ impl CraftNexusContract {
         if window > max_window {
             env.panic_with_error(crate::Error::ReleaseWindowTooLong);
         }
-
-        Self::validate_onboarding_state(&env, &buyer, &seller);
 
         let created_at_u64 = env.ledger().timestamp();
         assert!(
@@ -4699,7 +4727,17 @@ impl CraftNexusContract {
     ) -> Escrow {
         let _guard = ReentryGuardScope::new(&env);
 
+        // Reject duplicate order identifiers before authorization so a
+        // conflicting retry reports `EscrowAlreadyExists` rather than an
+        // attestation replay error (#1027).
+        Self::assert_escrow_not_exists(&env, order_id);
+
         buyer.require_auth();
+
+        // Validate onboarding state before the attestation flow so missing /
+        // deactivated profiles surface as the escrow contract's own errors.
+        Self::validate_onboarding_state(&env, &buyer, &seller);
+
         let operation_id = Self::onboarding_operation_id(&env, b"create_unfunded_escrow:", order_id);
         Self::authorize_onboarding_state(&env, &buyer, operation_id.clone(), UserRole::Buyer);
         Self::authorize_onboarding_state(&env, &seller, operation_id, UserRole::Artisan);
@@ -4715,8 +4753,6 @@ impl CraftNexusContract {
         if window > max_window {
             env.panic_with_error(crate::Error::ReleaseWindowTooLong);
         }
-
-        Self::validate_onboarding_state(&env, &buyer, &seller);
 
         let created_at_u64 = env.ledger().timestamp();
         assert!(
@@ -8041,6 +8077,18 @@ impl CraftNexusContract {
             env.panic_with_error(crate::Error::Unauthorized);
         }
 
+        // Block blacklisted arbitrators/moderators from the partial-resolution
+        // path, matching `resolve_dispute` (#725). Admin is never locked out.
+        if authorized_address != config.admin
+            && env
+                .storage()
+                .persistent()
+                .get::<_, bool>(&DataKey::ArbitratorBlacklist(authorized_address.clone()))
+                .unwrap_or(false)
+        {
+            env.panic_with_error(crate::Error::ArbitratorBlacklisted);
+        }
+
         let mut escrow = Self::get_stored_escrow(&env, order_id);
         let operation_id = Self::onboarding_operation_id(&env, b"resolve_dispute_partial:", order_id);
         Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
@@ -9236,28 +9284,20 @@ impl CraftNexusContract {
         // the arbitrator must resolve it via `resolve_dispute`. Returning an
         // error (rather than panicking) allows the caller to detect this case
         // without rolling back unrelated ledger state.
-        if (initiated_at as u64) + config.max_dispute_duration as u64 > current_time {
+        let current_time = env.ledger().timestamp();
+        let initiated_at = Self::dispute_clock(&snapshot)?;
+        if initiated_at + config.max_dispute_duration as u64 > current_time {
             return Err(Error::DisputeExpired);
         }
 
         let operation_id = Self::onboarding_operation_id(&env, b"resolve_expired_dispute:", order_id);
-        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
-        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+        Self::authorize_onboarding_state(&env, &snapshot.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &snapshot.seller, operation_id, UserRole::Artisan);
 
-        // --- Effects (CEI: all writes before the token transfer) ---
-
-        // CRITICAL: Update status BEFORE external calls (CEI pattern)
-        escrow.status = EscrowStatus::Resolved;
-        env.storage().persistent().set(&(ESCROW, order_id), &escrow);
-
-        // Decrement active counts
-        Self::update_active_obligations(&env, &escrow.buyer, -1);
-        Self::update_active_obligations(&env, &escrow.seller, -1);
-
-        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
-        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
-        Self::update_total_locked(&env, &escrow.token, -escrow.amount);
-
+        // CEI: `claim_disputed_settlement` atomically checks the escrow is still
+        // `Disputed` and advances it to `SettlementPending`, and
+        // `commit_resolved_escrow` finalizes it as `Resolved`. Do NOT pre-set the
+        // stored status to `Resolved` here or the claim's Disputed check fails.
         let fee_bps = Self::get_effective_fee_bps(env.clone(), snapshot.seller.clone());
         let settlement_kind = match config.expired_dispute_fee_policy {
             ExpiredDisputeFeePolicy::RefundFullNoPlatformFee => {
@@ -10002,8 +10042,8 @@ impl CraftNexusContract {
             return Err(Error::Unauthorized);
         }
         let operation_id = Self::onboarding_operation_id(&env, b"accept_partial_refund:", order_id);
-        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
-        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+        Self::authorize_onboarding_state(&env, &snapshot.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &snapshot.seller, operation_id, UserRole::Artisan);
 
         let (_seller_gross, allocation) =
             Self::validate_partial_refund_solvency(&env, &snapshot, proposal.refund_amount)?;
@@ -10072,7 +10112,7 @@ impl CraftNexusContract {
         Self::authorize_onboarding_state(&env, &proposal.proposed_by, operation_id, expected_role);
 
         // Remove the proposal from storage
-        env.storage().persistent().remove(&proposal_key);
+        env.storage().persistent().remove(&Self::proposal_key(order_id));
 
         Ok(())
     }
@@ -10409,35 +10449,71 @@ impl CraftNexusContract {
     /// directly into stealable "unallocated" balance. `reconcile_token`
     /// independently re-derives the canonical locked/staked totals from the
     /// actual escrow and stake records, so a sweep is only allowed once a
-    /// *complete* reconciliation report proves the tracked counters match
-    /// that canonical recomputation, and only for as long as neither the
-    /// on-chain balance nor the tracked counters have moved since - a stale
-    /// report can no longer vouch for the current state and must be refreshed
-    /// via `reconcile_token` before the sweep can proceed.
+    /// *complete* and *clean* reconciliation revision proves the tracked
+    /// counters match that canonical recomputation, and only for as long as
+    /// neither the on-chain balance nor the tracked counters have moved since.
+    /// A stale clean report can never vouch for a current sweep.
+    ///
+    /// Rejections are precise:
+    /// - [`Error::ReconciliationRequired`] - no revision exists or it is
+    ///   incomplete (pagination not finished).
+    /// - [`Error::ReconciliationOutdated`] - the revision is clean but stale;
+    ///   the balance or a tracked total has moved since it was produced.
+    /// - [`Error::UnresolvedCustomerLiability`] - the revision is flagged and
+    ///   the unresolved accounting category is the *customer* ledger (active
+    ///   escrow obligations).
+    /// - [`Error::UnresolvedCollateralLiability`] - the revision is flagged and
+    ///   the unresolved accounting category is the *collateral* ledger (staked
+    ///   amounts).
+    /// - [`Error::EmergencyAccountingInvariant`] - tracked liabilities already
+    ///   exceed the balance actually held.
     fn assert_safe_to_sweep(env: &Env, token: &Address) -> Result<FundAllocation, Error> {
         let allocation = Self::fund_allocation(env, token);
         if allocation.unallocated < 0 {
             return Err(Error::EmergencyAccountingInvariant);
         }
 
+        // A sweep must be backed by a *complete*, *resolved*, and *current*
+        // reconciliation revision. Missing or incomplete => generic
+        // ReconciliationRequired: nothing may move without canonically
+        // re-derived proof of the safe amount.
         let report: ReconciliationReport = env
             .storage()
             .persistent()
             .get(&DataKey::ReconciliationReport(token.clone()))
             .ok_or(Error::ReconciliationRequired)?;
 
-        if !report.complete || report.unresolved {
+        if !report.complete {
             return Err(Error::ReconciliationRequired);
         }
 
-        // The report must still describe the *current* canonical state.
-        // Any movement in balance or tracked totals since reconciliation
-        // means the proof is stale and cannot back this sweep.
+        // A flagged revision voids sweep eligibility entirely. Reject with the
+        // specific unresolved accounting category so operators know exactly
+        // which ledger (customer/escrow vs collateral/stake) must be repaired
+        // before a new clean reconciliation can authorize a sweep.
+        if report.unresolved {
+            if report.balance < report.expected_locked + report.expected_staked
+                || report.expected_locked != report.tracked_locked
+            {
+                return Err(Error::UnresolvedCustomerLiability);
+            }
+            if report.expected_staked != report.tracked_staked {
+                return Err(Error::UnresolvedCollateralLiability);
+            }
+            // Defensive fallback: `unresolved` is only ever set when one of the
+            // category conditions above holds, so this branch is unreachable.
+            return Err(Error::ReconciliationRequired);
+        }
+
+        // The clean revision must still describe the *current* canonical state.
+        // Any movement in balance or tracked totals since reconciliation means
+        // the proof is stale and cannot authorize a new sweep - stale clean
+        // reports never vouch for a current sweep.
         if report.balance != allocation.balance
             || report.tracked_locked != allocation.total_locked
             || report.tracked_staked != allocation.total_staked
         {
-            return Err(Error::ReconciliationRequired);
+            return Err(Error::ReconciliationOutdated);
         }
 
         Ok(allocation)
@@ -10660,11 +10736,14 @@ impl CraftNexusContract {
         // Calculate page bounds
         let end = page.saturating_add(page_size).min(total_escrows);
 
-        // Sum active escrow amounts for this page
+        // Sum active escrow amounts. `expected_locked` is reported as the
+        // cumulative total across [0, end) so an operator can sum page results
+        // deterministically, while `scanned` only counts the escrows in the
+        // current page window ([page, end)).
         let mut expected_locked = 0i128;
         let mut scanned = 0u32;
 
-        for index in page..end {
+        for index in 0..end {
             let Some(order_id) = env
                 .storage()
                 .persistent()
@@ -10691,7 +10770,9 @@ impl CraftNexusContract {
                 {
                     expected_locked = expected_locked.saturating_add(escrow.amount);
                 }
-                scanned = scanned.saturating_add(1);
+                if index >= page {
+                    scanned = scanned.saturating_add(1);
+                }
             }
         }
 
@@ -10845,9 +10926,13 @@ impl CraftNexusContract {
     /// `token` (#1069): the incremental locked/staked counters are trusted for
     /// routine reads, but a sweep must be *proven* safe against a canonical
     /// recomputation from the actual escrow and stake records before any
-    /// balance can leave the contract this way. Call `reconcile_token` first;
-    /// `Error::ReconciliationRequired` means it is missing, incomplete, stale,
-    /// or found a mismatch.
+    /// balance can leave the contract this way. Call `reconcile_token` first.
+    /// Rejections identify the cause: `Error::ReconciliationRequired` (missing
+    /// or incomplete revision), `Error::ReconciliationOutdated` (stale clean
+    /// report), `Error::UnresolvedCustomerLiability` or
+    /// `Error::UnresolvedCollateralLiability` (the revision found an unresolved
+    /// accounting category), or `Error::EmergencyAccountingInvariant` (tracked
+    /// liabilities exceed held balance).
     pub fn sweep_unallocated_funds(
         env: Env,
         token: Address,
@@ -10881,10 +10966,7 @@ impl CraftNexusContract {
 #[cfg(test)]
 mod deactivated_account_tests {
     use super::*;
-    use soroban_sdk::{
-        testutils::{Address as AddressTestUtils, MockAuthContract},
-        Env,
-    };
+    use soroban_sdk::{testutils::Address as AddressTestUtils, Env};
 
     /// Helper: Create a mock onboarding contract that responds to status checks
     fn setup_test_env() -> (Env, Address, Address, Address) {
@@ -11056,92 +11138,5 @@ mod deactivated_account_tests {
         // - No use of instance storage for status checks
         // - Cross-contract call is made to onboarding contract
         // - Persistent data is the source of truth
-    }
-}
-
-
-#[cfg(test)]
-mod deactivated_account_tests {
-    use super::*;
-
-    /// Test: Deactivated account cannot create escrow
-    /// 
-    /// Validates that when an onboarding contract indicates a buyer is deactivated
-    /// (is_profile_active returns false), the create_escrow_with_metadata call panics
-    /// with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore] // Requires full test harness with mock onboarding contract
-    fn test_deactivated_account_cannot_create_escrow() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivated account cannot stake tokens
-    ///
-    /// Validates that when an onboarding contract indicates an artisan is deactivated,
-    /// the stake_tokens call panics with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore]
-    fn test_deactivated_account_cannot_stake() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivated account cannot unstake tokens
-    ///
-    /// Validates that when an onboarding contract indicates an artisan is deactivated,
-    /// the unstake_tokens call panics with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore]
-    fn test_deactivated_account_cannot_unstake() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivated account cannot initiate disputes
-    ///
-    /// Validates that when an onboarding contract indicates a buyer or seller is deactivated,
-    /// the dispute_escrow call panics with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore]
-    fn test_deactivated_account_cannot_initiate_dispute() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivated account cannot create recurring escrow
-    ///
-    /// Validates that when an onboarding contract indicates a buyer is deactivated,
-    /// the create_recurring_escrow call panics with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore]
-    fn test_deactivated_account_cannot_create_recurring_escrow() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivated account cannot cancel recurring escrow
-    ///
-    /// Validates that when an onboarding contract indicates a buyer is deactivated,
-    /// the cancel_recurring_escrow call panics with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore]
-    fn test_deactivated_account_cannot_cancel_recurring_escrow() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Active account passes all checks
-    ///
-    /// Validates that when an onboarding contract indicates an account is active,
-    /// all privileged operations proceed past the assert_account_active check.
-    #[test]
-    #[ignore]
-    fn test_active_account_passes_all_checks() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivation takes effect immediately (no stale cache)
-    ///
-    /// Validates that assert_account_active reads from persistent storage,
-    /// ensuring deactivation takes effect immediately without cache TTL delays.
-    #[test]
-    #[ignore]
-    fn test_deactivation_takes_effect_immediately_no_stale_cache() {
-        // Full integration test requires cross-contract mocking
     }
 }

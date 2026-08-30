@@ -92,10 +92,13 @@ fn prop_no_duplicate_onboarding() {
         let user = Address::generate(&env);
         client.onboard_user(&user, &ss(&env, "alice"), &UserRole::Buyer);
 
-        let r = client.try_onboard_user(&user, &ss(&env, "alice"), &UserRole::Buyer);
+        // An identical retry is an idempotent no-op (Issue #1085), but a
+        // *conflicting* duplicate (different role for the same account) must
+        // never be allowed to create a second profile.
+        let r = client.try_onboard_user(&user, &ss(&env, "alice"), &UserRole::Artisan);
         if r.is_ok() && r.unwrap().is_ok() {
             panic!(
-                "[prop_no_duplicate_onboarding] second onboard succeeded (seed=0x{:016X})",
+                "[prop_no_duplicate_onboarding] conflicting duplicate onboard succeeded (seed=0x{:016X})",
                 case_seed
             );
         }

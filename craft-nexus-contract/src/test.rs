@@ -36,26 +36,47 @@ fn setup_test(
     let token_admin_client = token::StellarAssetClient::new(env, &token_contract.address());
 
     let arbitrator = Address::generate(env);
-    let onboarding_contract = Address::generate(env);
+
+    // Deploy a real onboarding contract so escrow operations that enforce the
+    // onboarding attestation boundary have a working counterpart.
+    let onboarding_id = env.register_contract(None, crate::onboarding::OnboardingContract);
+    let onboarding_client =
+        crate::onboarding::OnboardingContractClient::new(env, &onboarding_id.clone());
+    let onboarding_admin = Address::generate(env);
+    onboarding_client.initialize(&onboarding_admin);
+    onboarding_client.set_escrow_contract(&contract_id);
 
     // Set a non-zero timestamp for event tests
     env.ledger().with_mut(|li| {
         li.timestamp = 1711368000; // 2024-03-25
     });
 
-    // Initialize contract with platform config (no onboarding contract for unit tests)
+    // Initialize contract with platform config
     client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract.clone()),
+        &Some(onboarding_id.clone()),
     );
 
     // Set min amount to 0 for tests to pass with small amounts
     client.set_min_escrow_amount(&token_contract.address(), &0);
     client.set_min_release_window(&1);
     client.set_evidence_challenge_window(&0);
+
+    // Onboard the standard buyer (Buyer) and seller (Artisan) so escrow
+    // operations pass the onboarding attestation boundary.
+    onboarding_client.onboard_user(
+        &buyer,
+        &String::from_str(env, "buyer_user"),
+        &crate::onboarding::UserRole::Buyer,
+    );
+    onboarding_client.onboard_user(
+        &seller,
+        &String::from_str(env, "seller_user"),
+        &crate::onboarding::UserRole::Artisan,
+    );
 
     (
         client,
@@ -2060,6 +2081,16 @@ fn test_escrow_search_by_seller() {
 
     // Create escrows for different sellers
     let seller2 = Address::generate(&env);
+    // The attestation boundary requires every seller party to be onboarded.
+    let onboarding_addr = client.get_onboarding_contract();
+    let onboarding = crate::onboarding::OnboardingContractClient::new(&env, &onboarding_addr);
+    crate::test_utils::onboard(
+        &env,
+        &onboarding,
+        &seller2,
+        "seller2_user",
+        crate::onboarding::UserRole::Artisan,
+    );
     client.create_escrow(&buyer, &seller, &token_id, &10_000_000, &1, &None);
     client.create_escrow(&buyer, &seller2, &token_id, &20_000_000, &2, &None);
     client.create_escrow(&buyer, &seller, &token_id, &30_000_000, &3, &None);
@@ -7065,12 +7096,9 @@ mod reconciliation_report_tests {
     #[test]
     fn test_empty_state_zero_discrepancy() {
         let env = Env::default();
-        let (client, _, _, _, _, token_id, _) = setup_test(&env, true);
+        let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
 
-        let result = client.query_reconciliation_report(&token_id, &0, &50);
-        assert!(result.is_ok(), "query should succeed on empty state");
-
-        let report = result.unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(report.balance, 0, "balance should be zero on empty state");
         assert_eq!(
             report.expected_locked, 0,
@@ -7097,7 +7125,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_distinguishes_locked_staked_categories() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &100_000_000);
 
         // Create an escrow to lock funds
@@ -7110,6 +7138,8 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
         // Stake funds
@@ -7117,10 +7147,7 @@ mod reconciliation_report_tests {
         client.stake_tokens(&buyer, &token_id, &stake_amount);
 
         // Query reconciliation
-        let result = client.query_reconciliation_report(&token_id, &0, &50);
-        assert!(result.is_ok());
-
-        let report = result.unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.expected_locked, escrow_amount,
             "should correctly categorize escrow as locked"
@@ -7141,7 +7168,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_extra_funds_no_discrepancy() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         
         // Mint excess funds to contract
         let excess_amount = 10_000_000i128;
@@ -7158,9 +7185,11 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.complete, true,
             "should complete on small dataset"
@@ -7177,7 +7206,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_negative_discrepancy_insufficient_balance() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &100_000_000);
 
         // Create escrow
@@ -7190,12 +7219,14 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
         // Now artificially drain the contract balance (simulating a loss)
         // We do this by directly manipulating tracked totals in storage for test purposes
         // In production, this would indicate a real discrepancy
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.complete, true,
             "query should complete"
@@ -7213,7 +7244,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_pagination_multiple_pages() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &1_000_000_000);
 
         // Create 60 escrows
@@ -7226,11 +7257,13 @@ mod reconciliation_report_tests {
                 &(i as u32),
                 &None,
                 &None,
+                &None,
+                &None,
             );
         }
 
         // First page: 50 escrows
-        let page1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let page1 = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(page1.scanned_escrows, 50, "first page should scan 50 escrows");
         assert_eq!(page1.complete, false, "first page should not be complete");
         assert_eq!(
@@ -7240,8 +7273,7 @@ mod reconciliation_report_tests {
 
         // Second page: remaining 10 escrows
         let page2 = client
-            .query_reconciliation_report(&token_id, &page1.next_cursor, &50)
-            .unwrap();
+            .query_reconciliation_report(&token_id, &page1.next_cursor, &50);
         assert_eq!(page2.scanned_escrows, 10, "second page should scan 10 escrows");
         assert_eq!(page2.complete, true, "second page should be complete");
         assert_eq!(
@@ -7256,7 +7288,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_page_size_cap_enforced() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &1_000_000_000);
 
         // Create 150 escrows
@@ -7269,11 +7301,13 @@ mod reconciliation_report_tests {
                 &(i as u32),
                 &None,
                 &None,
+                &None,
+                &None,
             );
         }
 
         // Request page_size=200, should be capped at 100
-        let report = client.query_reconciliation_report(&token_id, &0, &200).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &200);
         assert_eq!(
             report.scanned_escrows, 100,
             "page_size should be capped at MAX_PAGE_SIZE"
@@ -7287,7 +7321,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_recurring_escrows_on_first_page() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &100_000_000);
 
         // Create a recurring escrow
@@ -7303,7 +7337,7 @@ mod reconciliation_report_tests {
         );
 
         // Query first page
-        let page1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let page1 = client.query_reconciliation_report(&token_id, &0, &50);
         assert!(
             page1.expected_locked > 0,
             "first page should include recurring escrow"
@@ -7316,7 +7350,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_read_only_no_storage_writes() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &100_000_000);
 
         // Create escrow
@@ -7328,11 +7362,13 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
         // Query multiple times
-        let report1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
-        let report2 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report1 = client.query_reconciliation_report(&token_id, &0, &50);
+        let report2 = client.query_reconciliation_report(&token_id, &0, &50);
 
         // Both should be identical (no state changed)
         assert_eq!(
@@ -7354,7 +7390,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_multiple_escrow_statuses_included() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &100_000_000);
 
         // Create an escrow (Active status by default)
@@ -7363,15 +7399,16 @@ mod reconciliation_report_tests {
         client.create_escrow_with_metadata(
             &buyer,
             &seller,
-            &token_id,
-            &amount,
-            &order_id,
-            &None,
-            &None,
-        );
+            &token_id,                &amount,
+                &order_id,
+                &None,
+                &None,
+                &None,
+                &None,
+            );
 
         // Query should include the Active escrow
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.expected_locked, amount,
             "should include Active escrow"
