@@ -280,6 +280,16 @@ pub enum DataKey {
     PohVerifier,
     /// Monotonic canonical onboarding state revision per user.
     UserStateRevision(Address),
+    /// Persisted profile schema-version marker per user (#1056).
+    UserStateVersion(Address),
+    /// Global counter of actively onboarded users.
+    ActiveUserCount,
+    /// Global counter of onboarding operations.
+    GlobalOnboardCount,
+    /// Global counter of username changes.
+    GlobalUsernameChangeCount,
+    /// Global counter of admin actions.
+    GlobalAdminActionCount,
     /// An operation binding already consumed by an escrow contract.
     UsedAttestation(Address, Bytes),
 }
@@ -1035,11 +1045,11 @@ pub enum Error {
     /// An operation binding has already been consumed.
     AttestationReplay = 28,
     /// Volume accumulator overflowed
-    VolumeOverflow = 26,
+    VolumeOverflow = 33,
     /// Attempt rate policy contains an unusable limit configuration (#1084)
-    InvalidRateLimitPolicy = 27,
+    InvalidRateLimitPolicy = 34,
     /// Review decision does not match the current profile revision (#1086)
-    ReviewRevisionMismatch = 28,
+    ReviewRevisionMismatch = 35,
     /// Review window expired before a decision was submitted (#1086)
     ReviewExpired = 29,
     /// Requested review transition is not valid from the current state (#1086)
@@ -2304,7 +2314,7 @@ impl OnboardingContract {
         payload.extend_from_slice(&(contract_len as u32).to_be_bytes());
         contract_string.copy_into_slice(&mut contract_bytes[..contract_len]);
         payload.extend_from_slice(&contract_bytes[..contract_len]);
-        env.crypto().sha256(&payload)
+        env.crypto().sha256(&payload).into()
     }
 
     /// Ensure the reverse username index points at the canonical account.
