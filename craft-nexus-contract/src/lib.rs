@@ -393,6 +393,13 @@ const DEFAULT_RATE_LIMIT_WINDOW: u32 = time_policy::RATE_LIMIT_WINDOW as u32;
 const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
 const MAX_TOTAL_RELEASE_WINDOW: u32 = time_policy::MAX_TOTAL_RELEASE_WINDOW as u32;
 const CURRENT_ESCROW_VERSION: u32 = 4;
+/// Current version for all lifecycle event payload schemas.
+///
+/// Compatibility rules:
+/// - Keep field ordering deterministic and append-only within a version.
+/// - Increment this value when adding, removing, renaming, or reordering fields.
+/// - Consumers must branch on `schema_version` before decoding payload fields.
+pub const LIFECYCLE_EVENT_SCHEMA_VERSION: u32 = 1;
 /// Explicit storage layout version for persisted contract state.
 ///
 /// New deployments initialize this to `CURRENT_STORAGE_LAYOUT_VERSION`; legacy
@@ -715,6 +722,7 @@ pub struct RecurringEscrow {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct RecurringEscrowEvent {
+    pub schema_version: u32,
     pub id: u64,
     pub action: RecurringEscrowAction,
     pub buyer: Address,
@@ -1049,6 +1057,7 @@ pub struct EscrowResolvedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct ReputationUpdateEvent {
+    pub schema_version: u32,
     pub address: Address,
     pub successful_delta: u32,
     pub disputed_delta: u32,
@@ -1117,6 +1126,7 @@ pub enum ConfigValue {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct ConfigUpdatedEvent {
+    pub schema_version: u32,
     pub field_name: Symbol,
     pub old_value: ConfigValue,
     pub new_value: ConfigValue,
@@ -1152,6 +1162,7 @@ pub struct ConfigUpdatedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct ArtisanFeeTierUpdatedEvent {
+    pub schema_version: u32,
     pub artisan: Address,
     pub fee_bps: u32,
 }
@@ -1186,6 +1197,7 @@ pub struct ArtisanFeeTierUpdatedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct TokensStakedEvent {
+    pub schema_version: u32,
     pub artisan: Address,
     pub token: Address,
     pub amount: i128,
@@ -1220,6 +1232,7 @@ pub struct TokensStakedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct TokensUnstakedEvent {
+    pub schema_version: u32,
     pub artisan: Address,
     pub token: Address,
     pub amount: i128,
@@ -1257,6 +1270,7 @@ pub struct TokensUnstakedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct MetadataVerifiedEvent {
+    pub schema_version: u32,
     pub order_id: u64,
     pub verifier: Address,
     pub timestamp: u64,
@@ -1266,6 +1280,7 @@ pub struct MetadataVerifiedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct PlatformPausedEvent {
+    pub schema_version: u32,
     pub initiator: Address,
     pub timestamp: u64,
 }
@@ -1274,6 +1289,7 @@ pub struct PlatformPausedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct PlatformUnpausedEvent {
+    pub schema_version: u32,
     pub initiator: Address,
     pub timestamp: u64,
 }
@@ -1333,6 +1349,7 @@ pub struct WasmUpgradeProposal {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct UpgradeProposalEvent {
+    pub schema_version: u32,
     pub action: Symbol,
     pub wasm_hash: BytesN<32>,
     pub admin: Address,
@@ -2178,6 +2195,7 @@ impl CraftNexusContract {
                 Symbol::new(env, field_name),
             ),
             ConfigUpdatedEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 field_name: Symbol::new(env, field_name),
                 old_value,
                 new_value,
@@ -2188,7 +2206,11 @@ impl CraftNexusContract {
     fn emit_artisan_fee_tier_updated(env: &Env, artisan: Address, fee_bps: u32) {
         env.events().publish(
             (Symbol::new(env, "admin_fee_tier_updated"), artisan.clone()),
-            ArtisanFeeTierUpdatedEvent { artisan, fee_bps },
+            ArtisanFeeTierUpdatedEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
+                artisan,
+                fee_bps,
+            },
         );
     }
 
@@ -2199,6 +2221,7 @@ impl CraftNexusContract {
                 (order_id as u64),
             ),
             MetadataVerifiedEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 order_id: order_id as u64,
                 verifier,
                 timestamp: env.ledger().timestamp(),
@@ -2210,6 +2233,7 @@ impl CraftNexusContract {
         env.events().publish(
             (Symbol::new(env, "admin_platform_paused"), initiator.clone()),
             PlatformPausedEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 initiator,
                 timestamp: env.ledger().timestamp(),
             },
@@ -2223,6 +2247,7 @@ impl CraftNexusContract {
                 initiator.clone(),
             ),
             PlatformUnpausedEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 initiator,
                 timestamp: env.ledger().timestamp(),
             },
@@ -4307,7 +4332,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 action: EscrowAction::Created,
                 buyer: buyer.clone(),
@@ -4440,7 +4465,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 action: EscrowAction::Created,
                 buyer: buyer.clone(),
@@ -4485,7 +4510,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 action: EscrowAction::Created, // Re-emit as created/funded
                 buyer: escrow.buyer.clone(),
@@ -5881,7 +5906,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 action: EscrowAction::Released,
                 buyer: escrow.buyer.clone(),
@@ -5897,6 +5922,7 @@ impl CraftNexusContract {
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 address: escrow.seller.clone(),
                 successful_delta: 1,
                 disputed_delta: 0,
@@ -5909,6 +5935,7 @@ impl CraftNexusContract {
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 address: escrow.buyer.clone(),
                 successful_delta: 1,
                 disputed_delta: 0,
@@ -5996,7 +6023,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 action: EscrowAction::Released,
                 buyer: escrow.buyer.clone(),
@@ -6012,6 +6039,7 @@ impl CraftNexusContract {
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 address: escrow.seller.clone(),
                 successful_delta: 1,
                 disputed_delta: 0,
@@ -6024,6 +6052,7 @@ impl CraftNexusContract {
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 address: escrow.buyer.clone(),
                 successful_delta: 1,
                 disputed_delta: 0,
@@ -6070,7 +6099,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 action: EscrowAction::Extended,
                 buyer: escrow.buyer.clone(),
@@ -6107,6 +6136,7 @@ impl CraftNexusContract {
         env.events().publish(
             (Symbol::new(env, "wasm_upgrade"), action.clone()),
             UpgradeProposalEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 action,
                 wasm_hash,
                 admin,
@@ -6777,7 +6807,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id,
                 action: EscrowAction::Refunded,
                 buyer: escrow.buyer.clone(),
@@ -6793,6 +6823,7 @@ impl CraftNexusContract {
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 address: escrow.buyer.clone(),
                 successful_delta: 1,
                 disputed_delta: 0,
@@ -6805,6 +6836,7 @@ impl CraftNexusContract {
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 address: escrow.seller.clone(),
                 successful_delta: 0,
                 disputed_delta: 1,
@@ -7151,7 +7183,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 action: EscrowAction::Disputed,
                 buyer: escrow.buyer.clone(),
@@ -7302,7 +7334,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 action: EscrowAction::Resolved,
                 buyer: escrow.buyer.clone(),
@@ -7315,7 +7347,7 @@ impl CraftNexusContract {
         Self::emit_escrow_resolved_event(
             &env,
             EscrowResolvedEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 buyer: escrow.buyer.clone(),
                 seller: escrow.seller.clone(),
@@ -7333,6 +7365,7 @@ impl CraftNexusContract {
                 Self::emit_reputation_update(
                     &env,
                     ReputationUpdateEvent {
+                        schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                         address: escrow.seller.clone(),
                         successful_delta: 1,
                         disputed_delta: 0,
@@ -7345,6 +7378,7 @@ impl CraftNexusContract {
                 Self::emit_reputation_update(
                     &env,
                     ReputationUpdateEvent {
+                        schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                         address: escrow.buyer.clone(),
                         successful_delta: 0,
                         disputed_delta: 1,
@@ -7359,6 +7393,7 @@ impl CraftNexusContract {
                 Self::emit_reputation_update(
                     &env,
                     ReputationUpdateEvent {
+                        schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                         address: escrow.buyer.clone(),
                         successful_delta: 1,
                         disputed_delta: 0,
@@ -7371,6 +7406,7 @@ impl CraftNexusContract {
                 Self::emit_reputation_update(
                     &env,
                     ReputationUpdateEvent {
+                        schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                         address: escrow.seller.clone(),
                         successful_delta: 0,
                         disputed_delta: 1,
@@ -7716,7 +7752,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 action: EscrowAction::Resolved,
                 buyer: escrow.buyer.clone(),
@@ -7729,7 +7765,7 @@ impl CraftNexusContract {
         Self::emit_escrow_resolved_event(
             &env,
             EscrowResolvedEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 buyer: escrow.buyer.clone(),
                 seller: escrow.seller.clone(),
@@ -7744,6 +7780,7 @@ impl CraftNexusContract {
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 address: escrow.seller.clone(),
                 successful_delta: 1,
                 disputed_delta: 0,
@@ -7756,6 +7793,7 @@ impl CraftNexusContract {
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 address: escrow.buyer.clone(),
                 successful_delta: 1,
                 disputed_delta: 0,
@@ -8175,7 +8213,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: params.order_id as u64,
                 action: EscrowAction::Created,
                 buyer: params.buyer.clone(),
@@ -8372,7 +8410,7 @@ impl CraftNexusContract {
                             Self::emit_escrow_created(
                                 &env,
                                 EscrowEvent {
-                                    schema_version: 1,
+                                    schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                                     escrow_id: id,
                                     action: EscrowAction::BatchCreated,
                                     buyer: escrow.buyer,
@@ -8726,7 +8764,7 @@ impl CraftNexusContract {
                     Self::emit_escrow_created(
                         &env,
                         EscrowEvent {
-                            schema_version: 1,
+                            schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                             escrow_id: order_id as u64,
                             action: EscrowAction::BatchReleased,
                             buyer: escrow.buyer.clone(),
@@ -8926,7 +8964,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 action: EscrowAction::Resolved,
                 buyer: escrow.buyer.clone(),
@@ -9057,6 +9095,16 @@ impl CraftNexusContract {
             &artisan,
             Symbol::new(&env, "stake_deposit"),
             -amount,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "tokens_staked"), artisan.clone()),
+            TokensStakedEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
+                artisan,
+                token,
+                amount,
+            },
         );
     }
 
@@ -9312,6 +9360,7 @@ impl CraftNexusContract {
         env.events().publish(
             (Symbol::new(&env, "tokens_unstaked"), artisan.clone()),
             TokensUnstakedEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 artisan,
                 token,
                 amount: matured_amount,
@@ -9659,7 +9708,7 @@ impl CraftNexusContract {
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
-                schema_version: 1,
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 escrow_id: order_id as u64,
                 action: EscrowAction::Resolved,
                 buyer: escrow.buyer.clone(),
@@ -9811,6 +9860,7 @@ impl CraftNexusContract {
         env.events().publish(
             (Symbol::new(&env, "recurring_escrow"), id),
             RecurringEscrowEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 id,
                 action: RecurringEscrowAction::Created,
                 buyer,
@@ -9907,6 +9957,7 @@ impl CraftNexusContract {
         env.events().publish(
             (Symbol::new(&env, "recurring_escrow"), id),
             RecurringEscrowEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 id,
                 action: RecurringEscrowAction::CycleReleased,
                 buyer: escrow.buyer.clone(),
@@ -9921,6 +9972,7 @@ impl CraftNexusContract {
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 address: escrow.artisan.clone(),
                 successful_delta: if !escrow.is_active { 1 } else { 0 },
                 disputed_delta: 0,
@@ -9934,6 +9986,7 @@ impl CraftNexusContract {
             Self::emit_reputation_update(
                 &env,
                 ReputationUpdateEvent {
+                    schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                     address: escrow.buyer.clone(),
                     successful_delta: 1,
                     disputed_delta: 0,
@@ -9996,6 +10049,7 @@ impl CraftNexusContract {
         env.events().publish(
             (Symbol::new(&env, "recurring_escrow"), id),
             RecurringEscrowEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 id,
                 action: RecurringEscrowAction::Cancelled,
                 buyer: escrow.buyer.clone(),

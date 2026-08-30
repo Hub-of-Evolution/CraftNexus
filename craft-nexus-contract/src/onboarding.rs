@@ -488,11 +488,13 @@ pub struct UserMetrics {
 /// Event emitted when a new user successfully onboards via [`OnboardingContract::onboard_user`].
 ///
 /// Topic: `("UserOnboarded",)` — emitted to the contract's event stream.
-/// Data shape: `UserOnboardedEvent { user, username, role }`.
+/// Data shape: `UserOnboardedEvent { schema_version, user, username, role }`.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct UserOnboardedEvent {
+    /// Lifecycle event schema version. Consumers must branch on this before decoding.
+    pub schema_version: u32,
     /// The newly onboarded user's address
     pub user: Address,
     /// Normalized username assigned to the user
@@ -3004,6 +3006,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(&env, "UserOnboarded"),),
             UserOnboardedEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
                 username: normalized,
                 role,

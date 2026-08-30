@@ -1,6 +1,8 @@
 {
   "struct": "PlatformUnpausedEvent",
+  "schema_version": 1,
   "fields": [
+    {"name": "schema_version", "type": "u32"},
     {"name": "initiator", "type": "Address"},
     {"name": "timestamp", "type": "u64"}
   ]
