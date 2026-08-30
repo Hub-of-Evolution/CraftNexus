@@ -1054,17 +1054,19 @@ pub enum Error {
     /// An operation binding has already been consumed.
     AttestationReplay = 28,
     /// Volume accumulator overflowed
-    VolumeOverflow = 32,
+    VolumeOverflow = 33,
     /// Attempt rate policy contains an unusable limit configuration (#1084)
-    InvalidRateLimitPolicy = 33,
+    InvalidRateLimitPolicy = 34,
     /// Review decision does not match the current profile revision (#1086)
-    ReviewRevisionMismatch = 34,
+    ReviewRevisionMismatch = 35,
     /// Review window expired before a decision was submitted (#1086)
-    ReviewExpired = 35,
+    ReviewExpired = 36,
     /// Requested review transition is not valid from the current state (#1086)
-    InvalidReviewTransition = 36,
+    InvalidReviewTransition = 37,
     /// Caller is not an authorized Sybil reviewer (#1086)
-    UnauthorizedReviewer = 37,
+    UnauthorizedReviewer = 38,
+    /// Profile schema version is not supported by this contract (#1056)
+    UnsupportedProfileVersion = 32,
 }
 
 /// Cross-contract interface the onboarding contract uses to query the escrow
@@ -2424,6 +2426,10 @@ impl OnboardingContract {
 
         let mut profile =
             StoredUserProfile::try_from_val(env, &stored).expect("User profile storage corrupted");
+
+        // Validate profile version is supported (#1056)
+        Self::assert_profile_version_supported(env, profile.version);
+
         let mut changed = false;
         if profile.version < CURRENT_USER_PROFILE_VERSION {
             profile.version = CURRENT_USER_PROFILE_VERSION;
@@ -2449,6 +2455,24 @@ impl OnboardingContract {
     fn get_user_profile(env: &Env, user: Address) -> UserProfile {
         Self::try_get_user_profile(env, user)
             .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound))
+    }
+
+    /// Validate that a profile schema version is supported by this contract.
+    ///
+    /// Rejects versions > CURRENT_USER_PROFILE_VERSION (unsupported future versions,
+    /// likely indicating corrupted data or a version mismatch). This prevents
+    /// silently misinterpreting unknown-version profiles using the latest
+    /// interpretation logic, which is the core bug Issue #1056 aims to fix.
+    ///
+    /// # Arguments
+    /// - `version`: The profile schema version to validate
+    ///
+    /// # Panics
+    /// With `Error::UnsupportedProfileVersion` if version > CURRENT_USER_PROFILE_VERSION
+    fn assert_profile_version_supported(env: &Env, version: u32) {
+        if version > CURRENT_USER_PROFILE_VERSION {
+            env.panic_with_error(Error::UnsupportedProfileVersion);
+        }
     }
 
     fn bump_state_version(env: &Env, user: &Address) -> u32 {
