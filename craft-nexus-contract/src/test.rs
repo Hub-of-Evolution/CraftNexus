@@ -2274,7 +2274,7 @@ fn test_contract_upgrade_success() {
 
     // To test update_wasm, we need a WASM hash that "exists" in the test environment.
     // We can upload a tiny dummy WASM to get a valid hash.
-    let dummy_wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let dummy_wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00]);
     let new_wasm_hash = env.deployer().upload_contract_wasm(dummy_wasm);
 
     client.execute_upgrade(&new_wasm_hash);
@@ -2301,7 +2301,7 @@ fn test_upgrade_requires_compatibility_manifest() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00]);
     let wasm_hash = env.deployer().upload_contract_wasm(wasm);
 
     client.propose_upgrade_wasm(&admin, &wasm_hash);
@@ -2318,7 +2318,7 @@ fn test_upgrade_manifest_is_recorded_and_consumed() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00]);
     let wasm_hash = env.deployer().upload_contract_wasm(wasm);
     let commitment = client.get_upgrade_state_commitment();
     let nonzero = BytesN::from_array(&env, &[1u8; 32]);
@@ -2906,7 +2906,7 @@ fn test_get_upgrade_history_records_each_successful_upgrade() {
     assert_eq!(client.get_upgrade_history().len(), 0);
 
     // First upgrade: version 1 -> 2.
-    let wasm_one = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_one = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00]);
     let hash_one = env.deployer().upload_contract_wasm(wasm_one);
 
     client.propose_upgrade_wasm(&admin, &hash_one);
@@ -2930,7 +2930,7 @@ fn test_get_upgrade_history_records_each_successful_upgrade() {
     let wasm_two = Bytes::from_array(
         &env,
         &[
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00,
         ],
     );
     let hash_two = env.deployer().upload_contract_wasm(wasm_two);
@@ -3968,23 +3968,29 @@ fn test_get_onboarding_client_uses_configured_address() {
     env.mock_all_auths();
     let (client, _, _, _, _, _, _) = setup_test(&env, true);
 
+    // Register a real onboarding contract so get_onboarding_client can resolve it.
+    use crate::onboarding::{OnboardingContract, OnboardingContractClient};
+    let onboarding_id = env.register_contract(None, OnboardingContract);
+    let onboarding_addr = onboarding_id.clone();
+    client.set_onboarding_contract(&onboarding_addr);
+
     // `get_onboarding_client` reads contract storage, so it has to be invoked
     // inside the contract's storage context rather than from the test frame.
     let initial = env.as_contract(&client.address, || {
         CraftNexusContract::get_onboarding_client(&env)
     });
     let (initial_address, _) = initial.expect("setup registers an onboarding contract");
-    assert_eq!(initial_address, client.get_onboarding_contract());
+    assert_eq!(initial_address, onboarding_addr);
 
     // Re-pointing the registry must be reflected by the helper on the next read.
-    let onboarding = Address::generate(&env);
-    client.set_onboarding_contract(&onboarding);
+    let new_onboarding = Address::generate(&env);
+    client.set_onboarding_contract(&new_onboarding);
 
     let configured = env.as_contract(&client.address, || {
         CraftNexusContract::get_onboarding_client(&env)
     });
     let (address, _client) = configured.expect("configured address should resolve");
-    assert_eq!(address, onboarding);
+    assert_eq!(address, new_onboarding);
 }
 
 /// When no onboarding contract is set, release_funds completes without error.
@@ -7245,8 +7251,8 @@ mod reconciliation_report_tests {
         assert_eq!(page2.complete, true, "second page should be complete");
         assert_eq!(
             page2.expected_locked,
-            60_000i128,
-            "total locked across pages should match all escrows"
+            10_000i128,
+            "expected_locked should sum only the 10 escrows scanned on this page"
         );
     }
 

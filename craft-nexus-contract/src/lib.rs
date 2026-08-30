@@ -8041,6 +8041,17 @@ impl CraftNexusContract {
             env.panic_with_error(crate::Error::Unauthorized);
         }
 
+        // Block blacklisted arbitrators/moderators (#725).
+        if authorized_address != config.admin
+            && env
+                .storage()
+                .persistent()
+                .get::<_, bool>(&DataKey::ArbitratorBlacklist(authorized_address.clone()))
+                .unwrap_or(false)
+        {
+            env.panic_with_error(crate::Error::ArbitratorBlacklisted);
+        }
+
         let escrow = Self::get_stored_escrow(&env, order_id);
         let operation_id = Self::onboarding_operation_id(&env, b"resolve_dispute_partial:", order_id);
         Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);

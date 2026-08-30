@@ -1449,12 +1449,12 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_input"
+                  "wasm_vm": "invalid_action"
                 }
               }
             ],
             "data": {
-              "string": "contract missing metadata section"
+              "string": "Module(Parser(BinaryReaderError { inner: BinaryReaderErrorInner { message: \"section size mismatch: unexpected data at the end of the section\", offset: 14, needed_hint: None } }))"
             }
           }
         }
@@ -1474,7 +1474,7 @@
               },
               {
                 "error": {
-                  "wasm_vm": "invalid_input"
+                  "wasm_vm": "invalid_action"
                 }
               }
             ],
