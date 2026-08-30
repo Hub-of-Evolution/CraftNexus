@@ -1832,9 +1832,25 @@ pub struct OnboardingAttestation {
     pub status: ProfileStatus,
     pub state_revision: u64,
     pub ledger_sequence: u32,
+    /// Ledger at which this attestation expires; valid only for ledgers
+    /// strictly before `expiry_ledger`.
+    pub expiry_ledger: u32,
     pub operation_id: Bytes,
+    /// Monotonic nonce binding this attestation to a single operation.
+    pub operation_nonce: u64,
     pub contract_instance: Address,
     pub state_digest: BytesN<32>,
+}
+
+impl OnboardingAttestation {
+    /// Returns `true` when this attestation is valid at `ledger_sequence`
+    /// for `contract_instance`.
+    pub fn is_valid_at(&self, ledger_sequence: u32, contract_instance: &Address) -> bool {
+        self.ledger_sequence <= ledger_sequence
+            && ledger_sequence < self.expiry_ledger
+            && &self.contract_instance == contract_instance
+            && self.operation_nonce != 0
+    }
 }
 
 #[contracttype]
