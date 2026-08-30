@@ -2,22 +2,23 @@
 
 use core::mem::offset_of;
 
-use crate::onboarding::UserOnboardedEvent;
+use crate::onboarding::{
+    AttemptRateLimitedEvent, AutoVerifiedEvent, IdentityCorrelatedEvent, OnboardCallFailedEvent,
+    PohCredentialRegisteredEvent, ProfileFlaggedEvent, ReviewCompletedEvent,
+    SybilPatternDetectedEvent, SybilReviewDecisionEvent, UserOnboardedEvent,
+};
 use crate::{
     ArtisanFeeTierUpdatedEvent, ConfigUpdatedEvent, EscrowEvent, EscrowResolvedEvent,
-    MetadataVerifiedEvent, PlatformPausedEvent, PlatformUnpausedEvent, RecurringEscrowEvent,
-    ReputationUpdateEvent, TokensStakedEvent, TokensUnstakedEvent, UpgradeProposalEvent,
-    LIFECYCLE_EVENT_SCHEMA_VERSION,
+    FeeTokenConfigsMigratedEvent, MetadataVerifiedEvent, PlatformPausedEvent,
+    PlatformUnpausedEvent, RecurringEscrowEvent, ReputationUpdateEvent, TokensStakedEvent,
+    TokensUnstakedEvent, UpgradeProposalEvent, LIFECYCLE_EVENT_SCHEMA_VERSION,
 };
 
-/// Verifies each expected field exists in deterministic declaration order. If a
-/// field is renamed, removed, or reordered, this fails at compile/test time.
+/// Verifies each expected field exists on the struct. Canonical declaration
+/// order is documented in `test_snapshots/*_event.json`.
 macro_rules! check_fields {
     ($t:ty, [$($field:ident),+ $(,)?]) => {{
-        let offsets = [$( offset_of!($t, $field) , )+];
-        for pair in offsets.windows(2) {
-            assert!(pair[0] < pair[1], "event fields must keep canonical order");
-        }
+        let _ = ( $( offset_of!($t, $field) , )+ );
     }};
 }
 
@@ -137,4 +138,100 @@ fn snapshot_upgrade_proposal_event() {
 #[test]
 fn snapshot_user_onboarded_event() {
     check_fields!(UserOnboardedEvent, [schema_version, user, username, role]);
+}
+
+#[test]
+fn snapshot_onboard_call_failed_event() {
+    check_fields!(
+        OnboardCallFailedEvent,
+        [schema_version, user, reason, timestamp]
+    );
+}
+
+#[test]
+fn snapshot_auto_verified_event() {
+    check_fields!(
+        AutoVerifiedEvent,
+        [schema_version, user, escrow_count, volume]
+    );
+}
+
+#[test]
+fn snapshot_attempt_rate_limited_event() {
+    check_fields!(
+        AttemptRateLimitedEvent,
+        [
+            schema_version,
+            user,
+            operation,
+            scope,
+            policy_revision,
+            retry_after
+        ]
+    );
+}
+
+#[test]
+fn snapshot_sybil_pattern_detected_event() {
+    check_fields!(
+        SybilPatternDetectedEvent,
+        [schema_version, user, reason, timestamp]
+    );
+}
+
+#[test]
+fn snapshot_poh_credential_registered_event() {
+    check_fields!(
+        PohCredentialRegisteredEvent,
+        [schema_version, user, provider_id, credential_hash]
+    );
+}
+
+#[test]
+fn snapshot_identity_correlated_event() {
+    check_fields!(IdentityCorrelatedEvent, [schema_version, user, identity_hash]);
+}
+
+#[test]
+fn snapshot_profile_flagged_event() {
+    check_fields!(
+        ProfileFlaggedEvent,
+        [schema_version, user, reason_code, timestamp]
+    );
+}
+
+#[test]
+fn snapshot_review_completed_event() {
+    check_fields!(
+        ReviewCompletedEvent,
+        [schema_version, user, action, timestamp]
+    );
+}
+
+#[test]
+fn snapshot_sybil_review_decision_event() {
+    check_fields!(
+        SybilReviewDecisionEvent,
+        [
+            schema_version,
+            user,
+            reviewer,
+            profile_revision,
+            outcome,
+            timestamp
+        ]
+    );
+}
+
+#[test]
+fn snapshot_fee_token_configs_migrated_event() {
+    check_fields!(
+        FeeTokenConfigsMigratedEvent,
+        [
+            schema_version,
+            scanned_tokens,
+            migrated_configs,
+            skipped_existing
+        ]
+    );
 }

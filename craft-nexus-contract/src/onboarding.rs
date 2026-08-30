@@ -203,6 +203,14 @@ pub enum DataKey {
     /// Active contract counter per user (Issue #39)
     /// Tracks the number of active escrows/agreements for an address.
     ActiveContractCount(Address),
+    /// Total active user profiles.
+    ActiveUserCount,
+    /// Total successful onboarding operations.
+    GlobalOnboardCount,
+    /// Total username changes.
+    GlobalUsernameChangeCount,
+    /// Total admin profile-management actions.
+    GlobalAdminActionCount,
     /// Pending manual verification request marker keyed by user (#138).
     /// Stored in **temporary** storage (#702): cleared on approve/reject/clear and
     /// must not receive `extend_ttl` (default temporary expiry is sufficient).
@@ -518,6 +526,7 @@ pub struct UserOnboardedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct OnboardCallFailedEvent {
+    pub schema_version: u32,
     /// The address that attempted to onboard
     pub user: Address,
     /// The error discriminant that caused the failure (see [`Error`])
@@ -529,6 +538,7 @@ pub struct OnboardCallFailedEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AutoVerifiedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub escrow_count: u32,
     pub volume: u64,
@@ -811,6 +821,7 @@ pub struct AttemptRatePolicy {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct AttemptRateLimitedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub operation: Symbol,
     pub scope: Symbol,
@@ -822,6 +833,7 @@ pub struct AttemptRateLimitedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct SybilPatternDetectedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub reason: Symbol,
     pub timestamp: u64,
@@ -831,6 +843,7 @@ pub struct SybilPatternDetectedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct PohCredentialRegisteredEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub provider_id: Symbol,
     pub credential_hash: Bytes,
@@ -840,6 +853,7 @@ pub struct PohCredentialRegisteredEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct IdentityCorrelatedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub identity_hash: Bytes,
 }
@@ -848,6 +862,7 @@ pub struct IdentityCorrelatedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct ProfileFlaggedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub reason_code: u32,
     pub timestamp: u64,
@@ -857,6 +872,7 @@ pub struct ProfileFlaggedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct ReviewCompletedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub action: Symbol,
     pub timestamp: u64,
@@ -866,6 +882,7 @@ pub struct ReviewCompletedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct SybilReviewDecisionEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub reviewer: Address,
     pub profile_revision: u32,
@@ -1037,17 +1054,17 @@ pub enum Error {
     /// An operation binding has already been consumed.
     AttestationReplay = 28,
     /// Volume accumulator overflowed
-    VolumeOverflow = 26,
+    VolumeOverflow = 32,
     /// Attempt rate policy contains an unusable limit configuration (#1084)
-    InvalidRateLimitPolicy = 27,
+    InvalidRateLimitPolicy = 33,
     /// Review decision does not match the current profile revision (#1086)
-    ReviewRevisionMismatch = 28,
+    ReviewRevisionMismatch = 34,
     /// Review window expired before a decision was submitted (#1086)
-    ReviewExpired = 29,
+    ReviewExpired = 35,
     /// Requested review transition is not valid from the current state (#1086)
-    InvalidReviewTransition = 30,
+    InvalidReviewTransition = 36,
     /// Caller is not an authorized Sybil reviewer (#1086)
-    UnauthorizedReviewer = 31,
+    UnauthorizedReviewer = 37,
 }
 
 /// Cross-contract interface the onboarding contract uses to query the escrow
@@ -1594,6 +1611,7 @@ impl OnboardingContract {
             env.events().publish(
                 (Symbol::new(env, "AttemptRateLimited"), operation.clone()),
                 AttemptRateLimitedEvent {
+                    schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                     user: user.clone(),
                     operation,
                     scope,
@@ -2187,7 +2205,7 @@ impl OnboardingContract {
     }
 
     fn stored_to_public(env: &Env, stored: StoredUserProfile, portfolio_cid: Option<Bytes>) -> UserProfile {
-        let state_version = Self::read_persistent(env, &DataKey::UserStateVersion(stored.address.clone()))
+        let state_version = Self::read_persistent(env, &DataKey::UserStateRevision(stored.address.clone()))
             .unwrap_or(1);
         UserProfile {
             version: stored.version,
@@ -2249,14 +2267,14 @@ impl OnboardingContract {
     fn ensure_state_revision(env: &Env, user: &Address) {
         let key = DataKey::UserStateRevision(user.clone());
         if !env.storage().persistent().has(&key) {
-            env.storage().persistent().set(&key, &1u64);
+            env.storage().persistent().set(&key, &1u32);
             Self::extend_persistent(env, &key);
         }
     }
 
     fn bump_state_revision(env: &Env, user: &Address) {
         let key = DataKey::UserStateRevision(user.clone());
-        let revision = env.storage().persistent().get::<_, u64>(&key).unwrap_or(0);
+        let revision = env.storage().persistent().get::<_, u32>(&key).unwrap_or(0);
         let next = revision
             .checked_add(1)
             .unwrap_or_else(|| env.panic_with_error(Error::StateRevisionExhausted));
@@ -2266,9 +2284,9 @@ impl OnboardingContract {
 
     fn state_revision(env: &Env, user: &Address) -> u64 {
         let key = DataKey::UserStateRevision(user.clone());
-        let revision = env.storage().persistent().get(&key).unwrap_or(1u64);
+        let revision = env.storage().persistent().get::<_, u32>(&key).unwrap_or(1u32);
         Self::extend_persistent_if_present(env, &key);
-        revision
+        revision as u64
     }
 
     fn attestation_digest(
@@ -2304,7 +2322,7 @@ impl OnboardingContract {
         payload.extend_from_slice(&(contract_len as u32).to_be_bytes());
         contract_string.copy_into_slice(&mut contract_bytes[..contract_len]);
         payload.extend_from_slice(&contract_bytes[..contract_len]);
-        env.crypto().sha256(&payload)
+        env.crypto().sha256(&payload).into()
     }
 
     /// Ensure the reverse username index points at the canonical account.
@@ -2325,7 +2343,7 @@ impl OnboardingContract {
     /// Repair secondary state for an existing account-keyed canonical profile.
     fn repair_onboarding_state(env: &Env, normalized: &String, user: &Address) {
         Self::ensure_username_claim(env, normalized, user);
-        let version_key = DataKey::UserStateVersion(user.clone());
+        let version_key = DataKey::UserStateRevision(user.clone());
         if !env.storage().persistent().has(&version_key) {
             env.storage().persistent().set(&version_key, &1u32);
         }
@@ -2353,8 +2371,8 @@ impl OnboardingContract {
             status: profile.status,
         };
         Self::persist_stored_user_profile(env, user, &stored);
-        env.storage().persistent().set(&DataKey::UserStateVersion(user.clone()), &1u32);
-        Self::extend_persistent(env, &DataKey::UserStateVersion(user.clone()));
+        env.storage().persistent().set(&DataKey::UserStateRevision(user.clone()), &1u32);
+        Self::extend_persistent(env, &DataKey::UserStateRevision(user.clone()));
         (stored, true)
     }
 
@@ -2434,7 +2452,7 @@ impl OnboardingContract {
     }
 
     fn bump_state_version(env: &Env, user: &Address) -> u32 {
-        let key = DataKey::UserStateVersion(user.clone());
+        let key = DataKey::UserStateRevision(user.clone());
         let current: u32 = Self::read_persistent(env, &key).unwrap_or(1u32);
         let next: u32 = current.saturating_add(1);
         env.storage().persistent().set(&key, &next);
@@ -2821,6 +2839,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(env, "OnboardCallFailed"),),
             OnboardCallFailedEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
                 reason: reason as u32,
                 timestamp: env.ledger().timestamp(),
@@ -2927,6 +2946,7 @@ impl OnboardingContract {
                     env.events().publish(
                         (Symbol::new(&env, "SybilPatternDetected"),),
                         SybilPatternDetectedEvent {
+                            schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                             user: user.clone(),
                             reason: Symbol::new(&env, "DuplicateCorrelation"),
                             timestamp: now,
@@ -2935,6 +2955,7 @@ impl OnboardingContract {
                     env.events().publish(
                         (Symbol::new(&env, "IdentityCorrelated"),),
                         IdentityCorrelatedEvent {
+                            schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                             user: user.clone(),
                             identity_hash: identity_hash.clone(),
                         },
@@ -2951,6 +2972,7 @@ impl OnboardingContract {
                 env.events().publish(
                     (Symbol::new(&env, "IdentityCorrelated"),),
                     IdentityCorrelatedEvent {
+                        schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                         user: user.clone(),
                         identity_hash: identity_hash.clone(),
                     },
@@ -4249,6 +4271,7 @@ impl OnboardingContract {
             env.events().publish(
                 (Symbol::new(env, "AutoVerifiedEvent"), address.clone()),
                 AutoVerifiedEvent {
+                    schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                     user: address.clone(),
                     escrow_count: metrics.total_escrow_count,
                     volume: metrics.total_volume as u64,
@@ -5651,6 +5674,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(&env, "PohCredentialRegistered"),),
             PohCredentialRegisteredEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
                 provider_id,
                 credential_hash,
@@ -5744,6 +5768,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(env, "SybilReviewDecision"),),
             SybilReviewDecisionEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
                 reviewer: reviewer.clone(),
                 profile_revision: expected_profile_revision,
@@ -5754,6 +5779,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(env, "ReviewCompleted"),),
             ReviewCompletedEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
                 action: Symbol::new(env, action),
                 timestamp: now,
@@ -5830,6 +5856,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(&env, "ProfileFlagged"),),
             ProfileFlaggedEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: target_user.clone(),
                 reason_code,
                 timestamp: now,
@@ -5838,6 +5865,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(&env, "SybilPatternDetected"),),
             SybilPatternDetectedEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: target_user,
                 reason: Symbol::new(&env, "FlaggedByAdmin"),
                 timestamp: now,

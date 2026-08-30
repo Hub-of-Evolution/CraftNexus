@@ -259,7 +259,7 @@ fn test_idempotent_retry_repairs_missing_secondary_state() {
             .remove(&DataKey::Username(normalized.clone()));
         env.storage()
             .persistent()
-            .remove(&DataKey::UserStateVersion(user.clone()));
+            .remove(&DataKey::UserStateRevision(user.clone()));
     });
 
     let recovered = client.onboard_user(&user, &username, &UserRole::Buyer);

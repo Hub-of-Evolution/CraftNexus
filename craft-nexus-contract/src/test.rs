@@ -4412,6 +4412,7 @@ fn test_migrate_fee_token_configs_migrates_twenty_tokens_and_emits_summary() {
     assert_eq!(
         summary,
         FeeTokenConfigsMigratedEvent {
+            schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
             scanned_tokens: 20,
             migrated_configs: 20,
             skipped_existing: 0,
@@ -4514,6 +4515,7 @@ fn test_migrate_fee_token_configs_is_idempotent_and_preserves_existing_configs()
     assert_eq!(
         latest_summary,
         FeeTokenConfigsMigratedEvent {
+            schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
             scanned_tokens: 20,
             migrated_configs: 0,
             skipped_existing: 20,

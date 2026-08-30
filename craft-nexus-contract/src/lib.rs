@@ -169,7 +169,7 @@ pub enum Error {
     /// Onboarding contract address has not been configured
     OnboardingContractNotSet = 39,
     /// The configured onboarding contract rejected the participant state proof
-    OnboardingAuthorizationFailed = 56,
+    OnboardingAuthorizationFailed = 84,
     // â”€â”€ Validation (40+): fix caller input â”€â”€
     /// Provided metadata hash is invalid
     InvalidMetadataHash = 40,
@@ -1514,6 +1514,7 @@ pub struct FeeTokenInfo {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct FeeTokenConfigsMigratedEvent {
+    pub schema_version: u32,
     pub scanned_tokens: u32,
     pub migrated_configs: u32,
     pub skipped_existing: u32,
@@ -5700,6 +5701,7 @@ impl CraftNexusContract {
         env.events().publish(
             (Symbol::new(&env, "fee_cfg_migrated"),),
             FeeTokenConfigsMigratedEvent {
+                schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 scanned_tokens,
                 migrated_configs: migrated,
                 skipped_existing,
@@ -8905,6 +8907,10 @@ impl CraftNexusContract {
         let snapshot = snapshot_opt.unwrap();
 
         let config = Self::get_platform_config_internal(&env);
+        let initiated_at = snapshot
+            .dispute_initiated_at
+            .ok_or(Error::InvalidEscrowState)?;
+        let current_time = env.ledger().timestamp();
         // The deadline guard: if the dispute is still within the allowed window
         // the arbitrator must resolve it via `resolve_dispute`. Returning an
         // error (rather than panicking) allows the caller to detect this case
@@ -8914,22 +8920,8 @@ impl CraftNexusContract {
         }
 
         let operation_id = Self::onboarding_operation_id(&env, b"resolve_expired_dispute:", order_id);
-        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
-        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
-
-        // --- Effects (CEI: all writes before the token transfer) ---
-
-        // CRITICAL: Update status BEFORE external calls (CEI pattern)
-        escrow.status = EscrowStatus::Resolved;
-        env.storage().persistent().set(&(ESCROW, order_id), &escrow);
-
-        // Decrement active counts
-        Self::update_active_obligations(&env, &escrow.buyer, -1);
-        Self::update_active_obligations(&env, &escrow.seller, -1);
-
-        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
-        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
-        Self::update_total_locked(&env, &escrow.token, -escrow.amount);
+        Self::authorize_onboarding_state(&env, &snapshot.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &snapshot.seller, operation_id, UserRole::Artisan);
 
         let fee_bps = Self::get_effective_fee_bps(env.clone(), snapshot.seller.clone());
         let settlement_kind = match config.expired_dispute_fee_policy {
@@ -8960,7 +8952,6 @@ impl CraftNexusContract {
             "expired_dispute_seller",
         );
 
-        let current_time = env.ledger().timestamp();
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
@@ -9680,8 +9671,8 @@ impl CraftNexusContract {
             return Err(Error::Unauthorized);
         }
         let operation_id = Self::onboarding_operation_id(&env, b"accept_partial_refund:", order_id);
-        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
-        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+        Self::authorize_onboarding_state(&env, &snapshot.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &snapshot.seller, operation_id, UserRole::Artisan);
 
         let (_seller_gross, allocation) =
             Self::validate_partial_refund_solvency(&env, &snapshot, proposal.refund_amount)?;
@@ -9750,7 +9741,9 @@ impl CraftNexusContract {
         Self::authorize_onboarding_state(&env, &proposal.proposed_by, operation_id, expected_role);
 
         // Remove the proposal from storage
-        env.storage().persistent().remove(&proposal_key);
+        env.storage()
+            .persistent()
+            .remove(&Self::proposal_key(order_id));
 
         Ok(())
     }

@@ -28,6 +28,16 @@ Current schema version: `1`.
 | `RecurringEscrowEvent` | `schema_version`, `id`, `action`, `buyer`, `artisan`, `amount`, `timestamp` |
 | `UpgradeProposalEvent` | `schema_version`, `action`, `wasm_hash`, `admin`, `timestamp`, `upgrade_at` |
 | `UserOnboardedEvent` | `schema_version`, `user`, `username`, `role` |
+| `OnboardCallFailedEvent` | `schema_version`, `user`, `reason`, `timestamp` |
+| `AutoVerifiedEvent` | `schema_version`, `user`, `escrow_count`, `volume` |
+| `AttemptRateLimitedEvent` | `schema_version`, `user`, `operation`, `scope`, `policy_revision`, `retry_after` |
+| `SybilPatternDetectedEvent` | `schema_version`, `user`, `reason`, `timestamp` |
+| `PohCredentialRegisteredEvent` | `schema_version`, `user`, `provider_id`, `credential_hash` |
+| `IdentityCorrelatedEvent` | `schema_version`, `user`, `identity_hash` |
+| `ProfileFlaggedEvent` | `schema_version`, `user`, `reason_code`, `timestamp` |
+| `ReviewCompletedEvent` | `schema_version`, `user`, `action`, `timestamp` |
+| `SybilReviewDecisionEvent` | `schema_version`, `user`, `reviewer`, `profile_revision`, `outcome`, `timestamp` |
+| `FeeTokenConfigsMigratedEvent` | `schema_version`, `scanned_tokens`, `migrated_configs`, `skipped_existing` |
 
 ## Migration Notes
 
