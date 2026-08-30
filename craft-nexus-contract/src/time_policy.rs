@@ -82,6 +82,42 @@ pub const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 /// Default timelock delay for pending critical admin actions (24 hours).
 pub const ADMIN_ACTION_TIMELOCK_DELAY: u64 = 24 * 60 * 60;
 
+// ── Attestation expiry & ledger binding ────────────────────────────────────────
+
+/// Ledger-scoped evidence for cross-contract authorization.
+///
+/// The validity window is half-open in ledger sequence space:
+/// `issuance_ledger <= current_ledger < expiry_ledger`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationEvidence {
+    /// Ledger sequence on which the attestation was issued (inclusive).
+    pub issuance_ledger: u32,
+    /// Ledger sequence on which the attestation expires (exclusive).
+    pub expiry_ledger: u32,
+    /// Contract instance this attestation is bound to.
+    pub contract_instance: [u8; 32],
+    /// Operation nonce that prevents cross-operation replay.
+    pub operation_nonce: u64,
+}
+
+/// Validates an attestation against the current ledger and contract context.
+///
+/// Returns `true` only when the attestation was issued at or before `current_ledger`,
+/// has not yet reached `expiry_ledger`, is bound to `current_contract_instance`,
+/// and carries the expected `operation_nonce`.
+#[inline]
+pub fn is_attestation_valid(
+    current_ledger: u32,
+    current_contract_instance: &[u8; 32],
+    expected_operation_nonce: u64,
+    attestation: &AttestationEvidence,
+) -> bool {
+    current_ledger >= attestation.issuance_ledger
+        && current_ledger < attestation.expiry_ledger
+        && current_contract_instance == &attestation.contract_instance
+        && expected_operation_nonce == attestation.operation_nonce
+}
+
 // ── Boundary helpers ──────────────────────────────────────────────────────────
 
 /// Returns `true` if the window that opened at `start` with `duration` seconds
@@ -160,6 +196,41 @@ pub fn rate_limit_bucket(now: u64, window_secs: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attestation_validity_ledger_boundaries() {
+        let instance = [7u8; 32];
+        let attestation = AttestationEvidence {
+            issuance_ledger: 100,
+            expiry_ledger: 200,
+            contract_instance: instance,
+            operation_nonce: 42,
+        };
+
+        // Valid from issuance ledger (inclusive) through expiry ledger (exclusive).
+        assert!(is_attestation_valid(100, &instance, 42, &attestation));
+        assert!(is_attestation_valid(199, &instance, 42, &attestation));
+
+        // Expired at expiry ledger and invalid before issuance ledger.
+        assert!(!is_attestation_valid(99, &instance, 42, &attestation));
+        assert!(!is_attestation_valid(200, &instance, 42, &attestation));
+    }
+
+    #[test]
+    fn attestation_rejects_foreign_instance_or_nonce() {
+        let instance = [7u8; 32];
+        let foreign_instance = [8u8; 32];
+        let attestation = AttestationEvidence {
+            issuance_ledger: 100,
+            expiry_ledger: 200,
+            contract_instance: instance,
+            operation_nonce: 42,
+        };
+
+        assert!(!is_attestation_valid(150, &foreign_instance, 42, &attestation));
+        assert!(!is_attestation_valid(150, &instance, 404, &attestation));
+        assert!(is_attestation_valid(150, &instance, 42, &attestation));
+    }
 
     #[test]
     fn window_elapsed_basic() {
