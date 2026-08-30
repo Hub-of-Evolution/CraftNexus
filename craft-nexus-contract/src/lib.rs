@@ -9248,10 +9248,6 @@ impl CraftNexusContract {
 
         // --- Effects (CEI: all writes before the token transfer) ---
 
-        // CRITICAL: Update status BEFORE external calls (CEI pattern)
-        snapshot.status = EscrowStatus::Resolved;
-        env.storage().persistent().set(&(ESCROW, order_id), &snapshot);
-
         // Decrement active counts
         Self::update_active_obligations(&env, &snapshot.buyer, -1);
         Self::update_active_obligations(&env, &snapshot.seller, -1);
