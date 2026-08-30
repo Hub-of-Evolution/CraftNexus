@@ -3652,3 +3652,4 @@ fn test_normal_verified_profile_is_unaffected_by_review_state() {
         UserRole::Artisan
     );
 }
+
