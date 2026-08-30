@@ -385,3 +385,54 @@ fn full_lifecycle_deadline_progression() {
         }
     }
 }
+
+// ── Attestation ledger-binding boundary ───────────────────────────────────────
+
+#[test]
+fn attestation_ledger_boundary_exact_boundary() {
+    let env = Env::default();
+    let contract_instance = Address::generate(&env);
+    let issuance_ledger = 1000u32;
+    let expiry_ledger = 1010u32;
+
+    let attestation = crate::attestation::Attestation {
+        issuance_ledger,
+        expiry_ledger,
+        contract_instance: contract_instance.clone(),
+        operation_nonce: 1,
+    };
+
+    // Before issuance ledger → attestation is not yet valid.
+    env.ledger().with_mut(|li| li.sequence = issuance_ledger - 1);
+    assert!(!attestation.is_valid(&env, &contract_instance));
+
+    // At issuance ledger → attestation becomes valid.
+    env.ledger().with_mut(|li| li.sequence = issuance_ledger);
+    assert!(attestation.is_valid(&env, &contract_instance));
+
+    // One ledger before expiry → attestation is still valid.
+    env.ledger().with_mut(|li| li.sequence = expiry_ledger - 1);
+    assert!(attestation.is_valid(&env, &contract_instance));
+
+    // At expiry ledger → attestation is expired.
+    env.ledger().with_mut(|li| li.sequence = expiry_ledger);
+    assert!(!attestation.is_valid(&env, &contract_instance));
+}
+
+#[test]
+fn attestation_contract_instance_binding() {
+    let env = Env::default();
+    let contract_instance = Address::generate(&env);
+    let other_instance = Address::generate(&env);
+
+    let attestation = crate::attestation::Attestation {
+        issuance_ledger: 0,
+        expiry_ledger: u32::MAX,
+        contract_instance: contract_instance.clone(),
+        operation_nonce: 1,
+    };
+
+    env.ledger().with_mut(|li| li.sequence = 1);
+    assert!(attestation.is_valid(&env, &contract_instance));
+    assert!(!attestation.is_valid(&env, &other_instance));
+}
