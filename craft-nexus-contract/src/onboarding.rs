@@ -280,8 +280,18 @@ pub enum DataKey {
     PohVerifier,
     /// Monotonic canonical onboarding state revision per user.
     UserStateRevision(Address),
+    /// Monotonic canonical onboarding state version per user (u32).
+    UserStateVersion(Address),
     /// An operation binding already consumed by an escrow contract.
     UsedAttestation(Address, Bytes),
+    /// Global count of currently active (onboarded, non-deactivated) users.
+    ActiveUserCount,
+    /// Lifetime count of successful onboardings.
+    GlobalOnboardCount,
+    /// Lifetime count of username changes.
+    GlobalUsernameChangeCount,
+    /// Lifetime count of admin-initiated actions.
+    GlobalAdminActionCount,
 }
 
 /// User roles in the CraftNexus platform.
@@ -530,6 +540,42 @@ pub struct AutoVerifiedEvent {
     pub user: Address,
     pub escrow_count: u32,
     pub volume: u64,
+}
+
+/// Canonical identity state-change event (#IdentityStateChangeEvents).
+///
+/// Emitted exactly once after every **effective** identity state mutation
+/// (role change, verification transition, activation/deactivation,
+/// review/flag status change, or registration). It binds a monotonic state
+/// revision to the account's prior and new state digests plus the acting
+/// party, so downstream consumers — escrow authorization paths, indexers,
+/// and caches — can deterministically detect stale authorization data.
+///
+/// Topic tuple: `("IdentityStateChanged", Address account)` — keeps the
+/// per-user stream cheaply subscribable, mirroring existing topic conventions.
+///
+/// # No-op contract
+/// When a call would leave the identity semantically unchanged, no event and
+/// no revision bump occur (see the no-op guards in `update_user_role`,
+/// `verify_user` and the auto-verify path).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentityStateChangedEvent {
+    /// The identity whose state changed
+    pub account: Address,
+    /// Monotonic `DataKey::UserStateRevision` after the change
+    pub revision: u64,
+    /// Machine-readable kind of change (`register`, `role`, `verify`,
+    /// `deactivate`, `reactivate`, `flag`, `unflag`)
+    pub change_type: Symbol,
+    /// SHA-256 digest of identity state **before** the change
+    pub prior_digest: BytesN<32>,
+    /// SHA-256 digest of identity state **after** the change
+    pub new_digest: BytesN<32>,
+    /// Address that authorized / performed the change
+    pub actor: Address,
+    /// Ledger timestamp of the change
+    pub timestamp: u64,
 }
 
 /// A single entry in a user's verification history log (#63).
@@ -1035,11 +1081,11 @@ pub enum Error {
     /// An operation binding has already been consumed.
     AttestationReplay = 28,
     /// Volume accumulator overflowed
-    VolumeOverflow = 26,
+    VolumeOverflow = 33,
     /// Attempt rate policy contains an unusable limit configuration (#1084)
-    InvalidRateLimitPolicy = 27,
+    InvalidRateLimitPolicy = 34,
     /// Review decision does not match the current profile revision (#1086)
-    ReviewRevisionMismatch = 28,
+    ReviewRevisionMismatch = 35,
     /// Review window expired before a decision was submitted (#1086)
     ReviewExpired = 29,
     /// Requested review transition is not valid from the current state (#1086)
@@ -2271,6 +2317,85 @@ impl OnboardingContract {
         revision
     }
 
+    /// Canonical SHA-256 fingerprint of an identity's state.
+    ///
+    /// Independent of ledger-sequence / operation-specific data so the digest is
+    /// stable across reads while the stored fields and revision are constant, and
+    /// directly usable by downstream consumers for staleness detection.
+    fn identity_state_digest(
+        env: &Env,
+        account: &Address,
+        profile_version: u32,
+        role: UserRole,
+        is_verified: bool,
+        status: ProfileStatus,
+        state_revision: u64,
+    ) -> BytesN<32> {
+        let mut payload = Bytes::from_slice(env, b"CRAFTNEXUS_IDENTITY_STATE_V1");
+        let account_string = account.to_string();
+        let mut account_bytes = [0u8; 64];
+        let account_len = account_string.len() as usize;
+        payload.extend_from_slice(&(account_len as u32).to_be_bytes());
+        account_string.copy_into_slice(&mut account_bytes[..account_len]);
+        payload.extend_from_slice(&account_bytes[..account_len]);
+        payload.extend_from_slice(&profile_version.to_be_bytes());
+        payload.push_back(role as u8);
+        payload.push_back(if is_verified { 1 } else { 0 });
+        payload.push_back(status as u8);
+        payload.extend_from_slice(&state_revision.to_be_bytes());
+        env.crypto().sha256(&payload).into()
+    }
+
+    /// Digest of the currently stored identity state for `account`.
+    fn current_identity_state_digest(env: &Env, account: &Address) -> BytesN<32> {
+        let profile = Self::get_user_profile(env, account.clone());
+        let revision = Self::state_revision(env, account);
+        Self::identity_state_digest(
+            env,
+            account,
+            profile.version,
+            profile.role,
+            profile.is_verified,
+            profile.status,
+            revision,
+        )
+    }
+
+    /// Sentinel digest signalling that no prior identity state existed
+    /// (used for the `register` transition from a non-onboarded account).
+    fn none_identity_digest(env: &Env) -> BytesN<32> {
+        env.crypto().sha256(&Bytes::from_slice(env, b"CRAFTNEXUS_IDENTITY_STATE_NONE")).into()
+    }
+
+    /// Emit one `IdentityStateChanged` event for an effective identity change.
+    ///
+    /// Must be called **after** the profile has been persisted (and its state
+    /// revision bumped) so `new_digest` and `revision` reflect the on-chain
+    /// post-change state. `prior_digest` is captured by the caller before the
+    /// mutation. `actor` identifies the address that authorized the change.
+    fn emit_identity_state_changed(
+        env: &Env,
+        account: &Address,
+        actor: &Address,
+        change_type: Symbol,
+        prior_digest: BytesN<32>,
+    ) {
+        let new_digest = Self::current_identity_state_digest(env, account);
+        let revision = Self::state_revision(env, account);
+        env.events().publish(
+            (Symbol::new(env, "IdentityStateChanged"), account.clone()),
+            IdentityStateChangedEvent {
+                account: account.clone(),
+                revision,
+                change_type,
+                prior_digest,
+                new_digest,
+                actor: actor.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
     fn attestation_digest(
         env: &Env,
         account: &Address,
@@ -2304,7 +2429,7 @@ impl OnboardingContract {
         payload.extend_from_slice(&(contract_len as u32).to_be_bytes());
         contract_string.copy_into_slice(&mut contract_bytes[..contract_len]);
         payload.extend_from_slice(&contract_bytes[..contract_len]);
-        env.crypto().sha256(&payload)
+        env.crypto().sha256(&payload).into()
     }
 
     /// Ensure the reverse username index points at the canonical account.
@@ -3033,6 +3158,17 @@ impl OnboardingContract {
                 role,
             },
         );
+
+        // Canonical identity state-change event for profile creation (#IdentityStateChangeEvents).
+        // The prior digest is a "none" sentinel because no profile existed before.
+        Self::emit_identity_state_changed(
+            &env,
+            &user,
+            &user,
+            Symbol::new(&env, "register"),
+            Self::none_identity_digest(&env),
+        );
+
         Self::increment_persistent_u32(&env, &DataKey::GlobalOnboardCount);
 
         profile
@@ -3471,7 +3607,7 @@ impl OnboardingContract {
 
     /// Return the monotonically increasing state version for a user's profile.
     ///
-    /// Returns `0` if the user has no profile. Missing `UserStateVersion`
+    /// Returns `0` if the user has no profile. Missing `UserStateRevision`
     /// keys default to `1` on read.
     pub fn get_user_state_version(env: Env, user: Address) -> u32 {
         if let Some(profile) = Self::try_get_user_profile(&env, user) {
@@ -3579,6 +3715,14 @@ impl OnboardingContract {
         // [SECURITY] Prevent unnecessary state mutations and replay attacks
         // by recording state transition audit trail for forensic analysis
         let old_role = profile.role;
+
+        // No-op guard (#IdentityStateChangeEvents): assigning the current role
+        // must not bump the revision or emit an event.
+        if old_role == new_role {
+            return profile;
+        }
+
+        let prior_digest = Self::current_identity_state_digest(&env, &user);
         profile.role = new_role;
 
         // Store updated profile
@@ -3593,6 +3737,15 @@ impl OnboardingContract {
         );
 
         Self::bump_state_version(&env, &user);
+
+        // Canonical identity state-change event for the role transition.
+        Self::emit_identity_state_changed(
+            &env,
+            &user,
+            &config.platform_admin,
+            Symbol::new(&env, "role"),
+            prior_digest,
+        );
 
         profile
     }
@@ -3670,11 +3823,22 @@ impl OnboardingContract {
             .persistent()
             .remove(&DataKey::Username(normalized));
 
+        let prior_digest = Self::current_identity_state_digest(&env, &user);
+
         // Update profile state
         profile.status = ProfileStatus::Deactivated;
         Self::persist_public_user_profile(&env, &user, &profile);
         Self::bump_state_version(&env, &user);
         Self::update_active_user_count(&env, -1);
+
+        // Canonical identity state-change event for deactivation.
+        Self::emit_identity_state_changed(
+            &env,
+            &user,
+            &user,
+            Symbol::new(&env, "deactivate"),
+            prior_digest,
+        );
 
         // Issue #524 — event payload now carries the user's role at
         // deactivation time. The role was overwritten in the
@@ -3749,10 +3913,21 @@ impl OnboardingContract {
             .set(&DataKey::Username(normalized.clone()), &user);
         Self::extend_persistent(&env, &DataKey::Username(normalized));
 
+        let prior_digest = Self::current_identity_state_digest(&env, &user);
+
         profile.status = ProfileStatus::Active;
         Self::persist_public_user_profile(&env, &user, &profile);
         Self::bump_state_version(&env, &user);
         Self::update_active_user_count(&env, 1);
+
+        // Canonical identity state-change event for reactivation.
+        Self::emit_identity_state_changed(
+            &env,
+            &user,
+            &user,
+            Symbol::new(&env, "reactivate"),
+            prior_digest,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "ProfileReactivated"), user.clone()),
@@ -3811,6 +3986,14 @@ impl OnboardingContract {
         // Get existing profile
         let mut profile = Self::get_user_profile(&env, user.clone());
 
+        // No-op guard (#IdentityStateChangeEvents): verifying an already
+        // verified user must not bump the revision or emit an event.
+        if profile.is_verified {
+            return profile;
+        }
+
+        let prior_digest = Self::current_identity_state_digest(&env, &user);
+
         // Set verified
         profile.is_verified = true;
 
@@ -3821,6 +4004,15 @@ impl OnboardingContract {
         // Emit event
         env.events()
             .publish((Symbol::new(&env, "UserVerified"),), &user);
+
+        // Canonical identity state-change event for the verification transition.
+        Self::emit_identity_state_changed(
+            &env,
+            &user,
+            &config.platform_admin,
+            Symbol::new(&env, "verify"),
+            prior_digest,
+        );
 
         profile
     }
@@ -4262,6 +4454,8 @@ impl OnboardingContract {
         if metrics.total_escrow_count >= config.min_escrow_count_for_verify
             && metrics.total_volume >= config.min_volume_for_verify
         {
+            let prior_digest = Self::current_identity_state_digest(env, address);
+
             profile.is_verified = true;
             Self::persist_public_user_profile(env, address, &profile);
             Self::bump_state_version(env, address);
@@ -4274,6 +4468,15 @@ impl OnboardingContract {
                     escrow_count: metrics.total_escrow_count,
                     volume: metrics.total_volume as u64,
                 },
+            );
+
+            // Canonical identity state-change event for auto-verification.
+            Self::emit_identity_state_changed(
+                env,
+                address,
+                address,
+                Symbol::new(env, "verify"),
+                prior_digest,
             );
 
             // Append auto-verify entry to history
@@ -5742,6 +5945,8 @@ impl OnboardingContract {
             env.panic_with_error(Error::ReviewExpired);
         }
 
+        let prior_digest = Self::current_identity_state_digest(env, user);
+
         let (outcome, action) = if approve {
             profile.status = ProfileStatus::Active;
             env.storage()
@@ -5754,6 +5959,16 @@ impl OnboardingContract {
         };
         Self::persist_public_user_profile(env, user, &profile);
         Self::bump_state_version(env, user);
+
+        // Canonical identity state-change event for the review-driven status
+        // transition (`unflag` on approval, `flag` on rejection).
+        Self::emit_identity_state_changed(
+            env,
+            user,
+            reviewer,
+            Symbol::new(env, if approve { "unflag" } else { "flag" }),
+            prior_digest,
+        );
 
         case.status = outcome;
         case.decided_at = now;
@@ -5816,9 +6031,19 @@ impl OnboardingContract {
         config.platform_admin.require_auth();
 
         let mut profile = Self::get_user_profile(&env, target_user.clone());
+        let prior_digest = Self::current_identity_state_digest(&env, &target_user);
         profile.status = ProfileStatus::UnderReview;
         Self::persist_public_user_profile(&env, &target_user, &profile);
         let profile_revision = Self::bump_state_version(&env, &target_user);
+
+        // Canonical identity state-change event for flagging (status -> UnderReview).
+        Self::emit_identity_state_changed(
+            &env,
+            &target_user,
+            &config.platform_admin,
+            Symbol::new(&env, "flag"),
+            prior_digest,
+        );
 
         let now = env.ledger().timestamp();
         let flag = SuspiciousActivityFlag {

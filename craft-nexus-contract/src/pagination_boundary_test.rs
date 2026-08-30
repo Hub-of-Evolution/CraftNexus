@@ -36,7 +36,6 @@ fn setup_pagination_test(
     let seller = Address::generate(env);
     let platform_wallet = Address::generate(env);
     let arbitrator = Address::generate(env);
-    let onboarding_contract = Address::generate(env);
 
     env.ledger().with_mut(|li| {
         li.timestamp = 1711368000;
@@ -47,7 +46,7 @@ fn setup_pagination_test(
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     let token_admin = Address::generate(env);

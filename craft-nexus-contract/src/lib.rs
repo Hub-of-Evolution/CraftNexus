@@ -2465,7 +2465,7 @@ impl CraftNexusContract {
         match kind {
             EmergencyOpKind::AdminRecovery => {
                 // Recovery blocked if disputes exist, upgrades exist, or recurring escrows exist
-                if Self::get_active_dispute_count(env) > 0 {
+                if Self::get_active_dispute_count(env.clone()) > 0 {
                     return Err(Error::EmergencyConflictActive);
                 }
                 if env
@@ -2475,7 +2475,7 @@ impl CraftNexusContract {
                 {
                     return Err(Error::EmergencyConflictActive);
                 }
-                if Self::get_active_recurring_count(env) > 0 {
+                if Self::get_active_recurring_count(env.clone()) > 0 {
                     return Err(Error::EmergencyConflictActive);
                 }
             }
@@ -2648,7 +2648,7 @@ impl CraftNexusContract {
     /// Can only be called by an authorized admin (same as other emergency operations).
     /// This prevents a failed or abandoned multi-step operation from permanently blocking
     /// future emergency response (#1072).
-    pub fn abort_emergency_operation(env: Env, admin: Address) -> Result<EmergencyOperation, Error> {
+    pub fn abort_emergency_operation(env: Env, _admin: Address) -> Result<EmergencyOperation, Error> {
         let contract_admin = Self::get_admin(&env)?;
         contract_admin.require_auth();
 
@@ -7622,7 +7622,7 @@ impl CraftNexusContract {
         }
 
 
-        let mut escrow = Self::get_stored_escrow(&env, order_id);
+        let escrow = Self::get_stored_escrow(&env, order_id);
         let operation_id = Self::onboarding_operation_id(&env, b"resolve_dispute:", order_id);
         Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
         Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
@@ -8041,7 +8041,7 @@ impl CraftNexusContract {
             env.panic_with_error(crate::Error::Unauthorized);
         }
 
-        let mut escrow = Self::get_stored_escrow(&env, order_id);
+        let escrow = Self::get_stored_escrow(&env, order_id);
         let operation_id = Self::onboarding_operation_id(&env, b"resolve_dispute_partial:", order_id);
         Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
         Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
@@ -9229,34 +9229,36 @@ impl CraftNexusContract {
             return Err(Error::EscrowNotFound);
         }
         Self::extend_persistent(&env, &(ESCROW, order_id));
-        let snapshot = snapshot_opt.unwrap();
+        let mut snapshot = snapshot_opt.unwrap();
 
         let config = Self::get_platform_config_internal(&env);
+        let current_time = env.ledger().timestamp();
+        let initiated_at = snapshot.dispute_initiated_at.unwrap_or(snapshot.created_at as u64);
         // The deadline guard: if the dispute is still within the allowed window
         // the arbitrator must resolve it via `resolve_dispute`. Returning an
         // error (rather than panicking) allows the caller to detect this case
         // without rolling back unrelated ledger state.
-        if (initiated_at as u64) + config.max_dispute_duration as u64 > current_time {
+        if initiated_at + config.max_dispute_duration as u64 > current_time {
             return Err(Error::DisputeExpired);
         }
 
         let operation_id = Self::onboarding_operation_id(&env, b"resolve_expired_dispute:", order_id);
-        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
-        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+        Self::authorize_onboarding_state(&env, &snapshot.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &snapshot.seller, operation_id, UserRole::Artisan);
 
         // --- Effects (CEI: all writes before the token transfer) ---
 
         // CRITICAL: Update status BEFORE external calls (CEI pattern)
-        escrow.status = EscrowStatus::Resolved;
-        env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        snapshot.status = EscrowStatus::Resolved;
+        env.storage().persistent().set(&(ESCROW, order_id), &snapshot);
 
         // Decrement active counts
-        Self::update_active_obligations(&env, &escrow.buyer, -1);
-        Self::update_active_obligations(&env, &escrow.seller, -1);
+        Self::update_active_obligations(&env, &snapshot.buyer, -1);
+        Self::update_active_obligations(&env, &snapshot.seller, -1);
 
-        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
-        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
-        Self::update_total_locked(&env, &escrow.token, -escrow.amount);
+        Self::safe_update_active_contracts(&env, snapshot.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, snapshot.seller.clone(), -1);
+        Self::update_total_locked(&env, &snapshot.token, -snapshot.amount);
 
         let fee_bps = Self::get_effective_fee_bps(env.clone(), snapshot.seller.clone());
         let settlement_kind = match config.expired_dispute_fee_policy {
@@ -10002,8 +10004,8 @@ impl CraftNexusContract {
             return Err(Error::Unauthorized);
         }
         let operation_id = Self::onboarding_operation_id(&env, b"accept_partial_refund:", order_id);
-        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
-        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+        Self::authorize_onboarding_state(&env, &snapshot.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &snapshot.seller, operation_id, UserRole::Artisan);
 
         let (_seller_gross, allocation) =
             Self::validate_partial_refund_solvency(&env, &snapshot, proposal.refund_amount)?;
@@ -10072,7 +10074,7 @@ impl CraftNexusContract {
         Self::authorize_onboarding_state(&env, &proposal.proposed_by, operation_id, expected_role);
 
         // Remove the proposal from storage
-        env.storage().persistent().remove(&proposal_key);
+        env.storage().persistent().remove(&DataKey::PartialRefundProposal(order_id));
 
         Ok(())
     }
@@ -10882,7 +10884,7 @@ impl CraftNexusContract {
 mod deactivated_account_tests {
     use super::*;
     use soroban_sdk::{
-        testutils::{Address as AddressTestUtils, MockAuthContract},
+        testutils::Address as AddressTestUtils,
         Env,
     };
 
@@ -11059,89 +11061,3 @@ mod deactivated_account_tests {
     }
 }
 
-
-#[cfg(test)]
-mod deactivated_account_tests {
-    use super::*;
-
-    /// Test: Deactivated account cannot create escrow
-    /// 
-    /// Validates that when an onboarding contract indicates a buyer is deactivated
-    /// (is_profile_active returns false), the create_escrow_with_metadata call panics
-    /// with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore] // Requires full test harness with mock onboarding contract
-    fn test_deactivated_account_cannot_create_escrow() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivated account cannot stake tokens
-    ///
-    /// Validates that when an onboarding contract indicates an artisan is deactivated,
-    /// the stake_tokens call panics with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore]
-    fn test_deactivated_account_cannot_stake() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivated account cannot unstake tokens
-    ///
-    /// Validates that when an onboarding contract indicates an artisan is deactivated,
-    /// the unstake_tokens call panics with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore]
-    fn test_deactivated_account_cannot_unstake() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivated account cannot initiate disputes
-    ///
-    /// Validates that when an onboarding contract indicates a buyer or seller is deactivated,
-    /// the dispute_escrow call panics with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore]
-    fn test_deactivated_account_cannot_initiate_dispute() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivated account cannot create recurring escrow
-    ///
-    /// Validates that when an onboarding contract indicates a buyer is deactivated,
-    /// the create_recurring_escrow call panics with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore]
-    fn test_deactivated_account_cannot_create_recurring_escrow() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivated account cannot cancel recurring escrow
-    ///
-    /// Validates that when an onboarding contract indicates a buyer is deactivated,
-    /// the cancel_recurring_escrow call panics with Error::OnboardingProfileInactive.
-    #[test]
-    #[ignore]
-    fn test_deactivated_account_cannot_cancel_recurring_escrow() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Active account passes all checks
-    ///
-    /// Validates that when an onboarding contract indicates an account is active,
-    /// all privileged operations proceed past the assert_account_active check.
-    #[test]
-    #[ignore]
-    fn test_active_account_passes_all_checks() {
-        // Full integration test requires cross-contract mocking
-    }
-
-    /// Test: Deactivation takes effect immediately (no stale cache)
-    ///
-    /// Validates that assert_account_active reads from persistent storage,
-    /// ensuring deactivation takes effect immediately without cache TTL delays.
-    #[test]
-    #[ignore]
-    fn test_deactivation_takes_effect_immediately_no_stale_cache() {
-        // Full integration test requires cross-contract mocking
-    }
-}
