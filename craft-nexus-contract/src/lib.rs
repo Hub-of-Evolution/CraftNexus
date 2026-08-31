@@ -1867,7 +1867,15 @@ pub trait OnboardingInterface {
         contract_instance: Address,
     ) -> OnboardingAttestation;
     /// Validate and consume a single-use onboarding proof.
-    fn validate_onboarding_attestation(env: Env, attestation: OnboardingAttestation) -> bool;
+    fn validate_onboarding_attestation(
+        env: Env,
+        attestation: OnboardingAttestation,
+        expected_account: Address,
+        expected_operation_id: Bytes,
+        expected_contract_instance: Address,
+        expected_state_revision: u64,
+        expected_ledger_sequence: u32,
+    ) -> bool;
     /// Increment a user's reputation counters.
     ///
     /// Called by this escrow contract after a terminal escrow outcome where a
@@ -2092,6 +2100,43 @@ impl CraftNexusContract {
                 env.panic_with_error(crate::Error::InvalidServiceAgreementHash);
             }
         }
+    }
+
+    /// Validate that an onboarding attestation is bound to the exact account,
+    /// contract instance, operation identifier, profile revision, and ledger
+    /// sequence expected by the calling operation.
+    ///
+    /// This check runs before any financial state change. A mismatch means the
+    /// attestation was replayed from another account, another privilege, or an
+    /// older profile revision.
+    fn validate_onboarding_attestation_binding(
+        env: &Env,
+        attestation: &OnboardingAttestation,
+        expected_account: &Address,
+        expected_operation_id: &Bytes,
+        expected_contract_instance: &Address,
+        expected_state_revision: u64,
+        expected_ledger_sequence: u32,
+    ) -> Result<(), Error> {
+        if attestation.account != *expected_account
+            || attestation.operation_id != *expected_operation_id
+            || attestation.contract_instance != *expected_contract_instance
+        {
+            return Err(Error::OnboardingAuthorizationFailed);
+        }
+        if attestation.state_revision != expected_state_revision
+            || attestation.ledger_sequence != expected_ledger_sequence
+        {
+            return Err(Error::OnboardingProfileStale);
+        }
+        if attestation.operation_id.len() == 0
+            || attestation.profile_version == 0
+            || attestation.state_revision == 0
+            || attestation.ledger_sequence == 0
+        {
+            return Err(Error::OnboardingAuthorizationFailed);
+        }
+        Ok(())
     }
 
     #[inline(always)]
