@@ -62,7 +62,7 @@ Navigate to the contract directory and install the necessary WebAssembly (WASM) 
 cd craft-nexus-contract
 
 # Add the WASM target
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 
 # Install the Stellar CLI
 cargo install --locked stellar-cli

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Deploy CraftNexus Escrow Contract to Stellar Testnet/Mainnet
 # Usage: ./scripts/deploy-contract.sh [testnet|mainnet] [SECRET_KEY]
-# Note: This script should be run from the craft-nexus directory.
+# Note: This script should be run from the craft-nexus-forntend directory.
 #       It assumes the contract is located at ../craft-nexus-contract
 
 set -e
@@ -9,14 +9,15 @@ set -e
 # Configuration
 NETWORK=${1:-testnet}
 SECRET_KEY=${2:-""}
+WASM_TARGET="${WASM_TARGET:-wasm32v1-none}"
 
 if [ -z "$SECRET_KEY" ]; then
-    echo "❌ Error: Secret key required"
+    echo "Error: Secret key required"
     echo "Usage: ./scripts/deploy-contract.sh [testnet|mainnet] [SECRET_KEY]"
     exit 1
 fi
 
-echo "🚀 Deploying CraftNexus Escrow contract to $NETWORK..."
+echo "Deploying CraftNexus Escrow contract to $NETWORK..."
 
 # Set network configuration
 if [ "$NETWORK" = "mainnet" ]; then
@@ -33,39 +34,39 @@ PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 CONTRACT_DIR="$PROJECT_ROOT/../craft-nexus-contract"
 
 if [ ! -d "$CONTRACT_DIR" ]; then
-    echo "❌ Error: Contract directory not found at $CONTRACT_DIR"
-    echo "Please ensure the 'craft-nexus-contract' folder exists adjacent to 'craft-nexus'."
+    echo "Error: Contract directory not found at $CONTRACT_DIR"
+    echo "Please ensure the 'craft-nexus-contract' folder exists adjacent to 'craft-nexus-forntend'."
     exit 1
 fi
 
 # 1. Build the contract
-echo "🛠️  Building contract..."
+echo "Building contract..."
 cd "$CONTRACT_DIR"
-stellar contract build
+stellar contract build --optimize
 
-WASM_PATH="target/wasm32-unknown-unknown/release/craft_nexus_contract.wasm"
+WASM_PATH="target/${WASM_TARGET}/release/craft_nexus_contract.wasm"
 if [ ! -f "$WASM_PATH" ]; then
-    echo "❌ Error: WASM file not found at $WASM_PATH"
+    echo "Error: WASM file not found at $WASM_PATH"
     exit 1
 fi
 
 # 2. Deploy the contract
-echo "🌐 Deploying to Stellar $NETWORK..."
+echo "Deploying to Stellar $NETWORK..."
 CONTRACT_ID=$(stellar contract deploy \
     --wasm "$WASM_PATH" \
-    --source "$SECRET_KEY" \
+    --source-account "$SECRET_KEY" \
     --rpc-url "$RPC_URL" \
     --network-passphrase "$NETWORK_PASSPHRASE" \
     --network "$NETWORK")
 
 # 3. Output results
 echo ""
-echo "✅ Contract deployed successfully!"
+echo "Contract deployed successfully!"
 echo "----------------------------------------------------"
 echo "Network:     $NETWORK"
 echo "Contract ID: $CONTRACT_ID"
 echo "----------------------------------------------------"
 echo ""
-echo "Next Step: Add this to your craft-nexus/.env.local (or .env):"
+echo "Next Step: Add this to your craft-nexus-forntend/.env.local (or .env):"
 echo "NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS=$CONTRACT_ID"
 echo ""

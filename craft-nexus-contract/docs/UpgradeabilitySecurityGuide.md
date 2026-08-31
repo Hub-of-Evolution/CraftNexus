@@ -166,7 +166,7 @@ stellar contract invoke \
   --paused true
 ```
 
-When `is_paused` is `true`, any state-changing escrow operation returns `Error::ContractPaused` (code 15). Read-only and admin-level functions are unaffected, so the admin retains the ability to cancel an upgrade or manage configuration while the contract is paused. Emits the `platform_paused` event.
+When `is_paused` is `true`, escrow creation, release, refund initiation, dispute initiation, staking, and recurring cycle releases return `Error::ContractPaused` (code 15). Read-only views remain available. Admin/arbitrator paths needed to *clear* emergency conflicts — dispute resolution, upgrade cancel, fund sweep, and admin recovery — stay reachable while paused. Emits the `platform_paused` event.
 
 To resume normal operations:
 
@@ -209,20 +209,40 @@ stellar contract invoke \
   --recovered_admin <NEW_ADMIN_ADDRESS>
 ```
 
-On first call the contract records `current_time + 7 days` as `AdminRecoveryTime`, emits an `admin_recovery_initiated` event, and returns `Error::AdminRecoveryFailed` — confirming the timelock has been set but the recovery is not yet active.
+On first call the contract records `current_time + 7 days` as `AdminRecoveryTime`, emits an `admin_recovery_initiated` event, parks an `AdminRecovery` emergency operation in `Executing`, auto-pauses the platform, and returns **`Ok(())`** so the timelock persists (Soroban reverts all storage writes when a contract returns `Err`).
 
 **Step 2 — Complete recovery after 7 days:**
 
 After 7 days have elapsed, repeat the identical call. The contract verifies:
 - The recorded cooldown is at least `MIN_ADMIN_RECOVERY_COOLDOWN` (7 days) — direct writes to storage that attempt to shorten the delay are rejected.
 - The current ledger time has passed `AdminRecoveryTime`.
+- No active disputes, pending WASM upgrade, or active recurring escrows remain (otherwise `Error::EmergencyConflictActive`).
 
-On success, the admin is updated to `recovered_admin`, the timelock entries are cleared, and the `admin_recovered` event is emitted.
+On success, the admin is updated to `recovered_admin`, the timelock entries are cleared, the emergency operation is marked `Completed`, and the `admin_recovered` event is emitted. The platform remains paused until an explicit `set_paused(false)`.
+
+Calling `recover_admin_access` again before the timelock elapses returns `Error::AdminRecoveryFailed`. Operators can abort a parked recovery with `abort_emergency_operation`.
 
 **Security properties of admin recovery:**
 - The fallback admin alone cannot instantly seize admin rights; the 7-day window allows the legitimate admin to respond.
 - The minimum cooldown floor is enforced in code, not just in storage, preventing direct-write bypasses.
 - The `recovered_admin` address is validated; it cannot be the contract's own address.
+
+### 6.4 Unified emergency operations framework
+
+Pause, admin recovery, fund sweep, and upgrade execution are serialized through an on-chain emergency operation lock so they cannot interleave unsafely.
+
+| Kind | Behavior |
+|---|---|
+| `Pause` / `Unpause` | Takes the lock for the duration of the call; unpause is rejected while recovery/sweep is `Executing` |
+| `AdminRecovery` | Parks in `Executing` across the 7-day timelock; blocks sweep/propose/unpause until completed or aborted |
+| `Sweep` | Requires clear dependencies; moves only `balance - TotalLocked - TotalStaked` |
+| `UpgradeExecute` / `UpgradeCancel` | Audited; propose/execute are blocked while a fund-emergency lock is held. Cancel remains available so operators can clear upgrade conflicts |
+
+**Dependency gate** (recovery and sweep): no pending `WasmUpgradeProposal`, `ActiveDisputeCount == 0`, and `ActiveRecurringCount == 0`.
+
+**Views / control:** `get_emergency_operation`, `get_emergency_operation_history`, `abort_emergency_operation`, `get_fund_allocation`, `get_active_dispute_count`, `get_active_recurring_count`.
+
+**Partial recovery:** abort a parked `AdminRecovery` (clears the timelock) then start a new emergency sequence, or wait out the timelock and complete.
 
 ---
 

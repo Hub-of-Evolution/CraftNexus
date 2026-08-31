@@ -24,4 +24,9 @@ impl DecimalTestToken {
             .get(&symbol_short!("DEC"))
             .unwrap_or(7)
     }
+
+    /// Minimal SEP-41 balance probe used by token compatibility validation.
+    pub fn balance(_env: Env, _id: Address) -> i128 {
+        0
+    }
 }

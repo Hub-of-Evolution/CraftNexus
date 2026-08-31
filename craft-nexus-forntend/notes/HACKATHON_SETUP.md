@@ -46,16 +46,16 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cargo install --locked stellar-cli
 
 # Add WASM target
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 
 # Build contract
 cd ../craft-nexus-contract
-stellar contract build
+stellar contract build --optimize
 
 # Deploy (replace YOUR_SECRET_KEY with testnet account secret)
 stellar contract deploy \
-  --wasm target/wasm32-unknown-unknown/release/craft_nexus_contract.wasm \
-  --source YOUR_SECRET_KEY \
+  --wasm target/wasm32v1-none/release/craft_nexus_contract.wasm \
+  --source-account YOUR_SECRET_KEY \
   --network testnet
 
 # Copy contract address to .env.local

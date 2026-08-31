@@ -282,9 +282,9 @@ async function validateTransactionSignature(
     const sourceAccount = transaction.source;
     
     // Verify the source account matches the expected signer
-    if (sourceAccount.accountId.toString() !== expectedSigner) {
+    if (sourceAccount !== expectedSigner) {
       console.error(
-        `Signature mismatch: Expected ${expectedSigner}, got ${sourceAccount.accountId.toString()}`
+        `Signature mismatch: Expected ${expectedSigner}, got ${sourceAccount}`
       );
       return false;
     }
@@ -297,7 +297,7 @@ async function validateTransactionSignature(
       return false;
     }
     
-    console.log(`Transaction signed by: ${sourceAccount.accountId.toString()}`);
+    console.log(`Transaction signed by: ${sourceAccount}`);
     return true;
   } catch (error) {
     console.error("Failed to validate transaction signature:", error);
@@ -339,7 +339,7 @@ export function TransactionSigner({
     try {
       // For escrow initialization, validate that the signer is the buyer
       const isEscrowInit = method === "create_escrow" || method === "init_escrow";
-      const validateSigner = isEscrowInit ? walletState.publicKey : undefined;
+      const validateSigner = isEscrowInit && walletState.publicKey ? walletState.publicKey : undefined;
 
       const result = await signAndSubmit(contractId, method, args, {
         validateSigner,

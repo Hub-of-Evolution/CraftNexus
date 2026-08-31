@@ -142,6 +142,7 @@ fn test_batch_escrow_indexing_scales_linearly_for_twenty_entries() {
             release_window: Some(3600),
             ipfs_hash: None,
             metadata_hash: None,
+            service_agreement_hash: None,
         });
     }
 
@@ -185,6 +186,66 @@ fn test_batch_escrow_indexing_scales_linearly_for_twenty_entries() {
         });
         assert_eq!(seller_id, (1_000 + i as u64));
     }
+}
+
+#[test]
+fn test_scheduled_batch_progresses_in_bounded_idempotent_chunks() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+    let mut params = soroban_sdk::Vec::new(&env);
+    for i in 0..7u32 {
+        params.push_back(EscrowCreateParams {
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token.clone(),
+            amount: 1_000,
+            order_id: 2_000 + i,
+            release_window: Some(3_600),
+            ipfs_hash: None,
+            metadata_hash: None,
+            service_agreement_hash: None,
+        });
+    }
+
+    let job_id = client.schedule_batch_escrow(&buyer, &params);
+    let first = client.continue_batch_escrow(&job_id, &buyer, &5);
+    assert_eq!(first.next_index, 5);
+    assert_eq!(first.status, BatchJobStatus::Pending);
+    assert_eq!(client.get_escrow(&2_000).batch_id, Some(job_id));
+    assert_eq!(client.get_escrow(&2_004).batch_id, Some(job_id));
+
+    let second = client.continue_batch_escrow(&job_id, &buyer, &5);
+    assert_eq!(second.next_index, 7);
+    assert_eq!(second.status, BatchJobStatus::Completed);
+    assert_eq!(client.get_escrow(&2_006).batch_id, Some(job_id));
+    assert_eq!(client.get_batch_escrow_progress(&job_id).unwrap(), second);
+    assert!(client
+        .try_continue_batch_escrow(&job_id, &buyer, &1)
+        .is_err());
+}
+
+#[test]
+fn test_scheduled_batch_can_be_cancelled_before_funds_move() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+    let mut params = soroban_sdk::Vec::new(&env);
+    params.push_back(EscrowCreateParams {
+        buyer: buyer.clone(),
+        seller,
+        token,
+        amount: 1_000,
+        order_id: 3_000,
+        release_window: Some(3_600),
+        ipfs_hash: None,
+        metadata_hash: None,
+        service_agreement_hash: None,
+    });
+
+    let job_id = client.schedule_batch_escrow(&buyer, &params);
+    client.cancel_batch_escrow(&job_id, &buyer);
+    assert_eq!(
+        client.get_batch_escrow_progress(&job_id).unwrap().status,
+        BatchJobStatus::Cancelled
+    );
+    assert!(client.try_get_escrow(&3_000).is_err());
 }
 
 #[test]
@@ -238,60 +299,6 @@ fn test_indexed_storage_multiple_users() {
     // Verify no cross-contamination
     assert_eq!(buyer1_escrows.get_unchecked(0), 1);
     assert_eq!(buyer2_escrows.get_unchecked(0), 51);
-}
-
-#[test]
-fn test_migration_from_legacy_storage() {
-    let (env, client, buyer, _seller, _token, _admin, _, _) = setup_test();
-
-    // Simulate legacy storage by directly setting the old vector format
-    let legacy_key = DataKey::BuyerEscrows(buyer.clone());
-    let mut legacy_vec = soroban_sdk::Vec::new(&env);
-    legacy_vec.push_back(1u64);
-    legacy_vec.push_back(2u64);
-    legacy_vec.push_back(3u64);
-    env.as_contract(&client.address, || {
-        env.storage().persistent().set(&legacy_key, &legacy_vec);
-    });
-
-    // Verify legacy storage exists
-    let has_legacy = env.as_contract(&client.address, || {
-        env.storage().persistent().has(&legacy_key)
-    });
-    assert!(has_legacy);
-
-    // Run migration
-    let migrated_count = client.migrate_user_escrows(&buyer, &true);
-    assert_eq!(migrated_count, 3);
-
-    // Verify indexed storage was created
-    let count_key = DataKey::BuyerEscrowCount(buyer.clone());
-    let count: u32 = env.as_contract(&client.address, || {
-        env.storage().persistent().get(&count_key).unwrap()
-    });
-    assert_eq!(count, 3);
-
-    // Verify individual indexed entries
-    for i in 0..3 {
-        let index_key = DataKey::BuyerEscrowIndexed(buyer.clone(), i);
-        let escrow_id: u64 = env.as_contract(&client.address, || {
-            env.storage().persistent().get(&index_key).unwrap()
-        });
-        assert_eq!(escrow_id, (i + 1) as u64);
-    }
-
-    // Verify legacy storage was removed
-    let has_legacy = env.as_contract(&client.address, || {
-        env.storage().persistent().has(&legacy_key)
-    });
-    assert!(!has_legacy);
-
-    // Verify query function works with migrated data
-    let escrows = client.get_escrows_by_buyer(&buyer, &0, &10, &false);
-    assert_eq!(escrows.len(), 3);
-    assert_eq!(escrows.get_unchecked(0), 1);
-    assert_eq!(escrows.get_unchecked(1), 2);
-    assert_eq!(escrows.get_unchecked(2), 3);
 }
 
 #[test]
@@ -675,8 +682,9 @@ fn test_artisan_stake_queue_pruning() {
 
     let count = client.get_artisan_stake_queue_count(&artisan);
     assert_eq!(count, STAKE_QUEUE_PRUNE_THRESHOLD);
+    let staked_before_pruning = client.get_stake(&artisan);
 
-    // Advance time to mature some deposits
+    // Advance time to mature the deposits
     env.ledger().with_mut(|li| {
         li.timestamp = li.timestamp + (DEFAULT_STAKE_COOLDOWN as u64) + 1;
     });
@@ -684,26 +692,39 @@ fn test_artisan_stake_queue_pruning() {
     // Add one more deposit - this should trigger pruning
     client.stake_tokens(&artisan, &token, &1000);
 
-    // Count should collapse to the single new deposit because all earlier entries matured and were pruned.
+    // The matured entries must be compacted into a single aggregate rather
+    // than dropped (#1051), so the queue holds the aggregate plus the new
+    // deposit - never a bare single slot that discards prior principal.
     let count_after_pruning = client.get_artisan_stake_queue_count(&artisan);
-    assert_eq!(count_after_pruning, 1);
+    assert_eq!(count_after_pruning, 2);
 
-    let stored_deposit: Option<StakeDeposit> = env.as_contract(&client.address, || {
+    let aggregate: Option<StakeDeposit> = env.as_contract(&client.address, || {
         env.storage()
             .persistent()
             .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 0))
     });
-    let deposit = stored_deposit.expect("pruned queue should retain the latest deposit in storage");
-    assert_eq!(deposit.amount, 1000);
+    let aggregate = aggregate.expect("compacted matured entries should remain in storage");
+    assert_eq!(
+        aggregate.amount, staked_before_pruning,
+        "compaction must preserve the full matured principal, not discard it"
+    );
 
-    let missing_deposit: Option<StakeDeposit> = env.as_contract(&client.address, || {
+    let new_deposit: Option<StakeDeposit> = env.as_contract(&client.address, || {
         env.storage()
             .persistent()
             .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 1))
     });
-    assert!(
-        missing_deposit.is_none(),
-        "only the latest deposit should remain after pruning"
+    let new_deposit = new_deposit.expect("the newly added deposit should remain in storage");
+    assert_eq!(new_deposit.amount, 1000);
+
+    // Total staked accounting is unaffected by compaction, and the artisan
+    // can still withdraw every bit of matured principal afterwards.
+    assert_eq!(client.get_stake(&artisan), staked_before_pruning + 1000);
+    client.unstake_tokens(&artisan, &token);
+    assert_eq!(
+        token::TokenClient::new(&env, &token).balance(&artisan),
+        100_000_000,
+        "artisan must be able to recover every unit of matured principal"
     );
 }
 
@@ -726,11 +747,14 @@ fn test_artisan_stake_queue_pruning_does_not_run_before_threshold() {
             .persistent()
             .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 48))
     });
-    assert!(stored_deposit.is_some(), "queue should still contain the last deposit");
+    assert!(
+        stored_deposit.is_some(),
+        "queue should still contain the last deposit"
+    );
 }
 
 #[test]
-fn test_artisan_stake_queue_pruning_removes_all_matured_deposits() {
+fn test_artisan_stake_queue_pruning_aggregates_all_matured_deposits() {
     let (env, client, _, artisan, token, _, _, _) = setup_test();
 
     let token_asset = token::StellarAssetClient::new(&env, &token);
@@ -746,18 +770,38 @@ fn test_artisan_stake_queue_pruning_removes_all_matured_deposits() {
 
     client.stake_tokens(&artisan, &token, &1000);
 
+    // Every matured deposit must be folded into a single aggregate entry
+    // rather than deleted (#1051) - only the new deposit is separate.
     let count_after_pruning = client.get_artisan_stake_queue_count(&artisan);
-    assert_eq!(count_after_pruning, 1, "only the newest deposit should remain");
+    assert_eq!(
+        count_after_pruning, 2,
+        "matured deposits should be compacted into one entry, not dropped"
+    );
+
+    let aggregate: StakeDeposit = env
+        .as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 0))
+        })
+        .expect("aggregate of matured deposits should be stored");
+    assert_eq!(
+        aggregate.amount, 41_000,
+        "aggregate must preserve the full matured principal"
+    );
 
     let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
     let count_present = env.as_contract(&client.address, || {
         env.storage().persistent().has(&count_key)
     });
-    assert!(count_present, "queue count should remain stored for the remaining deposit");
+    assert!(
+        count_present,
+        "queue count should remain stored for the remaining deposits"
+    );
 }
 
 #[test]
-fn test_artisan_stake_queue_pruning_can_empty_queue() {
+fn test_artisan_stake_queue_pruning_compacts_without_losing_principal() {
     let (env, client, _, artisan, token, _, _, _) = setup_test();
 
     let token_asset = token::StellarAssetClient::new(&env, &token);
@@ -777,12 +821,15 @@ fn test_artisan_stake_queue_pruning_can_empty_queue() {
         li.timestamp = li.timestamp + (DEFAULT_STAKE_COOLDOWN as u64) + 1;
     });
 
-    // Every queued deposit is now matured, so this stake empties the queue
-    // completely before appending the fresh deposit at index 0.
+    // Every queued deposit is now matured, so this stake compacts them into a
+    // single aggregate entry before appending the fresh deposit.
     client.stake_tokens(&artisan, &token, &1000);
 
     let count_after_pruning = client.get_artisan_stake_queue_count(&artisan);
-    assert_eq!(count_after_pruning, 1);
+    assert_eq!(
+        count_after_pruning, 2,
+        "aggregate of matured deposits plus the new deposit should remain"
+    );
 
     let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
     let count_present = env.as_contract(&client.address, || {
@@ -790,13 +837,35 @@ fn test_artisan_stake_queue_pruning_can_empty_queue() {
     });
     assert!(count_present);
 
-    // The pruned slots must not linger in persistent storage.
-    for index in 1..STAKE_QUEUE_PRUNE_THRESHOLD {
+    let aggregate: StakeDeposit = env
+        .as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), 0))
+        })
+        .expect("aggregate of matured deposits should be stored");
+    assert_eq!(
+        aggregate.amount,
+        (STAKE_QUEUE_PRUNE_THRESHOLD as i128) * 1000,
+        "no matured principal may be lost during compaction"
+    );
+
+    // Storage must still be bounded: no stale slots beyond the compacted length.
+    for index in 2..STAKE_QUEUE_PRUNE_THRESHOLD {
         let stale_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), index);
-        let still_present =
-            env.as_contract(&client.address, || env.storage().persistent().has(&stale_key));
-        assert!(!still_present, "pruned deposit {index} should be removed");
+        let still_present = env.as_contract(&client.address, || {
+            env.storage().persistent().has(&stale_key)
+        });
+        assert!(!still_present, "stale slot {index} should be removed");
     }
+
+    // And the artisan can still recover every matured unit.
+    client.unstake_tokens(&artisan, &token);
+    assert_eq!(
+        token::TokenClient::new(&env, &token).balance(&artisan),
+        100_000_000,
+        "compaction must not prevent full principal recovery"
+    );
 }
 
 #[test]
@@ -852,6 +921,72 @@ fn test_artisan_stake_queue_migration() {
 }
 
 #[test]
+fn test_legacy_artisan_stake_migration_converts_old_format() {
+    let (env, client, _buyer, artisan, token, _admin, _, _) = setup_test();
+
+    // Simulate legacy storage: old ArtisanStake stored i128 amount,
+    // and ArtisanStakeToken stored the token Address.
+    let stake_key = DataKey::ArtisanStake(artisan.clone());
+    let token_key = DataKey::ArtisanStakeToken(artisan.clone());
+
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&stake_key, &7_500_000i128);
+        env.storage()
+            .persistent()
+            .set(&token_key, &token);
+    });
+
+    // Verify legacy storage exists
+    let has_legacy_amount = env.as_contract(&client.address, || {
+        env.storage().persistent().has(&stake_key)
+    });
+    assert!(has_legacy_amount);
+
+    // Run migration via read path (lazy migration)
+    let migrated_amount = client.get_stake(&artisan);
+    assert_eq!(migrated_amount, 7_500_000);
+
+    // Verify new format is stored
+    let stake_data = client.get_artisan_stake_data(&artisan);
+    assert!(stake_data.is_some());
+    let data = stake_data.unwrap();
+    assert_eq!(data.amount, 7_500_000);
+    assert_eq!(data.token, token);
+
+    // Verify legacy token key was removed
+    let has_legacy_token = env.as_contract(&client.address, || {
+        env.storage().persistent().has(&token_key)
+    });
+    assert!(!has_legacy_token);
+}
+
+#[test]
+fn test_legacy_artisan_stake_migration_is_idempotent() {
+    let (env, client, _buyer, artisan, token, _admin, _, _) = setup_test();
+
+    // Set up new-format stake data directly
+    let stake_key = DataKey::ArtisanStake(artisan.clone());
+    let new_stake = crate::ArtisanStakeData {
+        amount: 5_000_000,
+        token: token.clone(),
+    };
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&stake_key, &new_stake);
+    });
+
+    // Migration should be a no-op on already-migrated data
+    let migrated = client.migrate_legacy_artisan_stake(&artisan);
+    assert_eq!(migrated, 0);
+
+    // Data should be unchanged
+    let stake_data = client.get_artisan_stake_data(&artisan);
+    assert!(stake_data.is_some());
+    let data = stake_data.unwrap();
+    assert_eq!(data.amount, 5_000_000);
+    assert_eq!(data.token, token);
+}
+
+#[test]
 fn test_artisan_stake_queue_max_capacity() {
     let (env, client, _buyer, artisan, token, _admin, _, _) = setup_test();
 
@@ -879,4 +1014,47 @@ fn test_index_read_budget_smoke() {
 
     env.budget().reset_default();
     let _ = client.has_active_escrows(&buyer);
+}
+
+#[test]
+fn test_escrow_counters_stay_in_sync_at_scale() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+
+    for i in 0..100 {
+        client.create_escrow(&buyer, &seller, &token, &1000, &(i + 1), &Some(604800));
+    }
+
+    // Global counter (AllEscrowIds / EscrowCount) must match the number of escrows created.
+    assert_eq!(client.get_escrow_count(), 100);
+
+    // Buyer- and seller-scoped indexed counters must independently match too.
+    let buyer_count_key = DataKey::BuyerEscrowCount(buyer.clone());
+    let buyer_count: u32 = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&buyer_count_key)
+            .unwrap_or(0u32)
+    });
+    assert_eq!(buyer_count, 100);
+
+    let seller_count_key = DataKey::SellerEscrowCount(seller.clone());
+    let seller_count: u32 = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&seller_count_key)
+            .unwrap_or(0u32)
+    });
+    assert_eq!(seller_count, 100);
+
+    // Pagination surfaces must agree with the counters above.
+    assert_eq!(
+        client.get_escrows_by_buyer(&buyer, &0, &100, &false).len(),
+        100
+    );
+    assert_eq!(
+        client
+            .get_escrows_by_seller(&seller, &0, &100, &false)
+            .len(),
+        100
+    );
 }

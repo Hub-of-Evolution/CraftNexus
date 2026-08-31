@@ -26,7 +26,7 @@ import {
   EscrowService,
   Escrow,
   EscrowStatusEnum,
-  getPlatformFeePercentage,
+  calculateDeterministicFee,
 } from "@/lib/stellar/escrow";
 import { STELLAR_NETWORK, PLATFORM_COMMISSION_PERCENT } from "@/lib/stellar/config";
 
@@ -67,10 +67,9 @@ export function ProductCheckout({
   const [currentEscrow, setCurrentEscrow] = useState<Escrow | null>(null);
   const [orderId, setOrderId] = useState<number | null>(null);
 
-  // Calculate fees
-  const platformFeePercentage = getPlatformFeePercentage();
-  const platformFee = (product.price * platformFeePercentage) / 100;
-  const sellerReceives = product.price - platformFee;
+  // Calculate fees using deterministic integer arithmetic (matches on-chain contract)
+  const platformFee = calculateDeterministicFee(product.price);
+  const sellerReceives = platformFee.sellerReceives;
 
   // Handle successful escrow creation
   const handleEscrowSuccess = useCallback(
@@ -217,9 +216,9 @@ export function ProductCheckout({
               </div>
               <div className="flex justify-between">
                 <span className="text-gray-600">
-                  Platform Fee ({platformFeePercentage}%)
+                  Platform Fee ({PLATFORM_COMMISSION_PERCENT}%)
                 </span>
-                <span className="font-medium">${platformFee.toFixed(2)}</span>
+                <span className="font-medium">${platformFee.platformFee.toFixed(2)}</span>
               </div>
               <div className="border-t pt-2 flex justify-between">
                 <span className="text-gray-600">Total</span>

@@ -111,6 +111,26 @@ export function getPlatformFeePercentage(): number {
   return fee ? parseFloat(fee) : 5; // Default 5%
 }
 
+const USDC_DECIMALS = 7;
+const USDC_FACTOR = 10 ** USDC_DECIMALS;
+
+/**
+ * Calculate platform fee deterministically using the same integer arithmetic
+ * as the on-chain Soroban contract. Eliminates floating-point rounding
+ * discrepancies between off-chain previews and on-chain outcomes.
+ */
+export function calculateDeterministicFee(amount: number): { platformFee: number; sellerReceives: number } {
+  const feePercent = getPlatformFeePercentage();
+  const feeBps = feePercent * 100;
+  const amountInt = Math.floor(amount * USDC_FACTOR);
+  const platformFeeInt = Math.floor((amountInt * feeBps) / 10_000);
+  const sellerReceivesInt = amountInt - platformFeeInt;
+  return {
+    platformFee: platformFeeInt / USDC_FACTOR,
+    sellerReceives: sellerReceivesInt / USDC_FACTOR,
+  };
+}
+
 /**
  * Check if mock mode is enabled for development
  */

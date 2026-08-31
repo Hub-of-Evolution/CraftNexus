@@ -639,40 +639,61 @@ Do not infer slot numbers from timestamps or write directly to an arbitrary slot
 
 ## Event Reference
 
-### Escrow Events (Indexer-Facing)
+This section lists the structured events emitted by the on-chain contracts. Indexers should subscribe
+to the topic tuples shown below; every event row lists the topic tuple, the payload shape, and the
+primary emitting function.
 
-Escrow events publish with topics `(event_symbol, order_id)` and typed event bodies.
+### Escrow / Stake Events
 
-Soroban `Symbol`s only accept `[a-zA-Z0-9_]`, so the `escrow` / `admin` / `stake`
-namespace prefix is joined with an underscore rather than a dot:
+| Topic tuple (filter) | Payload type | Emitted by |
+|----------------------|--------------|------------|
+| `(symbol "escrow", u64 escrow_id)` | `EscrowEvent { escrow_id, action, buyer, seller, amount, token, timestamp }` | `emit_escrow_created`, `create_escrow`, `batch_create` |
+| `(symbol "escrow_resolved", u64 escrow_id)` | `EscrowResolvedEvent { escrow_id, buyer, seller, arbitrator, amount, token, timestamp }` | `emit_escrow_resolved_event`, `resolve_escrow` |
+| `(symbol "recurring_escrow", u64 id)` | `RecurringEscrowEvent { id, action, buyer, artisan, amount, timestamp }` | `create_recurring_escrow`, `release_next_cycle`, `cancel_recurring_escrow` |
+| `(symbol "metadata_verified", u64 order_id)` | `MetadataVerifiedEvent { order_id, verifier, timestamp }` | `emit_metadata_verified`, `verify_metadata` |
+| `(symbol "stake_reputation_update", Address)` | `ReputationUpdateEvent { address, successful_delta, disputed_delta, metrics_sales_delta, metrics_amount, token, timestamp }` | `emit_reputation_update` |
+| `(symbol "tokens_staked", Address)` | `TokensStakedEvent { artisan, token, amount }` | staking functions |
+| `(symbol "tokens_unstaked", Address)` | `TokensUnstakedEvent { artisan, token, amount }` | unstake functions |
+| `(symbol "stake_operation", [u8])` | tuple `(artisan: Address, new_stake: i128)` | stake history helpers |
+| `(symbol "stake_history_warning", "queue_full")` | `String` (warning message) | stake history maintenance |
 
-| Event Symbol | Data Struct |
-|-------------|-------------|
-| `escrow` | `EscrowCreatedEvent { escrow_id, buyer, seller, amount, token, release_window, ipfs_hash, metadata_hash }` |
-| `escrow_resolved` | `EscrowResolvedEvent { escrow_id, resolution }` |
-| `escrow_metadata_verified` | `MetadataVerifiedEvent { order_id, verifier, timestamp }` |
+### Admin / Configuration Events
 
-### Admin / Stake Events
+| Topic tuple (filter) | Payload type | Emitted by |
+|----------------------|--------------|------------|
+| `(symbol "admin_changed", bytes)` | `(previous_admin: Address, new_admin: Address)` | `emit_admin_changed`, `update_admin` |
+| `(symbol "admin_config_updated", symbol field_name)` | `ConfigUpdatedEvent { field_name: Symbol, old_value: ConfigValue, new_value: ConfigValue }` | `emit_config_updated`, config setters |
+| `(symbol "admin_fee_tier_updated", Address artisan)` | `ArtisanFeeTierUpdatedEvent { artisan, fee_bps }` | `emit_artisan_fee_tier_updated` |
+| `(symbol "admin_platform_paused", Address)` | `PlatformPausedEvent { initiator, timestamp }` | `emit_platform_paused` |
+| `(symbol "admin_platform_unpaused", Address)` | `PlatformUnpausedEvent { initiator, timestamp }` | `emit_platform_unpaused` |
+| `(symbol "admin_config_recovered", bool)` | `String` (recovery notice) | config recovery path |
 
-| Event Symbol | Data Struct |
-|-------------|-------------|
-| `admin_changed` | `(previous_admin, new_admin)` |
-| `admin_config_updated` | `ConfigUpdatedEvent { field_name, old_value, new_value }` |
-| `admin_config_recovered` | recovery notice string |
-| `admin_fee_tier_updated` | `ArtisanFeeTierUpdatedEvent { artisan, fee_bps }` |
-| `admin_platform_paused` | `PlatformPausedEvent { initiator, timestamp }` |
-| `admin_platform_unpaused` | `PlatformUnpausedEvent { initiator, timestamp }` |
-| `stake_reputation_update` | `ReputationUpdateEvent { address, .. }` |
+### Upgrade / Migration Events
 
-### Onboarding Events
+| Topic tuple (filter) | Payload type | Emitted by |
+|----------------------|--------------|------------|
+| `(symbol "wasm_upgrade", Symbol action)` | `UpgradeProposalEvent { action, wasm_hash, admin, timestamp, upgrade_at }` | `emit_upgrade_event`, upgrade proposal APIs |
+| `(symbol "fee_cfg_migrated",)` | `FeeTokenConfigsMigratedEvent { scanned_tokens, migrated_configs, skipped_existing }` | migration utilities |
 
-Onboarding events publish with one topic symbol and payload `Address`:
+### Onboarding Contract Events
 
-| Event Symbol | Data |
-|-------------|------|
-| `UserOnboarded` | onboarded user address |
-| `RoleUpdated` | updated user address |
-| `UserVerified` | verified user address |
+| Topic tuple (filter) | Payload type | Emitted by |
+|----------------------|--------------|------------|
+| `(symbol "UserOnboarded",)` | `UserOnboardedEvent { user: Address, username: String, role: UserRole }` | `onboard_user` |
+| `(symbol "OnboardCallFailed",)` | `OnboardCallFailedEvent { user: Address, reason: u32, timestamp: u64 }` | `emit_onboard_failed_and_panic` |
+| `(symbol "RoleUpdated",)` | tuple `(user: Address, old_role: UserRole, new_role: UserRole)` | `update_user_role` |
+| `(symbol "ProfileDeactivated", Address)` | tuple `(user: Address, role: UserRole)` | `deactivate_profile` |
+| `(symbol "ProfileReactivated", Address)` | tuple `(user: Address, role: UserRole)` | `reactivate_profile` |
+| `(symbol "UserVerified",)` | `Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
+| `(symbol "UsernameChanged",)` | `Address` | `change_username` |
+| `(symbol "UsernameChangedRevoked",)` | audit symbol for revoked username changes | username-change flow |
+| `(symbol "PortfolioUpdated",)` | `Address` | `update_portfolio` |
+| `(symbol "AutoVerifiedEvent", Address)` | `AutoVerifiedEvent { user, escrow_count, volume }` | `try_auto_verify` |
+
+Notes:
+- Topic tuples are the canonical filter keys for indexers. Many events include user or order identifiers in the topic tuple so consumers can cheaply subscribe to a single-user or single-order stream without decoding event payloads.
+- All numeric monetary fields are emitted as raw integers (I128) to preserve precision; formatting should be applied off-chain.
+- This reference is derived directly from the contract source; whenever you change event payloads, update this table to keep indexers in sync.
 
 ---
 
@@ -747,6 +768,7 @@ Errors are grouped by category for off-chain triage. Use `is_retryable(error)` i
 | `40` | `InvalidMetadataHash` | Provided metadata hash is invalid |
 | `41` | `InvalidIpfsHash` | Provided IPFS hash is invalid |
 | `42` | `NotAnUpgradeSigner` | Caller is not an authorized upgrade signer |
+| `80` | `EscrowAlreadyExists` | An escrow with this order ID already exists; duplicate identifiers are rejected and state is left unchanged |
 
 Onboarding contract currently reverts with explicit panic messages (for example `Username too short`, `Username already taken`, `User not found`).
 
@@ -776,7 +798,7 @@ This will:
 **Manual Installation (Alternative):**
 ```bash
 cargo install --locked stellar-cli
-rustup target add wasm32-unknown-unknown
+rustup target add wasm32v1-none
 ```
 
 ---

@@ -1,0 +1,7 @@
+# Size flags for explicit `cargo build --target wasm32-unknown-unknown --release`.
+# Do not set a default `[build] target` and do not put `-C lto` in rustflags:
+# `cargo check --tests` uses `-C embed-bitcode=no`, which is incompatible with LTO.
+# Release LTO stays in Cargo.toml `[profile.release]`.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "opt-level=z", "-C", "panic=abort"]
+
