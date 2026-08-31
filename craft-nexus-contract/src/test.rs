@@ -1250,6 +1250,12 @@ fn test_admin_transfer_flow() {
     assert_eq!(config.admin, admin);
     assert_eq!(config.pending_admin, Some(new_admin.clone()));
 
+    let pending_transfer = client.get_pending_admin_transfer().unwrap();
+    assert_eq!(pending_transfer.proposed_admin, new_admin);
+    assert_eq!(pending_transfer.proposer, admin);
+    assert_eq!(pending_transfer.revision, 1);
+    assert!(pending_transfer.expiry > env.ledger().timestamp());
+
     // New admin claims role
     client.claim_admin();
 
@@ -1257,6 +1263,81 @@ fn test_admin_transfer_flow() {
     let config = client.get_platform_config();
     assert_eq!(config.admin, new_admin);
     assert_eq!(config.pending_admin, None);
+    assert_eq!(client.get_pending_admin_transfer(), None);
+}
+
+#[test]
+fn test_unaccepted_roles_never_gain_privileges() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let proposed_admin = Address::generate(&env);
+    client.update_admin(&proposed_admin);
+
+    // Platform config admin remains original admin
+    let config = client.get_platform_config();
+    assert_eq!(config.admin, admin);
+    assert_ne!(config.admin, proposed_admin);
+
+    // Before claim, proposed admin has not gained privileges
+    let pending = client.get_pending_admin_transfer().unwrap();
+    assert_eq!(pending.proposed_admin, proposed_admin);
+
+    // Claim completes activation
+    client.claim_admin();
+    assert_eq!(client.get_platform_config().admin, proposed_admin);
+}
+
+#[test]
+fn test_expired_transfers_cannot_be_accepted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let new_admin = Address::generate(&env);
+    // Propose with short 100s window
+    client.update_admin_with_window(&new_admin, &100);
+
+    let pending = client.get_pending_admin_transfer().unwrap();
+    assert_eq!(pending.proposed_admin, new_admin);
+
+    // Advance ledger past expiration (101 seconds)
+    env.ledger().with_mut(|li| {
+        li.timestamp += 101;
+    });
+
+    // View method returns None for expired transfer
+    assert_eq!(client.get_pending_admin_transfer(), None);
+
+    // Claiming expired transfer must fail
+    let res = client.try_claim_admin();
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_old_administrators_cannot_replay_completed_transfer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _admin1) = setup_test(&env, true);
+
+    let admin2 = Address::generate(&env);
+    client.update_admin(&admin2);
+    client.claim_admin();
+
+    // Now admin2 is current admin
+    assert_eq!(client.get_platform_config().admin, admin2);
+
+    // Attempting to claim again without pending proposal fails
+    let res = client.try_claim_admin();
+    assert!(res.is_err());
+
+    // Proposed admin transfer revision counter increments monotonically
+    let admin3 = Address::generate(&env);
+    client.update_admin(&admin3);
+    let pending = client.get_pending_admin_transfer().unwrap();
+    assert_eq!(pending.proposer, admin2);
+    assert_eq!(pending.revision, 2);
 }
 
 #[test]
@@ -1273,6 +1354,7 @@ fn test_admin_transfer_can_be_cancelled() {
     let config = client.get_platform_config();
     assert_eq!(config.admin, admin);
     assert_eq!(config.pending_admin, None);
+    assert_eq!(client.get_pending_admin_transfer(), None);
 }
 
 #[test]

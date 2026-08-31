@@ -272,6 +272,8 @@ pub enum Error {
     /// An active dispute, recurring escrow, or pending upgrade exists that blocks
     /// the requested emergency operation from starting (#1072).
     EmergencyConflictActive = 86,
+    /// Pending admin role transfer has expired and cannot be accepted.
+    TransferExpired = 87,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -449,6 +451,8 @@ const ADMIN_RECOVERY_DELAY: u64 = time_policy::ADMIN_RECOVERY_DELAY;
 const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = time_policy::MIN_ADMIN_RECOVERY_COOLDOWN;
 /// Default timelock delay for pending critical admin actions (24 hours).
 const DEFAULT_ADMIN_ACTION_TIMELOCK_DELAY: u64 = time_policy::ADMIN_ACTION_TIMELOCK_DELAY;
+/// Default bounded expiration window for two-step admin transfers (7 days).
+const DEFAULT_ADMIN_TRANSFER_WINDOW: u64 = time_policy::ADMIN_TRANSFER_WINDOW;
 
 /// The kind of critical admin action that requires multi-sig approval
 /// and timelock enforcement.
@@ -568,6 +572,8 @@ pub enum DataKey {
     ReentryGuard,
     /// Pending admin address for two-step transfer
     PendingAdmin,
+    /// Monotonic revision counter for two-step admin transfer proposals
+    AdminTransferRevision,
     /// Proposal for contract WASM upgrade
     WasmUpgradeProposal,
     /// Configurable maximum release window (in seconds)
@@ -1705,6 +1711,21 @@ pub struct PlatformConfig {
     pub dispute_escalation_window: u32,
     /// Evidence/counter-evidence challenge window before arbitrator resolution
     pub evidence_challenge_window: u32,
+}
+
+/// Pending admin transfer details for two-step admin role rotation.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PendingAdminTransfer {
+    /// Proposed administrator address
+    pub proposed_admin: Address,
+    /// Proposer address (the current admin who initiated the transfer proposal)
+    pub proposer: Address,
+    /// Proposal revision counter (sequence number preventing replay of completed/stale proposals)
+    pub revision: u64,
+    /// Absolute ledger timestamp (in seconds) when this proposal expires
+    pub expiry: u64,
 }
 
 /// Structured record of dispute evidence with metadata and expiry thresholds (#927).
@@ -3813,11 +3834,16 @@ impl CraftNexusContract {
     }
 
     /// Propose a new administrator for the platform (admin only).
-    /// Starts the two-step transfer process (#95).
+    /// Starts the two-step transfer process with default bounded window (#95).
     /// Both the current admin and the incoming admin must co-sign, proving the
     /// new address is a live, registered ledger node capable of authorizing
     /// transactions (#419).
     pub fn update_admin(env: Env, new_admin: Address) {
+        Self::update_admin_with_window(env, new_admin, DEFAULT_ADMIN_TRANSFER_WINDOW);
+    }
+
+    /// Propose a new administrator for the platform with a custom bounded expiration window (admin only).
+    pub fn update_admin_with_window(env: Env, new_admin: Address, window_secs: u64) {
         let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
@@ -3831,6 +3857,28 @@ impl CraftNexusContract {
         new_admin.require_auth();
 
         let previous_admin = config.admin.clone();
+        let current_revision: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminTransferRevision)
+            .unwrap_or(0);
+        let next_revision = current_revision.saturating_add(1);
+        let expiry = env.ledger().timestamp().saturating_add(window_secs);
+
+        let transfer = PendingAdminTransfer {
+            proposed_admin: new_admin.clone(),
+            proposer: config.admin.clone(),
+            revision: next_revision,
+            expiry,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AdminTransferRevision, &next_revision);
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingAdmin, &transfer);
+
         config.pending_admin = Some(new_admin.clone());
         env.storage()
             .instance()
@@ -3842,10 +3890,27 @@ impl CraftNexusContract {
 
     /// Claim the administrative role (pending admin only).
     /// Completes the two-step transfer process (#95).
-    /// Enhanced with validation, audit logging and fallback setup (#240)
+    /// Enhanced with validation, bounded expiry check, audit logging and fallback setup (#240).
     pub fn claim_admin(env: Env) {
         let mut config = Self::get_platform_config_internal(&env);
-        let pending = config.pending_admin.as_ref().expect("");
+
+        let transfer: PendingAdminTransfer = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| env.panic_with_error(Error::NoPendingAdmin));
+
+        // Expired transfers cannot be accepted.
+        if env.ledger().timestamp() >= transfer.expiry {
+            env.panic_with_error(Error::TransferExpired);
+        }
+
+        // Old administrators cannot replay or claim completed/invalid proposals.
+        if transfer.proposer != config.admin {
+            env.panic_with_error(Error::Unauthorized);
+        }
+
+        let pending = &transfer.proposed_admin;
         pending.require_auth();
 
         // Validate the pending admin address before accepting the transfer
@@ -3862,6 +3927,8 @@ impl CraftNexusContract {
             .instance()
             .set(&DataKey::PlatformConfig, &config);
 
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+
         // Emit audit event for the completed two-step admin transfer (#631)
         Self::emit_admin_changed(&env, previous_admin, new_admin, "admin_claimed");
     }
@@ -3871,7 +3938,9 @@ impl CraftNexusContract {
         let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
-        if config.pending_admin.is_none() {
+        if config.pending_admin.is_none()
+            && !env.storage().persistent().has(&DataKey::PendingAdmin)
+        {
             return Err(Error::NoPendingAdmin);
         }
 
@@ -3879,7 +3948,21 @@ impl CraftNexusContract {
         env.storage()
             .instance()
             .set(&DataKey::PlatformConfig, &config);
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
         Ok(())
+    }
+
+    /// Read-only view function to inspect active (unexpired) pending admin transfer proposal.
+    pub fn get_pending_admin_transfer(env: Env) -> Option<PendingAdminTransfer> {
+        let transfer: PendingAdminTransfer = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)?;
+        if env.ledger().timestamp() >= transfer.expiry {
+            None
+        } else {
+            Some(transfer)
+        }
     }
 
     // ----- Admin Action Proposal (Multi-Sig + Timelock) -----
@@ -4446,6 +4529,7 @@ impl CraftNexusContract {
 
         config.admin = recovered_admin.clone();
         config.pending_admin = None;
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
         // Write config to instance storage (primary location) â€” TTL already extended
         // by get_platform_config_internal. No redundant extend_persistent needed.
         env.storage()
