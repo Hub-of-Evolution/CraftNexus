@@ -38,6 +38,7 @@
 //! ```
 
 pub mod escrow_props;
+pub mod financial_conservation;
 pub mod generators;
 pub mod harness;
 pub mod invariants;
