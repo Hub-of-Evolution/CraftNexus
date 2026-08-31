@@ -7379,4 +7379,80 @@ mod reconciliation_report_tests {
         assert_eq!(report.complete, true, "should be complete");
         assert_eq!(report.unresolved, false, "should not be unresolved");
     }
+
+// ============================================================
+// Issue #1049 – Prevent Recurring Release After Cancellation
+// ============================================================
+
+/// A cancelled recurring escrow must reject any subsequent attempts to release a cycle.
+#[test]
+#[should_panic]
+fn test_recurring_escrow_release_rejected_after_cancellation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &10_000_000);
+
+    // Create the recurring escrow
+    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &10_000_000, &100, &2);
+
+    // Cancel the recurring escrow
+    client.cancel_recurring_escrow(&rec.id);
+
+    // Fast forward timestamp to bypass cycle frequency locks, simulating a stale request
+    env.ledger().with_mut(|li| {
+        li.timestamp += 100;
+    });
+
+    // Attempting to release next cycle after cancellation must fail
+    client.release_next_cycle(&rec.id);
+}
+
+/// A recurring escrow cannot be cancelled multiple times, preventing double-refunds.
+#[test]
+#[should_panic]
+fn test_recurring_escrow_double_cancellation_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &10_000_000);
+    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &10_000_000, &100, &2);
+
+    // First cancellation succeeds
+    client.cancel_recurring_escrow(&rec.id);
+    
+    // Second cancellation attempt must fail
+    client.cancel_recurring_escrow(&rec.id);
+}
+
+/// The exact remaining balance is refunded to the buyer when a recurring escrow is cancelled.
+#[test]
+fn test_recurring_escrow_cancellation_refunds_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &10_000_000);
+    let token_client = token::Client::new(&env, &token_id);
+    
+    // Verify initial balance
+    assert_eq!(token_client.balance(&buyer), 10_000_000);
+
+    // Creating the escrow locks the funds
+    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &10_000_000, &100, &2);
+    assert_eq!(token_client.balance(&buyer), 0);
+
+    // Fast forward and release the FIRST cycle (10M / 2 = 5M released to seller)
+    env.ledger().with_mut(|li| {
+        li.timestamp += 100;
+    });
+    client.release_next_cycle(&rec.id);
+
+    // Cancel the remainder of the escrow
+    client.cancel_recurring_escrow(&rec.id);
+
+    // Buyer balance after cancellation should be exactly the remaining unreleased funds (5_000_000)
+    assert_eq!(token_client.balance(&buyer), 5_000_000);
 }
