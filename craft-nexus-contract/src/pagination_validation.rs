@@ -24,6 +24,8 @@
 //!    the cursor exceeds the total count (caller should stop paginating).
 //! 4. **Determinism** – Valid inputs always produce the same output for the
 //!    same ledger state.
+//! 5. **Archival policy** – Immutable archival summaries have dedicated limits
+//!    for reads and compaction so active authorization records are never pruned.
 
 use crate::Error;
 
@@ -54,6 +56,14 @@ pub const MAX_BATCH_WORK_LIMIT: u32 = 5;
 /// `get_fund_audit_history_paginated`).  Allows larger fetches than user-facing
 /// queries but still prevents unbounded reads.
 pub const MAX_ADMIN_PAGE_SIZE: u32 = 200;
+
+/// Maximum page size for archival summary queries. Immutable archival summaries
+/// must retain enough data for fund reconstruction while reads stay bounded.
+pub const MAX_ARCHIVAL_PAGE_SIZE: u32 = 200;
+
+/// Maximum work limit for archival compaction. Compaction is intentionally
+/// smaller than normal page sizes so each continuation is bounded and resumable.
+pub const MAX_ARCHIVAL_COMPACTION_LIMIT: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // Validation helpers
@@ -148,6 +158,16 @@ pub fn validate_strict_limit(limit: u32, max: u32) -> PaginationResult {
         return Err(Error::InvalidBatchWorkLimit);
     }
     Ok(limit)
+}
+
+/// Validate a page size for immutable archival summaries.
+pub fn validate_archival_limit(limit: u32) -> PaginationResult {
+    validate_limit(limit, MAX_ARCHIVAL_PAGE_SIZE)
+}
+
+/// Validate a bounded, resumable archival compaction batch.
+pub fn validate_archival_compaction_limit(limit: u32) -> PaginationResult {
+    validate_strict_limit(limit, MAX_ARCHIVAL_COMPACTION_LIMIT)
 }
 
 // ---------------------------------------------------------------------------
@@ -258,5 +278,21 @@ mod tests {
     fn page_bounds_zero_limit() {
         let (s, e, c) = page_bounds(5, 0, 10);
         assert_eq!((s, e, c), (5, 5, 0));
+    }
+
+    #[test]
+    fn archival_read_limit_is_capped_to_policy() {
+        assert_eq!(validate_archival_limit(0), Err(Error::PaginationLimitZero));
+        assert_eq!(validate_archival_limit(50), Ok(50));
+        assert_eq!(validate_archival_limit(500), Ok(MAX_ARCHIVAL_PAGE_SIZE));
+    }
+
+    #[test]
+    fn archival_compaction_limit_is_strict() {
+        assert_eq!(validate_archival_compaction_limit(1), Ok(1));
+        assert_eq!(
+            validate_archival_compaction_limit(MAX_ARCHIVAL_COMPACTION_LIMIT + 1),
+            Err(Error::InvalidBatchWorkLimit)
+        );
     }
 }

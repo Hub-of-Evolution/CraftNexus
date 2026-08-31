@@ -82,6 +82,17 @@ pub const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 /// Default timelock delay for pending critical admin actions (24 hours).
 pub const ADMIN_ACTION_TIMELOCK_DELAY: u64 = 24 * 60 * 60;
 
+/// Duration an active record remains in the fast active index before becoming
+/// eligible for immutable archival storage (90 days).
+pub const ARCHIVE_RETENTION_WINDOW: u64 = 90 * 24 * 60 * 60;
+
+/// Retention period for immutable archival summaries used for fund reconstruction
+/// (7 years).
+pub const ARCHIVE_SUMMARY_RETENTION_WINDOW: u64 = 7 * 365 * 24 * 60 * 60;
+
+/// Maximum time span processed in a single archival compaction batch (1 day).
+pub const ARCHIVE_COMPACTION_BATCH_SPAN: u64 = 24 * 60 * 60;
+
 // ── Boundary helpers ──────────────────────────────────────────────────────────
 
 /// Returns `true` if the window that opened at `start` with `duration` seconds
@@ -139,6 +150,50 @@ pub fn is_deadline_reached(now: u64, deadline_ts: u64) -> bool {
 #[inline]
 pub fn is_deadline_pending(now: u64, deadline_ts: u64) -> bool {
     now < deadline_ts
+}
+
+// ── Archival record policy ────────────────────────────────────────────────────
+
+/// Returns the active-record cutoff timestamp. Records with `record_time < cutoff`
+/// are eligible for archival; records with `record_time >= cutoff` are active and
+/// must never be pruned by historical maintenance.
+#[inline]
+pub fn archival_cutoff(now: u64, retention_window: u64) -> u64 {
+    now.saturating_sub(retention_window)
+}
+
+/// Returns `true` if a record timestamp is still active and must not be archived.
+#[inline]
+pub fn is_active_record(now: u64, record_time: u64, retention_window: u64) -> bool {
+    record_time >= archival_cutoff(now, retention_window)
+}
+
+/// Returns `true` if a record timestamp is eligible for migration to archival storage.
+#[inline]
+pub fn is_archival_record(now: u64, record_time: u64, retention_window: u64) -> bool {
+    !is_active_record(now, record_time, retention_window)
+}
+
+/// Returns `true` if an archival summary created at `archived_at` is still within
+/// its retention period and must not be pruned.
+#[inline]
+pub fn is_archival_summary_retained(now: u64, archived_at: u64) -> bool {
+    !is_window_elapsed(now, archived_at, ARCHIVE_SUMMARY_RETENTION_WINDOW)
+}
+
+/// Returns the exclusive upper bound (in `record_time` space) for the next archival
+/// compaction batch starting at `cursor`. The batch is bounded by `batch_span` seconds
+/// and never extends past the active-record cutoff, so active records are untouched.
+#[inline]
+pub fn archival_compaction_batch_end(
+    now: u64,
+    cursor: u64,
+    retention_window: u64,
+    batch_span: u64,
+) -> u64 {
+    let cutoff = archival_cutoff(now, retention_window);
+    let end = cursor.saturating_add(batch_span);
+    if end < cutoff { end } else { cutoff }
 }
 
 // ── Rate-limit bucketing ──────────────────────────────────────────────────────
