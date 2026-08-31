@@ -425,6 +425,12 @@ const UNFUNDED_CANCEL_TIMEOUT: u64 = time_policy::UNFUNDED_CANCEL_TIMEOUT;
 const MAX_RECURRING_ESCROW_ID: u64 = u64::MAX - 1;
 /// Deterministic fee policy version. Bump when fee allocation formulas change.
 const FEE_POLICY_VERSION: u32 = 1;
+/// Schema version for the observability snapshot returned by
+/// `get_observability_snapshot`. Bump when adding or reordering fields so
+/// off-chain dashboards never misread a historical snapshot.
+const OBSERVABILITY_SNAPSHOT_VERSION: u32 = 1;
+/// Persistent key for the admin-controlled observability reset epoch.
+const OBSERVABILITY_RESET_EPOCH: Symbol = symbol_short!("OBS_EPOC");
 /// Maximum number of upgrade records retained in `UpgradeHistory`. Older
 /// records are dropped FIFO once the cap is reached. Sized so a contract
 /// upgraded twice a year for ~16 years still has full visibility.
@@ -818,6 +824,26 @@ pub struct PlatformStats {
     pub total_escrows: u32,
     pub active_users: u32,
     pub whitelist_count: u32,
+}
+
+/// Aggregate, non-sensitive observability snapshot for off-chain monitoring.
+///
+/// Every count is derived with saturating arithmetic and intentionally omits
+/// buyer, seller, arbitrator, and token addresses.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ObservabilitySnapshot {
+    /// Schema version for this snapshot; bump when fields change.
+    pub version: u32,
+    /// Incremented by `reset_observability_metrics` to delineate eras.
+    pub reset_epoch: u64,
+    pub total_escrows: u64,
+    pub total_volume: i128,
+    pub active_disputes: u64,
+    pub staked_artisans: u64,
+    pub total_failures: u64,
+    pub active_jobs: u64,
 }
 
 #[contracttype]
@@ -10874,6 +10900,141 @@ impl CraftNexusContract {
         }
 
         Ok(unallocated)
+    }
+
+    /// Returns an aggregate observability snapshot for off-chain monitoring.
+    ///
+    /// The snapshot is aggregate-only: no buyer, seller, arbitrator, or token
+    /// addresses are included.
+    pub fn get_observability_snapshot(env: Env) -> ObservabilitySnapshot {
+        ObservabilitySnapshot {
+            version: OBSERVABILITY_SNAPSHOT_VERSION,
+            reset_epoch: env
+                .storage()
+                .persistent()
+                .get::<Symbol, u64>(&OBSERVABILITY_RESET_EPOCH)
+                .unwrap_or(0),
+            total_escrows: env
+                .storage()
+                .persistent()
+                .get::<DataKey, u32>(&DataKey::EscrowCount)
+                .unwrap_or(0) as u64,
+            total_volume: env
+                .storage()
+                .persistent()
+                .get::<DataKey, i128>(&DataKey::TotalVolume)
+                .unwrap_or(0),
+            active_disputes: env
+                .storage()
+                .persistent()
+                .get::<DataKey, u32>(&DataKey::ActiveDisputeCount)
+                .unwrap_or(0) as u64,
+            staked_artisans: env
+                .storage()
+                .persistent()
+                .get::<DataKey, u32>(&DataKey::StakedArtisanCount)
+                .unwrap_or(0) as u64,
+            total_failures: Self::compute_total_failures(&env),
+            active_jobs: Self::compute_active_jobs(&env),
+        }
+    }
+
+    fn compute_total_failures(env: &Env) -> u64 {
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EmergencyOperationHistoryCount)
+            .unwrap_or(0);
+        let mut failures = 0u64;
+        for index in 0..count {
+            if let Some(op) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, EmergencyOperation>(
+                    &DataKey::EmergencyOperationHistoryIndexed(index),
+                )
+            {
+                if op.phase == EmergencyOpPhase::Failed {
+                    failures = failures.saturating_add(1);
+                }
+            }
+        }
+        failures
+    }
+
+    fn compute_active_jobs(env: &Env) -> u64 {
+        let escrow_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EscrowCount)
+            .unwrap_or(0);
+        let mut active = 0u64;
+        for index in 0..escrow_count {
+            if let Some(order_id) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, u32>(&DataKey::GlobalEscrowIdIndexed(index))
+            {
+                if let Some(escrow) = env
+                    .storage()
+                    .persistent()
+                    .get::<(Symbol, u32), Escrow>(&(ESCROW, order_id))
+                {
+                    if matches!(
+                        escrow.status,
+                        EscrowStatus::Active
+                            | EscrowStatus::Disputed
+                            | EscrowStatus::ReleasePending
+                            | EscrowStatus::RefundPending
+                            | EscrowStatus::DisputePending
+                            | EscrowStatus::SettlementPending
+                    ) {
+                        active = active.saturating_add(1);
+                    }
+                }
+            }
+        }
+        let recurring_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RecurringEscrowCount)
+            .unwrap_or(0);
+        for id in 1..=recurring_count {
+            if let Some(recurring) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, RecurringEscrow>(&DataKey::RecurringEscrow(id))
+            {
+                if recurring.is_active {
+                    active = active.saturating_add(1);
+                }
+            }
+        }
+        active
+    }
+
+    /// Resets the observability reset epoch.
+    ///
+    /// Monotonic counters are retained; off-chain tools should treat the new
+    /// epoch as a fresh comparison baseline.
+    pub fn reset_observability_metrics(env: Env) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        let epoch: u64 = env
+            .storage()
+            .persistent()
+            .get::<Symbol, u64>(&OBSERVABILITY_RESET_EPOCH)
+            .unwrap_or(0);
+        let next_epoch = epoch.saturating_add(1);
+        env.storage()
+            .persistent()
+            .set(&OBSERVABILITY_RESET_EPOCH, &next_epoch);
+        env.storage().persistent().extend_ttl(
+            &OBSERVABILITY_RESET_EPOCH,
+            TTL_THRESHOLD,
+            TTL_EXTENSION,
+        );
+        Ok(())
     }
 }
 
