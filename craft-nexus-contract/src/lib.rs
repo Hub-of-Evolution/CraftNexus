@@ -37,6 +37,8 @@ mod test;
 mod pagination_boundary_test;
 #[cfg(test)]
 mod prop_test;
+#[cfg(test)]
+mod token_compatibility_test;
 
 // Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
 // artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
@@ -3428,15 +3430,21 @@ impl CraftNexusContract {
     /// Tokens with more than 18 decimal places would overflow the volume
     /// normalization arithmetic in the onboarding contract and are rejected
     /// with [`Error::InvalidTokenDecimals`].
-    pub fn whitelist_token(env: Env, token: Address) -> Result<(), Error> {
-        let _guard = ReentryGuardScope::new(&env);
-        let config = Self::get_platform_config_internal(&env);
-        config.admin.require_auth();
-
-        // Probe the SEP-41 read interface before persisting an administrator
-        // supplied address. Missing or malformed methods become a stable
-        // contract error instead of an opaque host panic.
-        let token_client = token::Client::new(&env, &token);
+    /// Validate that a token contract implements the required SEP-41 interface
+    /// without transferring or mutating any customer funds (#1063).
+    ///
+    /// Checks:
+    /// - `decimals() -> u32` exists and is within 0..=18
+    /// - `balance(Address) -> i128` exists and is callable
+    /// - `transfer(Address, Address, i128)` exists and is callable (probed via
+    ///   a zero-amount self-transfer `contract -> contract, 0` so no funds move)
+    ///
+    /// Missing or malformed methods return `Error::UnsupportedToken`.
+    /// A `decimals` value outside 0..=18 returns `Error::InvalidTokenDecimals`.
+    /// The probe is read-only in effect: it never moves customer balances and
+    /// touches only the contract's own address with amount `0`.
+    fn ensure_token_interface(env: &Env, token: &Address) -> Result<(), Error> {
+        let token_client = token::Client::new(env, token);
         let decimals = token_client
             .try_decimals()
             .map_err(|_| Error::UnsupportedToken)?
@@ -3448,6 +3456,41 @@ impl CraftNexusContract {
             .try_balance(&env.current_contract_address())
             .map_err(|_| Error::UnsupportedToken)?
             .map_err(|_| Error::UnsupportedToken)?;
+        // Non-mutating transfer probe: zero self-transfer never moves customer
+        // funds but confirms the `transfer` entrypoint exists and is callable.
+        let contract = env.current_contract_address();
+        token_client
+            .try_transfer(&contract, &contract, &0)
+            .map_err(|_| Error::UnsupportedToken)?
+            .map_err(|_| Error::UnsupportedToken)?;
+        Ok(())
+    }
+
+    /// Public read-only compatibility check for any token address (#1063).
+    ///
+    /// Admins and integrators can call this off-chain before `whitelist_token`
+    /// to preflight compatibility without persisting state or moving funds.
+    /// Returns `Ok(())` when the contract exposes the required `decimals`,
+    /// `balance`, and `transfer` interface; otherwise returns
+    /// `Error::UnsupportedToken` or `Error::InvalidTokenDecimals`.
+    pub fn validate_token_compatibility(env: Env, token: Address) -> Result<(), Error> {
+        Self::ensure_token_interface(&env, &token)
+    }
+
+    /// Returns `true` when `validate_token_compatibility` would succeed.
+    ///
+    /// Convenience read-only wrapper for UIs that prefer a boolean check over
+    /// handling contract errors. Never mutates state or moves funds.
+    pub fn is_token_supported(env: Env, token: Address) -> bool {
+        Self::ensure_token_interface(&env, &token).is_ok()
+    }
+
+    pub fn whitelist_token(env: Env, token: Address) -> Result<(), Error> {
+        let _guard = ReentryGuardScope::new(&env);
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        Self::ensure_token_interface(&env, &token)?;
 
         Self::migrate_legacy_whitelisted_tokens(&env);
         let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
