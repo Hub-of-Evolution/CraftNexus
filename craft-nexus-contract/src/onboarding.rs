@@ -167,6 +167,8 @@ const DEFAULT_MAX_SUCCESSFUL_PER_WINDOW: u32 = 5;
 const DEFAULT_MIN_REPUTATION_SETTLEMENT: i128 = 10_000_000;
 /// Bounded reputation history retained per user for abuse-pattern detection.
 const MAX_REPUTATION_HISTORY: u32 = 20;
+/// Version of the observability metrics schema.
+const OBSERVABILITY_METRICS_VERSION: u32 = 1;
 /// Cap decay intervals applied in one call to bound CPU (≈ 64 periods).
 const MAX_DECAY_INTERVALS_PER_CALL: u64 = 64;
 
@@ -189,7 +191,22 @@ mod onboarding_test;
 /// accidental expiry of user profiles.
 #[contracttype]
 #[derive(Clone)]
+pub struct ObservabilityMetrics {
+    pub version: u32,
+    pub escrow_volume: i128,
+    pub disputes: u64,
+    pub staking_events: u64,
+    pub failures: u64,
+    pub active_jobs: u64,
+    pub reset_count: u64,
+    pub last_reset_ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub enum DataKey {
+    /// Global observability metrics snapshot.
+    ObservabilityMetrics,
     /// Maps a user address to their flat persisted profile record
     UserProfile(Address),
     /// Dedicated portfolio CID storage keyed by user to keep the main profile flat.
@@ -3096,6 +3113,44 @@ impl OnboardingContract {
     /// # Returns
     /// `UserProfile` if a profile exists, otherwise panics with
     /// `Error::UserNotFound`.
+    pub fn get_observability_metrics(env: Env) -> ObservabilityMetrics {
+        let metrics: Option<ObservabilityMetrics> = env.storage().get(&DataKey::ObservabilityMetrics);
+        metrics.unwrap_or(ObservabilityMetrics {
+            version: OBSERVABILITY_METRICS_VERSION,
+            escrow_volume: 0,
+            disputes: 0,
+            staking_events: 0,
+            failures: 0,
+            active_jobs: 0,
+            reset_count: 0,
+            last_reset_ledger: 0,
+        })
+    }
+
+    pub fn reset_observability_metrics(env: Env) {
+        let config: OnboardingConfig = env.storage().get(&DataKey::Config).unwrap();
+        config.platform_admin.require_auth();
+        let mut metrics = env.storage().get(&DataKey::ObservabilityMetrics).unwrap_or(ObservabilityMetrics {
+            version: OBSERVABILITY_METRICS_VERSION,
+            escrow_volume: 0,
+            disputes: 0,
+            staking_events: 0,
+            failures: 0,
+            active_jobs: 0,
+            reset_count: 0,
+            last_reset_ledger: 0,
+        });
+        metrics.version = OBSERVABILITY_METRICS_VERSION;
+        metrics.escrow_volume = 0;
+        metrics.disputes = 0;
+        metrics.staking_events = 0;
+        metrics.failures = 0;
+        metrics.active_jobs = 0;
+        metrics.reset_count += 1;
+        metrics.last_reset_ledger = env.ledger().sequence();
+        env.storage().set(&DataKey::ObservabilityMetrics, &metrics);
+    }
+
     pub fn get_user(env: Env, user: Address) -> UserProfile {
         Self::get_user_profile(&env, user)
     }
