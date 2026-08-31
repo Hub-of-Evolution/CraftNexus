@@ -272,6 +272,9 @@ pub enum Error {
     /// An active dispute, recurring escrow, or pending upgrade exists that blocks
     /// the requested emergency operation from starting (#1072).
     EmergencyConflictActive = 86,
+    /// Archival policy parameters are invalid (zero retention, zero batch size,
+    /// or batch size above MAX_ARCHIVAL_COMPACTION_BATCH).
+    InvalidArchivalPolicy = 87,
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -429,6 +432,12 @@ const FEE_POLICY_VERSION: u32 = 1;
 /// records are dropped FIFO once the cap is reached. Sized so a contract
 /// upgraded twice a year for ~16 years still has full visibility.
 const MAX_UPGRADE_HISTORY: u32 = 32;
+/// Default retention window for immutable archival summaries (90 days).
+const DEFAULT_ARCHIVAL_RETENTION_WINDOW: u64 = 90 * 24 * 60 * 60;
+/// Default number of archive index entries scanned per compaction step.
+const DEFAULT_ARCHIVAL_COMPACTION_BATCH: u32 = 25;
+/// Upper bound for one archival maintenance step (migration or compaction).
+const MAX_ARCHIVAL_COMPACTION_BATCH: u32 = 50;
 
 /// Symbol topics emitted alongside `UpgradeProposalEvent`.
 const UPGRADE_PROPOSED: Symbol = symbol_short!("UPG_PROP");
@@ -682,6 +691,16 @@ pub enum DataKey {
     EmergencyOperationHistoryIndexed(u32),
     /// Count of currently active recurring escrows for conflict detection (#1072)
     ActiveRecurringCount,
+    /// Configured archival record policy.
+    ArchivalPolicy,
+    /// Immutable archival summary of a terminal escrow, keyed by order ID.
+    ArchivalSummary(u32),
+    /// Monotonic count of archival summaries ever written.
+    ArchivalSummaryCount,
+    /// Indexed order IDs of archival summaries, keyed by archive position.
+    ArchivalSummaryIndexed(u32),
+    /// Next cursor for bounded/resumable archival compaction.
+    ArchivalCompactionCursor,
 }
 
 /// Emergency operation kinds: the four types of critical control operations
@@ -738,6 +757,41 @@ pub struct EmergencyOperation {
     pub success: bool,
     /// Optional: amount affected by operation (e.g., swept funds)
     pub amount: i128,
+}
+
+/// Policy controlling archival retention and maintenance batching.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArchivalRecordPolicy {
+    pub retention_window: u64,
+    pub compaction_batch_size: u32,
+}
+
+/// Immutable summary of a terminal escrow.
+///
+/// Written once an escrow reaches a terminal state and used for fund
+/// reconstruction after the active escrow record is pruned by historical
+/// maintenance. `finalized_at` is the ledger timestamp when the summary was
+/// created, which also drives the retention window for compaction.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArchivalSummary {
+    pub order_id: u32,
+    pub escrow: Escrow,
+    pub finalized_at: u64,
+}
+
+/// Progress for a bounded archival compaction run.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArchivalCompactionProgress {
+    pub cursor: u32,
+    pub scanned: u32,
+    pub pruned: u32,
+    pub total: u32,
 }
 
 #[contracttype]
@@ -10836,6 +10890,162 @@ impl CraftNexusContract {
         env.storage()
             .persistent()
             .get(&DataKey::ReconciliationRepairPlan(plan_id))
+    }
+
+    /// Returns the current archival record policy, using defaults when unset.
+    pub fn get_archival_policy(env: Env) -> ArchivalRecordPolicy {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ArchivalPolicy)
+            .unwrap_or(ArchivalRecordPolicy {
+                retention_window: DEFAULT_ARCHIVAL_RETENTION_WINDOW,
+                compaction_batch_size: DEFAULT_ARCHIVAL_COMPACTION_BATCH,
+            })
+    }
+
+    /// Sets the archival record policy (admin only).
+    pub fn set_archival_policy(
+        env: Env,
+        retention_window: u64,
+        compaction_batch_size: u32,
+    ) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        if retention_window == 0
+            || compaction_batch_size == 0
+            || compaction_batch_size > MAX_ARCHIVAL_COMPACTION_BATCH
+        {
+            return Err(Error::InvalidArchivalPolicy);
+        }
+        let policy = ArchivalRecordPolicy {
+            retention_window,
+            compaction_batch_size,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::ArchivalPolicy, &policy);
+        Self::extend_persistent(&env, &DataKey::ArchivalPolicy);
+        Ok(())
+    }
+
+    /// Returns the immutable archival summary for an order, if one exists.
+    pub fn get_archival_summary(env: Env, order_id: u32) -> Option<ArchivalSummary> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ArchivalSummary(order_id))
+    }
+
+    fn write_archival_summary_for_escrow(env: &Env, escrow: &Escrow) -> Result<bool, Error> {
+        let order_id = escrow.id as u32;
+        let summary_key = DataKey::ArchivalSummary(order_id);
+        if env.storage().persistent().has(&summary_key) {
+            return Ok(false);
+        }
+        if !matches!(
+            escrow.status,
+            EscrowStatus::Released | EscrowStatus::Refunded | EscrowStatus::Resolved
+        ) {
+            return Ok(false);
+        }
+        let summary = ArchivalSummary {
+            order_id,
+            escrow: escrow.clone(),
+            finalized_at: env.ledger().timestamp(),
+        };
+        env.storage().persistent().set(&summary_key, &summary);
+        Self::extend_persistent(env, &summary_key);
+
+        let index = Self::get_persistent_u32(env, &DataKey::ArchivalSummaryCount);
+        let index_key = DataKey::ArchivalSummaryIndexed(index);
+        env.storage().persistent().set(&index_key, &order_id);
+        Self::extend_persistent(env, &index_key);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ArchivalSummaryCount, &(index + 1));
+        Self::extend_persistent(env, &DataKey::ArchivalSummaryCount);
+        Ok(true)
+    }
+
+    /// Archives a single terminal escrow as an immutable summary (admin only).
+    pub fn archive_terminal_escrow(env: Env, order_id: u32) -> Result<bool, Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        let escrow: Escrow = env
+            .storage()
+            .persistent()
+            .get(&(ESCROW, order_id))
+            .ok_or(Error::EscrowNotFound)?;
+        if !matches!(
+            escrow.status,
+            EscrowStatus::Released | EscrowStatus::Refunded | EscrowStatus::Resolved
+        ) {
+            return Err(Error::InvalidEscrowState);
+        }
+        Self::write_archival_summary_for_escrow(&env, &escrow)
+    }
+
+    /// Compacts expired archival summaries in bounded, resumable batches (admin only).
+    ///
+    /// Only `ArchivalSummary*` keys are examined; active escrow records and
+    /// active indexes are never touched by historical maintenance.
+    pub fn compact_archival_records(
+        env: Env,
+        cursor: u32,
+        limit: u32,
+    ) -> Result<ArchivalCompactionProgress, Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let policy = Self::get_archival_policy(env.clone());
+        let limit = limit
+            .min(policy.compaction_batch_size)
+            .min(MAX_ARCHIVAL_COMPACTION_BATCH);
+        if limit == 0 {
+            return Err(Error::PaginationLimitZero);
+        }
+        let total: u32 = Self::get_persistent_u32(&env, &DataKey::ArchivalSummaryCount);
+        if cursor > total {
+            return Err(Error::PaginationCursorInvalid);
+        }
+        let end = cursor.saturating_add(limit).min(total);
+        let mut scanned = 0u32;
+        let mut pruned = 0u32;
+        for index in cursor..end {
+            let index_key = DataKey::ArchivalSummaryIndexed(index);
+            let Some(order_id) = env.storage().persistent().get::<DataKey, u32>(&index_key)
+            else {
+                continue;
+            };
+            let summary_key = DataKey::ArchivalSummary(order_id);
+            if let Some(summary) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, ArchivalSummary>(&summary_key)
+            {
+                let age = env.ledger().timestamp().saturating_sub(summary.finalized_at);
+                if age >= policy.retention_window {
+                    env.storage().persistent().remove(&summary_key);
+                    env.storage().persistent().remove(&index_key);
+                    pruned += 1;
+                }
+            }
+            scanned += 1;
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::ArchivalCompactionCursor, &end);
+        Self::extend_persistent(&env, &DataKey::ArchivalCompactionCursor);
+        Ok(ArchivalCompactionProgress {
+            cursor: end,
+            scanned,
+            pruned,
+            total,
+        })
+    }
+
+    /// Returns the last persisted archival compaction cursor.
+    pub fn get_archival_compaction_cursor(env: Env) -> u32 {
+        Self::get_persistent_u32(&env, &DataKey::ArchivalCompactionCursor)
     }
 
     /// Recovery function to sweep unallocated tokens from the contract (admin only).
