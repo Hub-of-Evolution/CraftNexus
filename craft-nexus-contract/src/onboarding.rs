@@ -170,6 +170,63 @@ const MAX_REPUTATION_HISTORY: u32 = 20;
 /// Cap decay intervals applied in one call to bound CPU (≈ 64 periods).
 const MAX_DECAY_INTERVALS_PER_CALL: u64 = 64;
 
+/// Immutable snapshot of user/global state at settlement decision time.
+#[contracttype]
+#[derive(Clone)]
+pub struct SettlementSnapshot {
+    pub revision: u64,
+    pub user: Address,
+    pub role: UserRole,
+    pub metrics: UserMetrics,
+    pub trust_score: u32,
+    pub reputation_policy: ReputationPolicy,
+    pub min_reputation_settlement: i128,
+    pub config: OnboardingConfig,
+    pub timestamp: u64,
+}
+
+#[contractimpl]
+impl OnboardingContract {
+    /// Creates an immutable settlement snapshot for a user and returns its revision.
+    /// Can only be called by the configured escrow contract (or platform_admin fallback).
+    pub fn create_settlement_snapshot(env: Env, user: Address) -> u64 {
+        let config = Self::get_config(env.clone());
+        let caller = env.invoker();
+        let authorized = match config.escrow_contract.clone() {
+            Some(escrow) => caller == escrow,
+            None => caller == config.platform_admin.clone(),
+        };
+        if !authorized {
+            panic!("unauthorized");
+        }
+
+        let mut counter: u64 = env.storage().persistent().get(&DataKey::SettlementSnapshotCounter).unwrap_or(0);
+        counter += 1;
+        let revision = counter;
+
+        let snapshot = SettlementSnapshot {
+            revision,
+            user: user.clone(),
+            role: Self::get_user_role(env.clone(), user.clone()),
+            metrics: Self::get_user_metrics(env.clone(), user.clone()),
+            trust_score: Self::get_trust_score(env.clone(), user.clone()),
+            reputation_policy: Self::get_reputation_policy(env.clone()),
+            min_reputation_settlement: Self::get_min_reputation_settlement(env.clone()),
+            config: Self::get_config(env.clone()),
+            timestamp: env.ledger().timestamp(),
+        };
+
+        env.storage().persistent().set(&DataKey::SettlementSnapshot(revision), &snapshot);
+        env.storage().persistent().set(&DataKey::SettlementSnapshotCounter, &revision);
+        revision
+    }
+
+    /// Returns the immutable settlement snapshot for audit by revision.
+    pub fn get_settlement_snapshot(env: Env, revision: u64) -> SettlementSnapshot {
+        env.storage().persistent().get(&DataKey::SettlementSnapshot(revision)).expect("settlement snapshot not found")
+    }
+}
+
 #[cfg(not(target_family = "wasm"))]
 #[path = "decimal_test_token.rs"]
 pub mod decimal_test_token;
@@ -238,6 +295,10 @@ pub enum DataKey {
     ReputationHistoryCount(Address),
     /// Indexed compact reputation history entry (#939)
     ReputationHistoryIndexed(Address, u32),
+    /// Immutable settlement snapshot keyed by revision.
+    SettlementSnapshot(u64),
+    /// Monotonic counter for settlement snapshot revisions.
+    SettlementSnapshotCounter,
     /// Proof-of-Humanity credential record keyed by user address (#940)
     UserPohCredential(Address),
     /// Secondary index mapping proof-of-humanity credential hash to owner address (#940)
