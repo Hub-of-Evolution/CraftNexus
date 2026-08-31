@@ -46,6 +46,92 @@ pub mod onboarding;
 /// Centralized pagination input validation (Issue #1022).
 pub mod pagination_validation;
 
+/// Immutable settlement snapshots.
+///
+/// A snapshot captures all balances, fees, roles, and policy values at a single
+/// point in time. Once stored, a snapshot cannot be modified; this guarantees
+/// that dispute or refund decisions are bound to the exact state that existed
+/// when the snapshot was taken. Later configuration changes do not affect a
+/// pending decision because every action is tied to the snapshot revision.
+pub mod settlement_snapshot {
+    use soroban_sdk::{
+        contracttype, symbol_short, Address, Env, Map, Symbol, Val,
+    };
+
+    #[contracttype]
+    #[derive(Clone)]
+    pub struct SettlementSnapshot {
+        pub id: u64,
+        pub escrow_id: u64,
+        pub balances: Map<Address, i128>,
+        pub fees: Map<Address, i128>,
+        pub roles: Map<Address, Symbol>,
+        pub policy: Map<Symbol, Val>,
+        pub created_at: u64,
+        pub revision: u64,
+    }
+
+    const SNAPSHOT_PREFIX: Symbol = symbol_short!("snap");
+
+    /// Persists a settlement snapshot and returns its unique snapshot id.
+    /// The snapshot id is also the revision number; newer snapshots always
+    /// have a higher revision, so callers can detect configuration changes.
+    pub fn capture_snapshot(
+        env: &Env,
+        escrow_id: u64,
+        balances: Map<Address, i128>,
+        fees: Map<Address, i128>,
+        roles: Map<Address, Symbol>,
+        policy: Map<Symbol, Val>,
+    ) -> u64 {
+        let mut revision = env
+            .storage()
+            .get(&SNAPSHOT_PREFIX)
+            .unwrap_or(None)
+            .unwrap_or(0u64);
+        revision += 1;
+        let snapshot = SettlementSnapshot {
+            id: revision,
+            escrow_id,
+            balances,
+            fees,
+            roles,
+            policy,
+            created_at: env.ledger().timestamp(),
+            revision,
+        };
+        env.storage().set(&(SNAPSHOT_PREFIX, revision), &snapshot);
+        env.storage().set(&SNAPSHOT_PREFIX, &revision);
+        revision
+    }
+
+    /// Loads a snapshot by id for audit or verification.
+    pub fn get_snapshot(env: &Env, id: u64) -> Option<SettlementSnapshot> {
+        env.storage().get(&(SNAPSHOT_PREFIX, id)).unwrap_or(None)
+    }
+
+    /// Returns the revision of a snapshot, if it exists.
+    pub fn snapshot_revision(env: &Env, id: u64) -> Option<u64> {
+        get_snapshot(env, id).map(|s| s.revision)
+    }
+
+    /// Returns true when the given snapshot id is the latest revision,
+    /// meaning no configuration-changing snapshot has been captured since.
+    pub fn is_current_revision(env: &Env, id: u64) -> bool {
+        match snapshot_revision(env, id) {
+            Some(rev) => {
+                let latest = env
+                    .storage()
+                    .get(&SNAPSHOT_PREFIX)
+                    .unwrap_or(None)
+                    .unwrap_or(0u64);
+                rev == latest
+            }
+            None => false,
+        }
+    }
+}
+
 /// Error codes grouped by category for off-chain triage.
 ///
 /// # Categories
