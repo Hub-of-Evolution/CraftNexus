@@ -2465,7 +2465,7 @@ impl CraftNexusContract {
         match kind {
             EmergencyOpKind::AdminRecovery => {
                 // Recovery blocked if disputes exist, upgrades exist, or recurring escrows exist
-                if Self::get_active_dispute_count(env) > 0 {
+                if Self::get_active_dispute_count(env.clone()) > 0 {
                     return Err(Error::EmergencyConflictActive);
                 }
                 if env
@@ -2475,7 +2475,7 @@ impl CraftNexusContract {
                 {
                     return Err(Error::EmergencyConflictActive);
                 }
-                if Self::get_active_recurring_count(env) > 0 {
+                if Self::get_active_recurring_count(env.clone()) > 0 {
                     return Err(Error::EmergencyConflictActive);
                 }
             }
@@ -9230,8 +9230,14 @@ impl CraftNexusContract {
         }
         Self::extend_persistent(&env, &(ESCROW, order_id));
         let snapshot = snapshot_opt.unwrap();
+        let mut escrow = snapshot.clone();
 
         let config = Self::get_platform_config_internal(&env);
+        
+        // Get dispute initiated timestamp and current time
+        let initiated_at = escrow.dispute_initiated_at.unwrap_or(0);
+        let current_time = env.ledger().timestamp();
+        
         // The deadline guard: if the dispute is still within the allowed window
         // the arbitrator must resolve it via `resolve_dispute`. Returning an
         // error (rather than panicking) allows the caller to detect this case
@@ -10002,8 +10008,8 @@ impl CraftNexusContract {
             return Err(Error::Unauthorized);
         }
         let operation_id = Self::onboarding_operation_id(&env, b"accept_partial_refund:", order_id);
-        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
-        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+        Self::authorize_onboarding_state(&env, &snapshot.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &snapshot.seller, operation_id, UserRole::Artisan);
 
         let (_seller_gross, allocation) =
             Self::validate_partial_refund_solvency(&env, &snapshot, proposal.refund_amount)?;
@@ -10072,6 +10078,7 @@ impl CraftNexusContract {
         Self::authorize_onboarding_state(&env, &proposal.proposed_by, operation_id, expected_role);
 
         // Remove the proposal from storage
+        let proposal_key = Self::proposal_key(order_id);
         env.storage().persistent().remove(&proposal_key);
 
         Ok(())
