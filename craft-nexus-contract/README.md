@@ -768,6 +768,7 @@ Errors are grouped by category for off-chain triage. Use `is_retryable(error)` i
 | `40` | `InvalidMetadataHash` | Provided metadata hash is invalid |
 | `41` | `InvalidIpfsHash` | Provided IPFS hash is invalid |
 | `42` | `NotAnUpgradeSigner` | Caller is not an authorized upgrade signer |
+| `80` | `EscrowAlreadyExists` | An escrow with this order ID already exists; duplicate identifiers are rejected and state is left unchanged |
 
 Onboarding contract currently reverts with explicit panic messages (for example `Username too short`, `Username already taken`, `User not found`).
 
