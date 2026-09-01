@@ -85,8 +85,14 @@ fi
 
 echo "🚀 Starting deployment to $NETWORK..."
 
-# Build contract artifacts
-./scripts/build.sh
+if [ "${SKIP_SAFETY_GATE:-0}" != "1" ]; then
+    echo "Running formal contract safety gate (#1148)..."
+    ./scripts/safety_gate.sh
+    RUN_TESTS=0 ./scripts/build.sh
+else
+    echo "⚠️  SKIP_SAFETY_GATE=1 — safety gate skipped (not permitted for production releases)."
+    ./scripts/build.sh
+fi
 
 # Configure network in Stellar CLI if not present
 stellar network add \
