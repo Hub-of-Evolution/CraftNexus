@@ -493,3 +493,54 @@ fn test_resolve_expired_dispute_decrements_active_obligations() {
     let escrow = client.get_escrow(&order_id);
     assert_eq!(escrow.status, EscrowStatus::Resolved);
 }
+
+#[test]
+fn test_expiry_accepted_only_at_exact_deadline() {
+    let (env, client, buyer, seller, token_addr, _, _, _, _) = setup_test();
+    let amount = 1_000_000i128;
+    let order_id = 1u32;
+    create_and_dispute_escrow(&client, &buyer, &seller, &token_addr, amount, order_id);
+
+    let escrow = client.get_escrow(&order_id);
+    let initiated = escrow.dispute_initiated_at.expect("dispute clock");
+    let deadline = initiated + DEFAULT_MAX_DISPUTE_DURATION as u64;
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = deadline - 1;
+    });
+    assert_eq!(
+        client.try_resolve_expired_dispute(&order_id).unwrap_err(),
+        Ok(crate::Error::DisputeExpired)
+    );
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = deadline;
+    });
+    client.resolve_expired_dispute(&order_id);
+    assert_eq!(client.get_escrow(&order_id).status, EscrowStatus::Resolved);
+}
+
+#[test]
+fn test_expired_dispute_cannot_be_resolved_through_another_path() {
+    let (env, client, buyer, seller, token_addr, _, _, arbitrator, _) = setup_test();
+    let amount = 1_000_000i128;
+    let order_id = 1u32;
+    create_and_dispute_escrow(&client, &buyer, &seller, &token_addr, amount, order_id);
+    client.propose_partial_refund(&order_id, &300_000, &buyer);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_MAX_DISPUTE_DURATION as u64;
+    });
+
+    let resolve = client.try_resolve_dispute(
+        &order_id,
+        &crate::Resolution::RefundToBuyer,
+        &arbitrator,
+    );
+    assert!(resolve.is_err());
+    assert!(client.try_accept_partial_refund(&order_id).is_err());
+
+    client.resolve_expired_dispute(&order_id);
+    assert_eq!(client.get_escrow(&order_id).status, EscrowStatus::Resolved);
+    assert!(client.try_resolve_expired_dispute(&order_id).is_err());
+}
