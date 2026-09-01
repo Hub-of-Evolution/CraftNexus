@@ -36,20 +36,22 @@ fn setup_test(
     let token_admin_client = token::StellarAssetClient::new(env, &token_contract.address());
 
     let arbitrator = Address::generate(env);
-    let onboarding_contract = Address::generate(env);
 
     // Set a non-zero timestamp for event tests
     env.ledger().with_mut(|li| {
         li.timestamp = 1711368000; // 2024-03-25
     });
 
-    // Initialize contract with platform config (no onboarding contract for unit tests)
+    // Initialize contract with platform config (no onboarding contract for unit tests).
+    // Open mode (None): the #1157 onboarding-attestation integration requires a
+    // *registered* onboarding contract; passing an unregistered address would
+    // make every privileged call fail. Unit tests use open mode.
     client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract.clone()),
+        &None,
     );
 
     // Set min amount to 0 for tests to pass with small amounts
@@ -6911,6 +6913,159 @@ fn test_recurring_escrow_cycle_balances_to_cycle_amount() {
 }
 
 #[test]
+fn test_recurring_escrow_non_divisible_amount_no_drift() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, platform_wallet, _) = setup_test(&env, true);
+
+    // 1000 over 3 cycles is not divisible: 333, 333, 334 (remainder to final).
+    let total: i128 = 1000;
+    token_admin.mint(&buyer, &total);
+    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &total, &3600, &3);
+
+    let token_client = token::Client::new(&env, &token_id);
+
+    for cycle in 0u32..3u32 {
+        env.ledger().with_mut(|li| li.timestamp += 3601);
+        client.release_next_cycle(&rec.id);
+        let escrow = client.get_recurring_escrow(&rec.id);
+        // Invariant: released + remaining == total at every step (no drift).
+        assert_eq!(
+            escrow.released_amount + (escrow.total_amount - escrow.released_amount),
+            total,
+            "recurring accounting invariant violated after cycle {cycle}"
+        );
+        if cycle < 2 {
+            assert!(escrow.is_active);
+        }
+    }
+
+    let final_escrow = client.get_recurring_escrow(&rec.id);
+    // Final cycle released the exact residual.
+    assert_eq!(final_escrow.released_amount, total);
+    assert_eq!(final_escrow.total_amount - final_escrow.released_amount, 0);
+    assert!(!final_escrow.is_active);
+
+    // 333 + 333 + 334 == 1000; all funds left the contract (platform + seller).
+    let platform_balance = token_client.balance(&platform_wallet);
+    let seller_balance = token_client.balance(&seller);
+    assert_eq!(platform_balance + seller_balance, total);
+    assert_eq!(token_client.balance(&client.address), 0);
+}
+
+#[test]
+fn test_recurring_escrow_final_cycle_releases_exact_remainder() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    // 7 over 3 cycles: non-final cycles release 7/3 = 2; final releases 3.
+    let total: i128 = 7;
+    token_admin.mint(&buyer, &total);
+    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &total, &3600, &3);
+
+    for cycle in 0..2u32 {
+        env.ledger().with_mut(|li| li.timestamp += 3601);
+        client.release_next_cycle(&rec.id);
+        let escrow = client.get_recurring_escrow(&rec.id);
+        assert_eq!(escrow.released_amount, 2 * (cycle as i128 + 1));
+    }
+
+    env.ledger().with_mut(|li| li.timestamp += 3601);
+    client.release_next_cycle(&rec.id);
+    let final_escrow = client.get_recurring_escrow(&rec.id);
+    assert_eq!(final_escrow.released_amount, total);
+    assert!(!final_escrow.is_active);
+}
+
+#[test]
+fn test_recurring_escrow_cancellation_refunds_exact_residual() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    // 10 over 4 cycles: cycle amount = 10/4 = 2; residual after 1 release = 8.
+    let total: i128 = 10;
+    token_admin.mint(&buyer, &total);
+    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &total, &3600, &4);
+
+    env.ledger().with_mut(|li| li.timestamp += 3601);
+    client.release_next_cycle(&rec.id);
+
+    let before = client.get_recurring_escrow(&rec.id);
+    let expected_refund = before.total_amount - before.released_amount;
+    assert_eq!(expected_refund, 8);
+
+    client.cancel_recurring_escrow(&rec.id);
+
+    let token_client = token::Client::new(&env, &token_id);
+    // Buyer originally held `total`; the residual must be refunded in full.
+    assert_eq!(token_client.balance(&buyer), expected_refund);
+    assert_eq!(token_client.balance(&client.address), 0);
+}
+
+#[test]
+fn test_recurring_escrow_total_locked_consistency() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    let total: i128 = 1200; // 1200 / 3 = 400 per cycle
+    token_admin.mint(&buyer, &total);
+    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &total, &3600, &3);
+
+    // After creation, tracked locked == total.
+    let report = client.reconcile_token(&token_id, &0, &20);
+    assert!(!report.unresolved, "reconciliation must be clean after create");
+    assert_eq!(report.tracked_locked, total);
+
+    env.ledger().with_mut(|li| li.timestamp += 3601);
+    client.release_next_cycle(&rec.id);
+    let report = client.reconcile_token(&token_id, &0, &20);
+    assert!(!report.unresolved, "reconciliation must be clean after a release");
+    assert_eq!(report.tracked_locked, total - 400);
+
+    // Cancel the remaining balance (800): tracked locked must drop to zero.
+    client.cancel_recurring_escrow(&rec.id);
+    let report = client.reconcile_token(&token_id, &0, &20);
+    assert!(!report.unresolved, "reconciliation must be clean after cancel");
+    assert_eq!(report.tracked_locked, 0);
+}
+
+#[test]
+fn test_recurring_escrow_cannot_release_after_inactive() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    let total: i128 = 1000;
+    token_admin.mint(&buyer, &total);
+    let rec = client.create_recurring_escrow(&buyer, &seller, &token_id, &total, &3600, &2);
+
+    for _ in 0..2u32 {
+        env.ledger().with_mut(|li| li.timestamp += 3601);
+        client.release_next_cycle(&rec.id);
+    }
+
+    let final_escrow = client.get_recurring_escrow(&rec.id);
+    assert!(!final_escrow.is_active);
+    assert_eq!(final_escrow.released_amount, total);
+
+    // A further release must be rejected (escrow already inactive / exhausted).
+    env.ledger().with_mut(|li| li.timestamp += 3601);
+    assert_panic_contract_error(
+        client.try_release_next_cycle(&rec.id),
+        Error::InvalidEscrowState,
+    );
+
+    // Cancellation of a fully-released escrow must also be rejected.
+    assert_panic_contract_error(
+        client.try_cancel_recurring_escrow(&rec.id),
+        Error::InvalidEscrowState,
+    );
+}
+
+#[test]
 fn test_allocation_invariant_never_violated() {
     let env = Env::default();
     env.mock_all_auths();
@@ -7412,10 +7567,7 @@ mod reconciliation_report_tests {
         let env = Env::default();
         let (client, _, _, _, _, token_id, _) = setup_test(&env, true);
 
-        let result = client.query_reconciliation_report(&token_id, &0, &50);
-        assert!(result.is_ok(), "query should succeed on empty state");
-
-        let report = result.unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(report.balance, 0, "balance should be zero on empty state");
         assert_eq!(
             report.expected_locked, 0,
@@ -7455,6 +7607,8 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
         // Stake funds
@@ -7462,10 +7616,7 @@ mod reconciliation_report_tests {
         client.stake_tokens(&buyer, &token_id, &stake_amount);
 
         // Query reconciliation
-        let result = client.query_reconciliation_report(&token_id, &0, &50);
-        assert!(result.is_ok());
-
-        let report = result.unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.expected_locked, escrow_amount,
             "should correctly categorize escrow as locked"
@@ -7503,9 +7654,11 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.complete, true,
             "should complete on small dataset"
@@ -7535,12 +7688,14 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
         // Now artificially drain the contract balance (simulating a loss)
         // We do this by directly manipulating tracked totals in storage for test purposes
         // In production, this would indicate a real discrepancy
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.complete, true,
             "query should complete"
@@ -7571,11 +7726,13 @@ mod reconciliation_report_tests {
                 &(i as u32),
                 &None,
                 &None,
+                &None,
+                &None,
             );
         }
 
         // First page: 50 escrows
-        let page1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let page1 = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(page1.scanned_escrows, 50, "first page should scan 50 escrows");
         assert_eq!(page1.complete, false, "first page should not be complete");
         assert_eq!(
@@ -7585,8 +7742,7 @@ mod reconciliation_report_tests {
 
         // Second page: remaining 10 escrows
         let page2 = client
-            .query_reconciliation_report(&token_id, &page1.next_cursor, &50)
-            .unwrap();
+            .query_reconciliation_report(&token_id, &page1.next_cursor, &50);
         assert_eq!(page2.scanned_escrows, 10, "second page should scan 10 escrows");
         assert_eq!(page2.complete, true, "second page should be complete");
         assert_eq!(
@@ -7614,11 +7770,13 @@ mod reconciliation_report_tests {
                 &(i as u32),
                 &None,
                 &None,
+                &None,
+                &None,
             );
         }
 
         // Request page_size=200, should be capped at 100
-        let report = client.query_reconciliation_report(&token_id, &0, &200).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &200);
         assert_eq!(
             report.scanned_escrows, 100,
             "page_size should be capped at MAX_PAGE_SIZE"
@@ -7648,7 +7806,7 @@ mod reconciliation_report_tests {
         );
 
         // Query first page
-        let page1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let page1 = client.query_reconciliation_report(&token_id, &0, &50);
         assert!(
             page1.expected_locked > 0,
             "first page should include recurring escrow"
@@ -7673,11 +7831,13 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
         // Query multiple times
-        let report1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
-        let report2 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report1 = client.query_reconciliation_report(&token_id, &0, &50);
+        let report2 = client.query_reconciliation_report(&token_id, &0, &50);
 
         // Both should be identical (no state changed)
         assert_eq!(
@@ -7713,10 +7873,12 @@ mod reconciliation_report_tests {
             &order_id,
             &None,
             &None,
+            &None,
+            &None,
         );
 
         // Query should include the Active escrow
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.expected_locked, amount,
             "should include Active escrow"

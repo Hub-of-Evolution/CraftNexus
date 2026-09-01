@@ -282,6 +282,14 @@ pub enum DataKey {
     UserStateRevision(Address),
     /// An operation binding already consumed by an escrow contract.
     UsedAttestation(Address, Bytes),
+    /// Total number of users onboarded (global counter).
+    GlobalOnboardCount,
+    /// Total number of currently active user profiles (global counter).
+    ActiveUserCount,
+    /// Total number of username changes performed (global counter).
+    GlobalUsernameChangeCount,
+    /// Total number of admin actions performed (global counter).
+    GlobalAdminActionCount,
 }
 
 /// User roles in the CraftNexus platform.
@@ -1035,15 +1043,16 @@ pub enum Error {
     /// An operation binding has already been consumed.
     AttestationReplay = 28,
     /// Volume accumulator overflowed
+    VolumeOverflow = 33,
     VolumeOverflow = 26,
     /// Escrow count accumulator overflowed (#1028)
     EscrowCountOverflow = 27,
     /// Active contracts accumulator overflowed (#1028)
     ActiveContractOverflow = 28,
     /// Attempt rate policy contains an unusable limit configuration (#1084)
-    InvalidRateLimitPolicy = 27,
+    InvalidRateLimitPolicy = 34,
     /// Review decision does not match the current profile revision (#1086)
-    ReviewRevisionMismatch = 28,
+    ReviewRevisionMismatch = 35,
     /// Review window expired before a decision was submitted (#1086)
     ReviewExpired = 29,
     /// Requested review transition is not valid from the current state (#1086)
@@ -2191,7 +2200,7 @@ impl OnboardingContract {
     }
 
     fn stored_to_public(env: &Env, stored: StoredUserProfile, portfolio_cid: Option<Bytes>) -> UserProfile {
-        let state_version = Self::read_persistent(env, &DataKey::UserStateVersion(stored.address.clone()))
+        let state_version = Self::read_persistent(env, &DataKey::UserStateRevision(stored.address.clone()))
             .unwrap_or(1);
         UserProfile {
             version: stored.version,
@@ -2308,7 +2317,7 @@ impl OnboardingContract {
         payload.extend_from_slice(&(contract_len as u32).to_be_bytes());
         contract_string.copy_into_slice(&mut contract_bytes[..contract_len]);
         payload.extend_from_slice(&contract_bytes[..contract_len]);
-        env.crypto().sha256(&payload)
+        env.crypto().sha256(&payload).into()
     }
 
     /// Ensure the reverse username index points at the canonical account.
@@ -2329,7 +2338,7 @@ impl OnboardingContract {
     /// Repair secondary state for an existing account-keyed canonical profile.
     fn repair_onboarding_state(env: &Env, normalized: &String, user: &Address) {
         Self::ensure_username_claim(env, normalized, user);
-        let version_key = DataKey::UserStateVersion(user.clone());
+        let version_key = DataKey::UserStateRevision(user.clone());
         if !env.storage().persistent().has(&version_key) {
             env.storage().persistent().set(&version_key, &1u32);
         }
@@ -2357,8 +2366,8 @@ impl OnboardingContract {
             status: profile.status,
         };
         Self::persist_stored_user_profile(env, user, &stored);
-        env.storage().persistent().set(&DataKey::UserStateVersion(user.clone()), &1u32);
-        Self::extend_persistent(env, &DataKey::UserStateVersion(user.clone()));
+        env.storage().persistent().set(&DataKey::UserStateRevision(user.clone()), &1u32);
+        Self::extend_persistent(env, &DataKey::UserStateRevision(user.clone()));
         (stored, true)
     }
 
@@ -2460,7 +2469,7 @@ impl OnboardingContract {
     }
 
     fn bump_state_version(env: &Env, user: &Address) -> u32 {
-        let key = DataKey::UserStateVersion(user.clone());
+        let key = DataKey::UserStateRevision(user.clone());
         let current: u32 = Self::read_persistent(env, &key).unwrap_or(1u32);
         let next: u32 = current.saturating_add(1);
         env.storage().persistent().set(&key, &next);
@@ -3475,7 +3484,7 @@ impl OnboardingContract {
 
     /// Return the monotonically increasing state version for a user's profile.
     ///
-    /// Returns `0` if the user has no profile. Missing `UserStateVersion`
+    /// Returns `0` if the user has no profile. Missing `UserStateRevision`
     /// keys default to `1` on read.
     pub fn get_user_state_version(env: Env, user: Address) -> u32 {
         if let Some(profile) = Self::try_get_user_profile(&env, user) {
