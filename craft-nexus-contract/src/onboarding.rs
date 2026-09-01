@@ -280,8 +280,26 @@ pub enum DataKey {
     PohVerifier,
     /// Monotonic canonical onboarding state revision per user.
     UserStateRevision(Address),
+    /// User state revision alias.
+    UserStateVersion(Address),
+    /// Active onboarded users counter.
+    ActiveUserCount,
+    /// Total lifetime onboarding operations.
+    GlobalOnboardCount,
+    /// Total lifetime username change operations.
+    GlobalUsernameChangeCount,
+    /// Total lifetime admin operations.
+    GlobalAdminActionCount,
     /// An operation binding already consumed by an escrow contract.
     UsedAttestation(Address, Bytes),
+    /// Total number of users onboarded (global counter).
+    GlobalOnboardCount,
+    /// Total number of currently active user profiles (global counter).
+    ActiveUserCount,
+    /// Total number of username changes performed (global counter).
+    GlobalUsernameChangeCount,
+    /// Total number of admin actions performed (global counter).
+    GlobalAdminActionCount,
 }
 
 /// User roles in the CraftNexus platform.
@@ -878,14 +896,44 @@ pub struct SybilReviewDecisionEvent {
 /// deployments), readers fall back to the compile-time defaults.
 ///
 /// ## Policy semantics
-/// - Every `decay_interval_secs`, `trust_score` is multiplied by
-///   `(10_000 - decay_bps) / 10_000` (lazy, on read/write).
-/// - Successful increments are rejected while
-///   `now < last_success_update_at + update_cooldown_secs`.
-/// - Inside each `farming_window_secs` window, at most
-///   `max_successful_per_window` successful increments are credited.
-/// - Disputed increments are never delayed or capped — adverse outcomes always
-///   apply so bad actors cannot hide behind cooldown.
+/// Decay is modelled as **deterministic time buckets** (#1082). Time is divided
+/// into consecutive buckets of `decay_interval_secs` seconds. Each time the
+/// score is (re)computed at ledger time `now`, the whole number of buckets that
+/// have elapsed since `last_decay_at` is `buckets = (now - last_decay_at) /
+/// decay_interval_secs`. The score is then multiplied by
+/// `(10_000 - decay_bps) / 10_000` exactly `buckets` times, using floor
+/// (truncating) integer arithmetic so the result is identical for the same
+/// inputs and can never exceed the pre-decay value.
+///
+/// ### Determinism & safety guarantees
+/// - **Same history → same score.** The decayed score is a pure function of the
+///   stored `trust_score`, `last_decay_at`, the policy, and the ledger time.
+///   Repeated reads at the same ledger time always return the same value.
+/// - **No underflow / no inflation.** Decay only ever multiplies by a factor
+///   `<= 1`, saturating at `0`. It can never produce a negative score or create
+///   trust that was not earned.
+/// - **Bounded CPU.** At most [`MAX_DECAY_INTERVALS_PER_CALL`] buckets are
+///   applied in a single evaluation; any remaining elapsed time is carried
+///   forward and applied on the next lazy or scheduled evaluation, keeping every
+///   call within the contract budget even after years of inactivity.
+///
+/// ### Lazy vs scheduled application
+/// - **Lazy:** decay is applied automatically inside every read
+///   ([`OnboardingContract::get_trust_score`],
+///   [`OnboardingContract::get_reputation_state`]) and write
+///   ([`OnboardingContract::update_reputation`],
+///   [`OnboardingContract::update_reputation_for_settlement`]). Callers always
+///   observe a current score without any background job.
+/// - **Scheduled:** off-chain indexers / cron jobs can force an evaluation and
+///   persist the result via
+///   [`OnboardingContract::apply_reputation_decay_now`], keeping scores current
+///   independently of user activity.
+///
+/// Successful increments are rejected while
+/// `now < last_success_update_at + update_cooldown_secs`. Inside each
+/// `farming_window_secs` window, at most `max_successful_per_window` successful
+/// increments are credited. Disputed increments are never delayed or capped —
+/// adverse outcomes always apply so bad actors cannot hide behind cooldown.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -1035,15 +1083,25 @@ pub enum Error {
     /// An operation binding has already been consumed.
     AttestationReplay = 28,
     /// Volume accumulator overflowed
-    VolumeOverflow = 26,
+    VolumeOverflow = 29,
     /// Attempt rate policy contains an unusable limit configuration (#1084)
-    InvalidRateLimitPolicy = 27,
+    InvalidRateLimitPolicy = 30,
     /// Review decision does not match the current profile revision (#1086)
-    ReviewRevisionMismatch = 28,
+    ReviewRevisionMismatch = 31,
+    VolumeOverflow = 33,
+    VolumeOverflow = 26,
+    /// Escrow count accumulator overflowed (#1028)
+    EscrowCountOverflow = 27,
+    /// Active contracts accumulator overflowed (#1028)
+    ActiveContractOverflow = 28,
+    /// Attempt rate policy contains an unusable limit configuration (#1084)
+    InvalidRateLimitPolicy = 34,
+    /// Review decision does not match the current profile revision (#1086)
+    ReviewRevisionMismatch = 35,
     /// Review window expired before a decision was submitted (#1086)
-    ReviewExpired = 29,
+    ReviewExpired = 32,
     /// Requested review transition is not valid from the current state (#1086)
-    InvalidReviewTransition = 30,
+    InvalidReviewTransition = 33,
     /// Caller is not an authorized Sybil reviewer (#1086)
     UnauthorizedReviewer = 31,
     /// Profile schema version is not supported by this contract (#1056)
@@ -1964,10 +2022,42 @@ impl OnboardingContract {
         Self::extend_persistent(env, &key);
     }
 
-    /// Lazily apply time-based trust-score decay per policy (#939).
+    /// Pure deterministic decay arithmetic (#1082).
     ///
-    /// Returns `true` when `trust_score` changed. Interval count is capped at
-    /// [`MAX_DECAY_INTERVALS_PER_CALL`] to bound CPU on long idle periods.
+    /// Applies `steps` decay buckets to `score`, each multiplying by
+    /// `retain_bps / 10_000` with **floor** integer division. The computation is
+    /// a pure function of its arguments: identical inputs always yield the same
+    /// output, it is monotone non-increasing (`retain_bps <= 10_000`), saturates
+    /// at `0`, and can never inflate the score.
+    fn decay_score(score: u32, retain_bps: u32, steps: u64) -> u32 {
+        if steps == 0 || score == 0 {
+            return score;
+        }
+        let denom = REPUTATION_BPS_DENOMINATOR as u128;
+        let retain = retain_bps as u128;
+        let mut value = score as u128;
+        let mut applied = 0u64;
+        while applied < steps && value > 0 {
+            let next = value.saturating_mul(retain) / denom;
+            // Guard against any arithmetic anomaly creating score from nothing:
+            // decay must never increase the score.
+            if next >= value {
+                break;
+            }
+            value = next;
+            applied += 1;
+        }
+        value as u32
+    }
+
+    /// Lazily apply time-based trust-score decay per policy (#939 / #1082).
+    ///
+    /// Decay is bucketised: the number of full `decay_interval_secs` buckets
+    /// elapsed since `last_decay_at` is applied via [`Self::decay_score`].
+    /// Returns `true` when `trust_score` changed. At most
+    /// [`MAX_DECAY_INTERVALS_PER_CALL`] buckets are applied in one call; leftover
+    /// elapsed time is carried forward on the next lazy or scheduled evaluation
+    /// so the result is deterministic and CPU-bounded even after long idleness.
     fn apply_reputation_decay(
         env: &Env,
         state: &mut ReputationState,
@@ -1978,6 +2068,7 @@ impl OnboardingContract {
         }
 
         let now = env.ledger().timestamp();
+        // Initialise the decay reference on first observation; no decay yet.
         if state.last_decay_at == 0 {
             state.last_decay_at = now;
             return false;
@@ -1986,28 +2077,27 @@ impl OnboardingContract {
             return false;
         }
 
+        // Time buckets: whole buckets elapsed since the last application.
         let elapsed = now - state.last_decay_at;
-        let mut intervals = elapsed / policy.decay_interval_secs;
-        if intervals == 0 {
+        let mut buckets = elapsed / policy.decay_interval_secs;
+        if buckets == 0 {
             return false;
         }
-        if intervals > MAX_DECAY_INTERVALS_PER_CALL {
-            intervals = MAX_DECAY_INTERVALS_PER_CALL;
+        if buckets > MAX_DECAY_INTERVALS_PER_CALL {
+            buckets = MAX_DECAY_INTERVALS_PER_CALL;
         }
 
         let retain_bps = REPUTATION_BPS_DENOMINATOR.saturating_sub(policy.decay_bps);
-        let mut score = state.trust_score as u128;
-        let mut applied = 0u64;
-        while applied < intervals && score > 0 {
-            score = score.saturating_mul(retain_bps as u128) / (REPUTATION_BPS_DENOMINATOR as u128);
-            applied += 1;
-        }
+        let decayed = Self::decay_score(state.trust_score, retain_bps, buckets);
+        let changed = decayed != state.trust_score;
+        state.trust_score = decayed;
 
-        state.trust_score = score as u32;
+        // Advance the reference by exactly the buckets we applied, keeping the
+        // decay grid aligned so subsequent evaluations stay deterministic.
         state.last_decay_at = state
             .last_decay_at
-            .saturating_add(applied.saturating_mul(policy.decay_interval_secs));
-        true
+            .saturating_add(buckets.saturating_mul(policy.decay_interval_secs));
+        changed
     }
 
     /// Compute how many successful increments may be credited under cooldown
@@ -2174,7 +2264,10 @@ impl OnboardingContract {
         let fee_wallet = Self::read_username_fee_wallet(env, config);
 
         let token_client = token::Client::new(env, &fee_token);
-        token_client.transfer(user, &fee_wallet, &fee_amount);
+        match token_client.try_transfer(user, &fee_wallet, &fee_amount) {
+            Ok(Ok(())) => {}
+            _ => env.panic_with_error(Error::TokenTransferFailed),
+        }
     }
 
     fn string_to_bytes(env: &Env, s: &String) -> Bytes {
@@ -2187,7 +2280,7 @@ impl OnboardingContract {
     }
 
     fn stored_to_public(env: &Env, stored: StoredUserProfile, portfolio_cid: Option<Bytes>) -> UserProfile {
-        let state_version = Self::read_persistent(env, &DataKey::UserStateVersion(stored.address.clone()))
+        let state_version = Self::read_persistent(env, &DataKey::UserStateRevision(stored.address.clone()))
             .unwrap_or(1);
         UserProfile {
             version: stored.version,
@@ -2304,7 +2397,7 @@ impl OnboardingContract {
         payload.extend_from_slice(&(contract_len as u32).to_be_bytes());
         contract_string.copy_into_slice(&mut contract_bytes[..contract_len]);
         payload.extend_from_slice(&contract_bytes[..contract_len]);
-        env.crypto().sha256(&payload)
+        env.crypto().sha256(&payload).into()
     }
 
     /// Ensure the reverse username index points at the canonical account.
@@ -2325,7 +2418,7 @@ impl OnboardingContract {
     /// Repair secondary state for an existing account-keyed canonical profile.
     fn repair_onboarding_state(env: &Env, normalized: &String, user: &Address) {
         Self::ensure_username_claim(env, normalized, user);
-        let version_key = DataKey::UserStateVersion(user.clone());
+        let version_key = DataKey::UserStateRevision(user.clone());
         if !env.storage().persistent().has(&version_key) {
             env.storage().persistent().set(&version_key, &1u32);
         }
@@ -2353,8 +2446,8 @@ impl OnboardingContract {
             status: profile.status,
         };
         Self::persist_stored_user_profile(env, user, &stored);
-        env.storage().persistent().set(&DataKey::UserStateVersion(user.clone()), &1u32);
-        Self::extend_persistent(env, &DataKey::UserStateVersion(user.clone()));
+        env.storage().persistent().set(&DataKey::UserStateRevision(user.clone()), &1u32);
+        Self::extend_persistent(env, &DataKey::UserStateRevision(user.clone()));
         (stored, true)
     }
 
@@ -2456,7 +2549,7 @@ impl OnboardingContract {
     }
 
     fn bump_state_version(env: &Env, user: &Address) -> u32 {
-        let key = DataKey::UserStateVersion(user.clone());
+        let key = DataKey::UserStateRevision(user.clone());
         let current: u32 = Self::read_persistent(env, &key).unwrap_or(1u32);
         let next: u32 = current.saturating_add(1);
         env.storage().persistent().set(&key, &next);
@@ -3471,7 +3564,7 @@ impl OnboardingContract {
 
     /// Return the monotonically increasing state version for a user's profile.
     ///
-    /// Returns `0` if the user has no profile. Missing `UserStateVersion`
+    /// Returns `0` if the user has no profile. Missing `UserStateRevision`
     /// keys default to `1` on read.
     pub fn get_user_state_version(env: Env, user: Address) -> u32 {
         if let Some(profile) = Self::try_get_user_profile(&env, user) {
@@ -4125,10 +4218,25 @@ impl OnboardingContract {
 
         metrics.total_escrow_count = metrics
             .total_escrow_count
-            .saturating_add(escrow_count_delta);
+            .checked_add(escrow_count_delta)
+            .unwrap_or_else(|| env.panic_with_error(Error::EscrowCountOverflow));
 
         // Normalize volume to 7 decimals (base decimal for auto-verification thresholds)
-        let normalized_delta = Self::normalize_token_amount(&env, volume_delta, &token_address);
+        let token_client = token::Client::new(&env, &token_address);
+        let token_decimals = token_client.decimals();
+        let base_decimals = 7u32;
+
+        let normalized_delta = if token_decimals < base_decimals {
+            let diff = base_decimals - token_decimals;
+            volume_delta
+                .checked_mul(10i128.pow(diff))
+                .unwrap_or_else(|| env.panic_with_error(Error::VolumeOverflow))
+        } else if token_decimals > base_decimals {
+            let diff = token_decimals - base_decimals;
+            volume_delta / 10i128.pow(diff)
+        } else {
+            volume_delta
+        };
 
         metrics.total_volume = metrics
             .total_volume
@@ -4199,7 +4307,9 @@ impl OnboardingContract {
         let current = stored.unwrap_or(0u32);
 
         let next = if delta > 0 {
-            current.saturating_add(delta as u32)
+            current
+                .checked_add(delta as u32)
+                .unwrap_or_else(|| env.panic_with_error(Error::ActiveContractOverflow))
         } else {
             let subtract = (-delta) as u32;
             if subtract > current {
@@ -5009,6 +5119,32 @@ impl OnboardingContract {
             .persistent()
             .set(&DataKey::ReputationPolicy, &policy);
         Self::extend_persistent(&env, &DataKey::ReputationPolicy);
+    }
+
+    /// Scheduled reputation decay application (Issue #1082).
+    ///
+    /// Explicitly applies any pending time-based decay for `address` and persists
+    /// the result, independent of reads and writes. The decay computed here is
+    /// identical to the **lazy** decay applied inside [`get_trust_score`] and
+    /// [`update_reputation`], so off-chain schedulers (cron jobs, indexers) can
+    /// keep scores current without waiting for user activity. Returns `0` for
+    /// unknown addresses.
+    ///
+    /// # Auth
+    /// Requires `address.require_auth()` (the subject must authorize the
+    /// scheduled evaluation of their own reputation state).
+    pub fn apply_reputation_decay_now(env: Env, address: Address) -> u32 {
+        address.require_auth();
+
+        if Self::try_get_user_profile(&env, address.clone()).is_none() {
+            return 0;
+        }
+
+        let policy = Self::get_reputation_policy_internal(&env);
+        let mut state = Self::get_or_init_reputation_state(&env, &address);
+        Self::apply_reputation_decay(&env, &mut state, &policy);
+        Self::persist_reputation_state(&env, &address, &state);
+        state.trust_score
     }
 
     // -----------------------------------------------------------------------
