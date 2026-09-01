@@ -280,6 +280,16 @@ pub enum DataKey {
     PohVerifier,
     /// Monotonic canonical onboarding state revision per user.
     UserStateRevision(Address),
+    /// User state revision alias.
+    UserStateVersion(Address),
+    /// Active onboarded users counter.
+    ActiveUserCount,
+    /// Total lifetime onboarding operations.
+    GlobalOnboardCount,
+    /// Total lifetime username change operations.
+    GlobalUsernameChangeCount,
+    /// Total lifetime admin operations.
+    GlobalAdminActionCount,
     /// An operation binding already consumed by an escrow contract.
     UsedAttestation(Address, Bytes),
     /// Total number of users onboarded (global counter).
@@ -1073,6 +1083,11 @@ pub enum Error {
     /// An operation binding has already been consumed.
     AttestationReplay = 28,
     /// Volume accumulator overflowed
+    VolumeOverflow = 29,
+    /// Attempt rate policy contains an unusable limit configuration (#1084)
+    InvalidRateLimitPolicy = 30,
+    /// Review decision does not match the current profile revision (#1086)
+    ReviewRevisionMismatch = 31,
     VolumeOverflow = 33,
     VolumeOverflow = 26,
     /// Escrow count accumulator overflowed (#1028)
@@ -1084,9 +1099,9 @@ pub enum Error {
     /// Review decision does not match the current profile revision (#1086)
     ReviewRevisionMismatch = 35,
     /// Review window expired before a decision was submitted (#1086)
-    ReviewExpired = 29,
+    ReviewExpired = 32,
     /// Requested review transition is not valid from the current state (#1086)
-    InvalidReviewTransition = 30,
+    InvalidReviewTransition = 33,
     /// Caller is not an authorized Sybil reviewer (#1086)
     UnauthorizedReviewer = 31,
     /// Profile schema version is not supported by this contract (#1056)
@@ -2249,7 +2264,10 @@ impl OnboardingContract {
         let fee_wallet = Self::read_username_fee_wallet(env, config);
 
         let token_client = token::Client::new(env, &fee_token);
-        token_client.transfer(user, &fee_wallet, &fee_amount);
+        match token_client.try_transfer(user, &fee_wallet, &fee_amount) {
+            Ok(Ok(())) => {}
+            _ => env.panic_with_error(Error::TokenTransferFailed),
+        }
     }
 
     fn string_to_bytes(env: &Env, s: &String) -> Bytes {

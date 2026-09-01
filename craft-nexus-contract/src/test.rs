@@ -7550,6 +7550,35 @@ mod onboarding_state_consistency {
         );
         assert_panic_contract_error(result, Error::OnboardingProfileInactive);
     }
+
+    // ── Issue #1064: Audit Token Transfer Results ───────────────────────────
+
+    /// Failed transfers leave financial state unchanged and return TokenTransferFailed.
+    #[test]
+    fn test_failed_token_transfer_leaves_state_unchanged_and_returns_stable_error() {
+        let env = Env::default();
+        let (client, _onboarding, buyer, seller, token_id, _token_admin) = setup_wired(&env);
+
+        // Buyer has 0 balance, so pull-transfer will fail
+        let order_id = 1064;
+        let amount = 500_000;
+        let window = 3600;
+
+        let result = client.try_create_escrow(
+            &buyer,
+            &seller,
+            &token_id,
+            &amount,
+            &order_id,
+            &Some(window),
+        );
+
+        assert_panic_contract_error(result, Error::TokenTransferFailed);
+
+        // Verify state remains unchanged: escrow does not exist
+        let get_result = client.try_get_escrow(&order_id);
+        assert!(get_result.is_err());
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

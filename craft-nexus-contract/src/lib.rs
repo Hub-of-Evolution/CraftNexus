@@ -175,7 +175,7 @@ pub enum Error {
     /// Onboarding contract address has not been configured
     OnboardingContractNotSet = 39,
     /// The configured onboarding contract rejected the participant state proof
-    OnboardingAuthorizationFailed = 56,
+    OnboardingAuthorizationFailed = 85,
     // â”€â”€ Validation (40+): fix caller input â”€â”€
     /// Provided metadata hash is invalid
     InvalidMetadataHash = 40,
@@ -7046,11 +7046,16 @@ impl CraftNexusContract {
             env.panic_with_error(crate::Error::ReentryDetected);
         }
 
-        // Commit effects before interaction. A failed token call rolls back the
-        // complete Soroban invocation, including this audit record.
-        Self::append_fund_audit_record(env, actor, amount, reason, balance_impact);
+        // Execute and validate token transfer before committing dependent audit state (#1064).
+        // Failed transfers or unexpected return values reject with stable TokenTransferFailed error.
         let token_client = token::Client::new(env, token);
-        token_client.transfer(from, to, &amount);
+        match token_client.try_transfer(from, to, &amount) {
+            Ok(Ok(())) => {}
+            _ => env.panic_with_error(crate::Error::TokenTransferFailed),
+        }
+
+        // Commit dependent accounting/audit state only after transfer is validated.
+        Self::append_fund_audit_record(env, actor, amount, reason, balance_impact);
     }
 
     fn transfer_platform_fee(
@@ -10916,6 +10921,13 @@ impl CraftNexusContract {
             None => return Err(Error::EscrowNotFound),
         };
         Self::extend_persistent(&env, &(ESCROW, order_id));
+        let snapshot = snapshot_opt.unwrap();
+        let mut escrow = snapshot.clone();
+        if escrow.status != EscrowStatus::Disputed {
+            return Err(Error::InvalidEscrowState);
+        }
+        let initiated_at = escrow.dispute_initiated_at.ok_or(Error::InvalidEscrowState)?;
+        let current_time = env.ledger().timestamp();
         let snapshot = snapshot_opt.ok_or(Error::EscrowNotFound)?;
         Self::extend_persistent(&env, &(ESCROW, order_id));
         let mut snapshot = snapshot_opt.unwrap();
@@ -11829,6 +11841,7 @@ impl CraftNexusContract {
         Self::authorize_onboarding_state(&env, &proposal.proposed_by, operation_id, expected_role);
 
         // Remove the proposal from storage
+        Self::clear_partial_refund_proposal(&env, order_id);
         env.storage().persistent().remove(&Self::proposal_key(order_id));
 
         Ok(())
