@@ -16,6 +16,8 @@ pub mod time_policy;
 #[cfg(test)]
 mod arbitration_escalation_test;
 #[cfg(test)]
+mod dispute_escalation_timeout_test;
+#[cfg(test)]
 mod enhanced_features_test;
 #[cfg(test)]
 mod event_snapshot_test;
@@ -279,6 +281,11 @@ pub enum Error {
     PaginationCursorInvalid = 83,
     /// Requested WASM upgrade cooldown is below `MIN_WASM_UPGRADE_COOLDOWN`,
     /// which would let the mandatory review window be bypassed (#1062).
+    UpgradeCooldownTooShort = 83,
+    /// Proposed dispute-escalation checkpoints are not strictly increasing, or
+    /// the last checkpoint is not strictly before the final dispute deadline
+    /// (`max_dispute_duration`) (#1080).
+    InvalidEscalationPolicy = 84,
     UpgradeCooldownTooShort = 84,
     /// An emergency operation (recovery, sweep, upgrade, pause) is already in progress;
     /// no other emergency operation can execute concurrently (#1072).
@@ -411,6 +418,11 @@ const DEFAULT_EVIDENCE_EXPIRY_WINDOW: u64 = time_policy::EVIDENCE_EXPIRY_WINDOW;
 const DEFAULT_EVIDENCE_CHALLENGE_WINDOW: u32 = time_policy::EVIDENCE_CHALLENGE_WINDOW as u32;
 /// Default dispute escalation window (3 days in seconds) (#941)
 const DEFAULT_DISPUTE_ESCALATION_WINDOW: u32 = time_policy::DISPUTE_ESCALATION_WINDOW as u32;
+/// Default moderator-review escalation checkpoint (7 days in seconds) (#1080)
+const DEFAULT_MODERATOR_ESCALATION_CHECKPOINT: u32 =
+    time_policy::MODERATOR_ESCALATION_CHECKPOINT as u32;
+/// Default admin-review escalation checkpoint (14 days in seconds) (#1080)
+const DEFAULT_ADMIN_ESCALATION_CHECKPOINT: u32 = time_policy::ADMIN_ESCALATION_CHECKPOINT as u32;
 /// Default rate limit max calls per window (#943)
 const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 5;
 /// Default rate limit window (1 hour in seconds) (#943)
@@ -696,6 +708,10 @@ pub enum DataKey {
     ArbitratorAssignmentRevision,
     /// Configurable dispute escalation window in seconds (#941)
     DisputeEscalationWindow,
+    /// Tiered escalation ladder state for a pending dispute (#1080)
+    DisputeEscalationState(u32),
+    /// Admin-configurable escalation checkpoint schedule (#1080)
+    EscalationCheckpoints,
     /// Counter for rate-limited calls per address per window (#943)
     RateLimitCount(Address, u64),
     /// Platform rate limit configuration (max_calls, window) (#943)
@@ -1821,6 +1837,128 @@ pub struct DisputeEscalationRecord {
     pub escalated_at: u64,
 }
 
+/// Escalation checkpoints a pending dispute passes through while it waits for
+/// an arbitrator decision (#1080).
+///
+/// Tiers are strictly ordered and derived **only** from the ledger clock, so
+/// every observer computes the same tier for the same dispute at the same
+/// timestamp. Reaching a tier widens the set of accounts allowed to escalate;
+/// it never narrows it.
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum EscalationTier {
+    /// No checkpoint reached yet: the assigned arbitrator is still inside its
+    /// service window and nobody may escalate.
+    Assigned = 0,
+    /// First checkpoint: either party to the escrow may flag the dispute as
+    /// stalled.
+    PartyFlagged = 1,
+    /// Second checkpoint: moderator review is unlocked, in addition to the
+    /// parties.
+    ModeratorReview = 2,
+    /// Third checkpoint: admin review is unlocked, in addition to the parties
+    /// and the moderator.
+    AdminReview = 3,
+    /// Final deadline reached. The dispute can no longer be arbitrated; only
+    /// the deterministic timeout settlement remains, and anyone may trigger it.
+    TimedOut = 4,
+}
+
+/// Admin-configurable escalation checkpoint schedule (#1080).
+///
+/// Every value is an offset in seconds from `dispute_initiated_at`. The final
+/// deadline is deliberately **not** part of this struct: it is always
+/// `PlatformConfig::max_dispute_duration`, so the escalation ladder and the
+/// force-close path can never disagree about when a dispute is over.
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscalationCheckpoints {
+    /// Offset at which [`EscalationTier::PartyFlagged`] unlocks.
+    pub party_checkpoint: u32,
+    /// Offset at which [`EscalationTier::ModeratorReview`] unlocks.
+    pub moderator_checkpoint: u32,
+    /// Offset at which [`EscalationTier::AdminReview`] unlocks.
+    pub admin_checkpoint: u32,
+}
+
+/// Absolute checkpoint timestamps for one specific dispute (#1080).
+///
+/// Produced by normalising [`EscalationCheckpoints`] against the dispute's
+/// start time and the platform's final deadline. Offsets are clamped so the
+/// sequence is always non-decreasing and always ends at `final_deadline`, even
+/// if the admin later shortens `max_dispute_duration` below a checkpoint.
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscalationSchedule {
+    /// Timestamp the dispute was opened; the origin of every checkpoint.
+    pub initiated_at: u64,
+    pub party_deadline: u64,
+    pub moderator_deadline: u64,
+    pub admin_deadline: u64,
+    /// Hard stop: at or after this timestamp the dispute is `TimedOut` and can
+    /// only be settled by the deterministic timeout path.
+    pub final_deadline: u64,
+}
+
+/// Tiered escalation ladder state recorded on-chain for one dispute (#1080).
+///
+/// Written every time a dispute is escalated to a *higher* tier, which makes
+/// the escalation history auditable: who escalated, to which tier, and when.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct DisputeEscalationState {
+    pub order_id: u32,
+    /// Highest tier that has actually been recorded on-chain.
+    pub tier: EscalationTier,
+    /// Tier this dispute sat at before the most recent escalation.
+    pub previous_tier: EscalationTier,
+    /// Account that drove the dispute to `tier`.
+    pub escalated_by: Address,
+    /// Ledger timestamp of the most recent escalation.
+    pub escalated_at: u64,
+    /// Number of escalations recorded so far.
+    pub escalation_count: u32,
+}
+
+/// Deterministic settlement a timed-out dispute will receive (#1080).
+///
+/// Derived purely from [`ExpiredDisputeFeePolicy`], so callers can preview the
+/// outcome of a timeout before it happens and confirm it afterwards.
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum TimeoutOutcome {
+    /// Buyer is refunded the full escrow amount; the platform takes no fee.
+    RefundBuyerFull = 0,
+    /// Buyer is refunded the escrow amount minus the platform fee.
+    RefundBuyerMinusFee = 1,
+    /// Platform fee is split evenly between buyer and seller.
+    RefundBuyerSplitFee = 2,
+}
+
+/// Auditable snapshot of a dispute's escalation ladder and final deadline (#1080).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct DisputeEscalationStatus {
+    pub order_id: u32,
+    /// Normalised checkpoint timestamps for this dispute.
+    pub schedule: EscalationSchedule,
+    /// Tier implied by the current ledger timestamp.
+    pub current_tier: EscalationTier,
+    /// Highest tier recorded on-chain (`Assigned` if never escalated).
+    pub recorded_tier: EscalationTier,
+    /// `true` once the final deadline has been reached.
+    pub is_timed_out: bool,
+    /// `true` once a settlement receipt exists — the dispute is finalized and
+    /// no further settlement of any kind can run.
+    pub is_finalized: bool,
+    /// Settlement a timeout would produce for this dispute.
+    pub timeout_outcome: TimeoutOutcome,
 /// The arbitrator and revision assigned to one active dispute.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
@@ -6382,6 +6520,135 @@ impl CraftNexusContract {
         Ok(())
     }
 
+    // ── Dispute escalation ladder (#1080) ──────────────────────
+
+    /// Read the configured escalation checkpoints, falling back to the platform
+    /// defaults when the admin has never set an explicit schedule.
+    ///
+    /// The fallback keeps `party_checkpoint` aligned with the pre-existing
+    /// `dispute_escalation_window` so deployments that never call
+    /// `set_escalation_checkpoints` keep their current tier-1 behaviour (#941).
+    fn escalation_checkpoints(env: &Env, config: &PlatformConfig) -> EscalationCheckpoints {
+        env.storage()
+            .persistent()
+            .get(&DataKey::EscalationCheckpoints)
+            .unwrap_or(EscalationCheckpoints {
+                party_checkpoint: config.dispute_escalation_window,
+                moderator_checkpoint: DEFAULT_MODERATOR_ESCALATION_CHECKPOINT,
+                admin_checkpoint: DEFAULT_ADMIN_ESCALATION_CHECKPOINT,
+            })
+    }
+
+    /// Normalise the checkpoint offsets into absolute timestamps for one dispute.
+    ///
+    /// `max_dispute_duration` is authoritative: every intermediate checkpoint is
+    /// clamped to sit at or before the final deadline, working backwards from
+    /// the deadline. This guarantees a non-decreasing sequence even if the admin
+    /// shortens `max_dispute_duration` after the checkpoints were configured, so
+    /// the ladder can never schedule a tier past the point of no return.
+    fn escalation_schedule(
+        env: &Env,
+        escrow: &Escrow,
+        config: &PlatformConfig,
+    ) -> Result<EscalationSchedule, Error> {
+        let initiated_at = Self::dispute_clock(escrow)?;
+        let raw = Self::escalation_checkpoints(env, config);
+
+        let final_offset = config.max_dispute_duration as u64;
+        let admin_offset = (raw.admin_checkpoint as u64).min(final_offset);
+        let moderator_offset = (raw.moderator_checkpoint as u64).min(admin_offset);
+        let party_offset = (raw.party_checkpoint as u64).min(moderator_offset);
+
+        Ok(EscalationSchedule {
+            initiated_at,
+            party_deadline: time_policy::deadline(initiated_at, party_offset),
+            moderator_deadline: time_policy::deadline(initiated_at, moderator_offset),
+            admin_deadline: time_policy::deadline(initiated_at, admin_offset),
+            final_deadline: time_policy::deadline(initiated_at, final_offset),
+        })
+    }
+
+    /// Tier implied by the ledger clock alone — pure, and identical for every
+    /// observer at a given timestamp.
+    ///
+    /// Checkpoints use the crate-wide inclusive-end convention: a tier unlocks
+    /// at exactly its deadline. Later checkpoints are tested first so that a
+    /// clamped (collapsed) schedule always resolves to the highest reached tier.
+    fn tier_at(now: u64, schedule: &EscalationSchedule) -> EscalationTier {
+        if time_policy::is_deadline_reached(now, schedule.final_deadline) {
+            EscalationTier::TimedOut
+        } else if time_policy::is_deadline_reached(now, schedule.admin_deadline) {
+            EscalationTier::AdminReview
+        } else if time_policy::is_deadline_reached(now, schedule.moderator_deadline) {
+            EscalationTier::ModeratorReview
+        } else if time_policy::is_deadline_reached(now, schedule.party_deadline) {
+            EscalationTier::PartyFlagged
+        } else {
+            EscalationTier::Assigned
+        }
+    }
+
+    /// The escalation ladder state recorded on-chain, or the implicit starting
+    /// state for a dispute that has never been escalated.
+    fn recorded_escalation_tier(env: &Env, order_id: u32) -> EscalationTier {
+        env.storage()
+            .persistent()
+            .get::<_, DisputeEscalationState>(&DataKey::DisputeEscalationState(order_id))
+            .map_or(EscalationTier::Assigned, |state| state.tier)
+    }
+
+    /// Explicit escalation permission matrix (#1080).
+    ///
+    /// | Tier              | Eligible escalators                                    |
+    /// |-------------------|--------------------------------------------------------|
+    /// | `Assigned`        | nobody — the arbitrator is still inside its window     |
+    /// | `PartyFlagged`    | buyer, seller                                          |
+    /// | `ModeratorReview` | buyer, seller, moderator, arbitrator, admin            |
+    /// | `AdminReview`     | buyer, seller, moderator, arbitrator, admin            |
+    /// | `TimedOut`        | anyone — permissionless safety net                    |
+    ///
+    /// Each tier is a superset of the one below it: escalation rights are only
+    /// ever widened as a dispute ages, never revoked.
+    fn is_eligible_escalator(
+        config: &PlatformConfig,
+        escrow: &Escrow,
+        tier: EscalationTier,
+        caller: &Address,
+    ) -> bool {
+        match tier {
+            EscalationTier::Assigned => false,
+            EscalationTier::PartyFlagged => Self::is_escrow_party(escrow, caller),
+            EscalationTier::ModeratorReview | EscalationTier::AdminReview => {
+                Self::is_escrow_party(escrow, caller)
+                    || Self::is_privileged_resolver(config, caller)
+            }
+            EscalationTier::TimedOut => true,
+        }
+    }
+
+    /// Map the operator's expired-dispute fee policy onto the settlement a
+    /// timed-out dispute deterministically receives.
+    fn timeout_outcome(policy: ExpiredDisputeFeePolicy) -> TimeoutOutcome {
+        match policy {
+            ExpiredDisputeFeePolicy::RefundFullNoPlatformFee
+            | ExpiredDisputeFeePolicy::DeductFeeFromSeller => TimeoutOutcome::RefundBuyerFull,
+            ExpiredDisputeFeePolicy::RefundMinusPlatformFee => TimeoutOutcome::RefundBuyerMinusFee,
+            ExpiredDisputeFeePolicy::SplitFee => TimeoutOutcome::RefundBuyerSplitFee,
+        }
+    }
+
+    /// Settlement kind used by the deterministic timeout path.
+    ///
+    /// Shares [`Self::timeout_outcome`] so the previewed outcome and the
+    /// executed transfer can never drift apart.
+    fn timeout_settlement_kind(policy: ExpiredDisputeFeePolicy) -> SettlementKind {
+        match Self::timeout_outcome(policy) {
+            TimeoutOutcome::RefundBuyerFull => SettlementKind::ExpiredDisputeDeductFromSeller,
+            TimeoutOutcome::RefundBuyerMinusFee => SettlementKind::ExpiredDisputeDeductFromBuyer,
+            TimeoutOutcome::RefundBuyerSplitFee => SettlementKind::ExpiredDisputeSplitFee,
+        }
+    }
+
     fn assert_expired_dispute_window(
         env: &Env,
         escrow: &Escrow,
@@ -8212,8 +8479,8 @@ impl CraftNexusContract {
     ///               │          │                    │
     ///               ▼          ▼                    ▼
     ///     submit_evidence   escalate_dispute   propose_partial_refund
-    ///      (any time while   (after escalation    (buyer-initiated
-    ///       Disputed)         window elapses)       negotiation)
+    ///      (any time while   (one tier per        (buyer-initiated
+    ///       Disputed)         checkpoint reached)   negotiation)
     ///               │          │                    │
     ///               └──────────┼────────────────────┘
     ///                          │
@@ -8250,13 +8517,16 @@ impl CraftNexusContract {
     /// 1. **Evidence challenge window** (`evidence_challenge_window`): during this
     ///    period both parties may submit or rebut evidence. `resolve_dispute` is
     ///    blocked until the window has elapsed (see [`Self::resolve_dispute`]).
-    /// 2. **Escalation window** (`dispute_escalation_window`): after this period
-    ///    either party may call `escalate_dispute` to flag the dispute as stalled
-    ///    and surface it to priority queues (see [`Self::escalate_dispute`]).
-    /// 3. **Maximum duration** (`max_dispute_duration`): if the arbitrator has not
-    ///    resolved the dispute before this deadline, anyone can call
-    ///    `resolve_expired_dispute` to force-close it (see
-    ///    [`Self::resolve_expired_dispute`]).
+    /// 2. **Escalation checkpoints** (`EscalationCheckpoints`): a stalled dispute
+    ///    climbs an ordered ladder of checkpoints, each widening who may call
+    ///    `escalate_dispute` to surface it to priority queues - the parties
+    ///    first, then the moderator, then the admin (see
+    ///    [`Self::escalate_dispute`]).
+    /// 3. **Final deadline** (`max_dispute_duration`): if the arbitrator has not
+    ///    resolved the dispute before this deadline, arbitration is closed off
+    ///    and anyone can call `resolve_expired_dispute` to force-close it with
+    ///    the deterministic timeout outcome (see
+    ///    [`Self::resolve_expired_dispute`] and [`Self::get_timeout_outcome`]).
     ///
     /// ## Events emitted
     ///
@@ -8815,57 +9085,327 @@ impl CraftNexusContract {
         valid_log
     }
 
-    /// Escalate a dispute to arbitration after the escalation window has elapsed (#941).
+    /// Escalate a stalled dispute to the next checkpoint on the escalation
+    /// ladder (#941, #1080).
+    ///
+    /// ## Why this exists
+    ///
+    /// A dispute must never sit pending forever because the assigned arbitrator
+    /// stopped acting. Escalation is the pressure valve: as a dispute ages it
+    /// crosses fixed checkpoints, each of which widens the set of accounts that
+    /// may push it forward, until the final deadline converts it into a
+    /// deterministic timeout that anyone can settle.
+    ///
+    /// ## Checkpoints
+    ///
+    /// All checkpoints are measured from `dispute_initiated_at` and follow the
+    /// crate-wide inclusive-end convention (a tier unlocks *at* its deadline):
+    ///
+    /// ```text
+    ///  dispute_initiated_at
+    ///   |
+    ///   |  Assigned          arbitrator's own window; nobody may escalate
+    ///   |- party_checkpoint ------> PartyFlagged     buyer / seller
+    ///   |- moderator_checkpoint --> ModeratorReview  + moderator / arbitrator / admin
+    ///   |- admin_checkpoint ------> AdminReview      + moderator / arbitrator / admin
+    ///   \- max_dispute_duration --> TimedOut         anyone (final deadline)
+    /// ```
+    ///
+    /// The final deadline is always `max_dispute_duration`, the same value that
+    /// gates [`Self::resolve_dispute`] and [`Self::resolve_expired_dispute`], so
+    /// the ladder and the settlement paths agree by construction.
+    ///
+    /// ## Semantics
+    ///
+    /// This call advances the dispute to the highest tier the clock has reached.
+    /// It is therefore idempotent *per checkpoint*: escalating twice without a
+    /// new checkpoint having elapsed is rejected with
+    /// [`Error::InvalidDisputeAction`]. Each accepted escalation overwrites
+    /// [`DataKey::DisputeEscalationState`] and emits a `dispute_escalated` event
+    /// carrying the tier, the escalator, and the timestamp, so the escalation
+    /// history is fully auditable off-chain.
+    ///
+    /// Escalation is a signalling mechanism only - it never moves funds and
+    /// never changes the escrow status. Settlement remains with
+    /// `resolve_dispute` (before the final deadline) or
+    /// `resolve_expired_dispute` (at or after it).
+    ///
+    /// # Arguments
+    /// * `order_id` - Identifier of the disputed escrow.
+    /// * `caller` - Must be eligible for the tier being reached; see the
+    ///   permission matrix on [`Self::can_escalate_dispute`].
+    ///
+    /// # Errors
+    /// * Panics with [`Error::SettlementAlreadyFinalized`] if the dispute has
+    ///   already been settled.
+    /// * Panics with [`Error::NotInDispute`] if the escrow is not `Disputed`.
+    /// * Panics with [`Error::EscalationWindowActive`] if no checkpoint has been
+    ///   reached yet.
+    /// * Panics with [`Error::InvalidDisputeAction`] if the dispute is already
+    ///   recorded at the tier the clock has reached.
+    /// * Panics with [`Error::Unauthorized`] if `caller` is not eligible to
+    ///   escalate to that tier.
     pub fn escalate_dispute(env: Env, order_id: u32, caller: Address) {
         caller.require_auth();
 
         let escrow = Self::get_stored_escrow(&env, order_id);
+        // A settled dispute has nothing left to escalate. Checked before the
+        // status check so the terminal case reports the specific error.
+        if Self::has_settlement_receipt(&env, order_id) {
+            env.panic_with_error(crate::Error::SettlementAlreadyFinalized);
+        }
         if escrow.status != EscrowStatus::Disputed {
             env.panic_with_error(crate::Error::NotInDispute);
         }
 
+        let config = Self::get_platform_config_internal(&env);
+        let schedule = Self::escalation_schedule(&env, &escrow, &config)
+            .unwrap_or_else(|e| env.panic_with_error(e));
+        let current_time = env.ledger().timestamp();
+        let target_tier = Self::tier_at(current_time, &schedule);
+
+        // No checkpoint reached yet: the arbitrator is still inside its window.
+        if target_tier == EscalationTier::Assigned {
+            env.panic_with_error(crate::Error::EscalationWindowActive);
+        }
+
+        // Reject re-escalation to a tier the dispute already occupies. Progress
+        // requires a *new* checkpoint to have elapsed.
+        let previous_tier = Self::recorded_escalation_tier(&env, order_id);
+        if target_tier <= previous_tier {
+            env.panic_with_error(crate::Error::InvalidDisputeAction);
+        }
+
+        if !Self::is_eligible_escalator(&config, &escrow, target_tier, &caller) {
         let assignment = Self::assert_active_dispute_assignment(&env, order_id, None);
 
         if !(caller == escrow.buyer || caller == escrow.seller) {
             env.panic_with_error(crate::Error::Unauthorized);
         }
-        let expected_role = if caller == escrow.buyer { UserRole::Buyer } else { UserRole::Artisan };
-        let operation_id = Self::onboarding_operation_id(&env, b"escalate_dispute:", order_id);
-        Self::authorize_onboarding_state(&env, &caller, operation_id, expected_role);
 
-        let escalation_key = DataKey::DisputeEscalation(order_id);
-        if env.storage().persistent().has(&escalation_key) {
-            env.panic_with_error(crate::Error::InvalidEscrowState);
+        // Parties additionally have to present valid onboarding state; the
+        // privileged roles and the permissionless timeout tier do not.
+        if Self::is_escrow_party(&escrow, &caller) {
+            let expected_role = if caller == escrow.buyer {
+                UserRole::Buyer
+            } else {
+                UserRole::Artisan
+            };
+            let operation_id = Self::onboarding_operation_id(&env, b"escalate_dispute:", order_id);
+            Self::authorize_onboarding_state(&env, &caller, operation_id, expected_role);
         }
 
-        let config = Self::get_platform_config_internal(&env);
-        let dispute_initiated_at = escrow
-            .dispute_initiated_at
-            .unwrap_or(escrow.created_at as u64);
-        let current_time = env.ledger().timestamp();
+        let state_key = DataKey::DisputeEscalationState(order_id);
+        let escalation_count = env
+            .storage()
+            .persistent()
+            .get::<_, DisputeEscalationState>(&state_key)
+            .map_or(0, |state| state.escalation_count);
+        env.storage().persistent().set(
+            &state_key,
+            &DisputeEscalationState {
+                order_id,
+                tier: target_tier,
+                previous_tier,
+                escalated_by: caller.clone(),
+                escalated_at: current_time,
+                escalation_count: escalation_count.saturating_add(1),
+            },
+        );
+        Self::extend_persistent(&env, &state_key);
 
-        // Time policy: escalation window is active while now < dispute_initiated_at + escalation_window
-        if time_policy::is_window_active(current_time, dispute_initiated_at, config.dispute_escalation_window as u64) {
-            env.panic_with_error(crate::Error::ReleaseWindowNotElapsed);
+        // Preserve the single-shot record consumed by existing indexers (#941):
+        // it always points at the *first* escalation of this dispute.
+        let legacy_key = DataKey::DisputeEscalation(order_id);
+        if !env.storage().persistent().has(&legacy_key) {
+            env.storage().persistent().set(
+                &legacy_key,
+                &DisputeEscalationRecord {
+                    order_id,
+                    escalated_by: caller.clone(),
+                    escalated_at: current_time,
+                },
+            );
+            Self::extend_persistent(&env, &legacy_key);
         }
 
-        let record = DisputeEscalationRecord {
-            order_id,
-            assignment_revision: assignment.revision,
-            escalated_by: caller,
-            escalated_at: current_time,
-        };
-
-        env.storage().persistent().set(&escalation_key, &record);
-
-        Self::emit_dispute_escalated(&env, order_id);
+        Self::emit_dispute_escalated(&env, order_id, target_tier, &caller, current_time);
     }
 
-    /// Get escalation record for an order (#941).
+    /// Get the first escalation record for an order (#941).
+    ///
+    /// Retained for backwards compatibility; use
+    /// [`Self::get_dispute_escalation_status`] for the full ladder.
     pub fn get_dispute_escalation(env: Env, order_id: u32) -> Option<DisputeEscalationRecord> {
         env.storage()
             .persistent()
             .get(&DataKey::DisputeEscalation(order_id))
+    }
+
+    /// Get the tiered escalation ladder state recorded for a dispute (#1080).
+    ///
+    /// Returns `None` when the dispute has never been escalated.
+    pub fn get_dispute_escalation_state(
+        env: Env,
+        order_id: u32,
+    ) -> Option<DisputeEscalationState> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeEscalationState(order_id))
+    }
+
+    /// Full auditable escalation snapshot for a disputed escrow (#1080).
+    ///
+    /// Exposes every checkpoint timestamp, the final deadline, the tier the
+    /// clock implies, the tier recorded on-chain, whether the dispute is already
+    /// finalized, and the settlement a timeout would deterministically produce.
+    ///
+    /// # Errors
+    /// * [`Error::InvalidEscrowState`] if the escrow is not `Disputed` or has no
+    ///   `dispute_initiated_at` timestamp.
+    pub fn get_dispute_escalation_status(
+        env: Env,
+        order_id: u32,
+    ) -> Result<DisputeEscalationStatus, Error> {
+        let escrow = Self::get_stored_escrow(&env, order_id);
+        Self::assert_disputed_for_policy(&escrow)?;
+
+        let config = Self::get_platform_config_internal(&env);
+        let schedule = Self::escalation_schedule(&env, &escrow, &config)?;
+        let now = env.ledger().timestamp();
+        let current_tier = Self::tier_at(now, &schedule);
+
+        Ok(DisputeEscalationStatus {
+            order_id,
+            schedule,
+            current_tier,
+            recorded_tier: Self::recorded_escalation_tier(&env, order_id),
+            is_timed_out: current_tier == EscalationTier::TimedOut,
+            is_finalized: Self::has_settlement_receipt(&env, order_id),
+            timeout_outcome: Self::timeout_outcome(config.expired_dispute_fee_policy),
+        })
+    }
+
+    /// Absolute timestamp after which a pending dispute can no longer be
+    /// arbitrated and only the deterministic timeout settlement remains (#1080).
+    ///
+    /// # Errors
+    /// * [`Error::InvalidEscrowState`] if the escrow is not a pending dispute.
+    pub fn get_dispute_final_deadline(env: Env, order_id: u32) -> Result<u64, Error> {
+        let escrow = Self::get_stored_escrow(&env, order_id);
+        Self::assert_disputed_for_policy(&escrow)?;
+        let config = Self::get_platform_config_internal(&env);
+        Ok(Self::escalation_schedule(&env, &escrow, &config)?.final_deadline)
+    }
+
+    /// Whether `caller` may escalate `order_id` at the current ledger time (#1080).
+    ///
+    /// Encodes the escalation permission matrix as a queryable predicate so
+    /// front-ends and monitoring bots can surface exactly who is allowed to act:
+    ///
+    /// | Tier              | Eligible escalators                                 |
+    /// |-------------------|-----------------------------------------------------|
+    /// | `Assigned`        | nobody - the arbitrator is still inside its window   |
+    /// | `PartyFlagged`    | buyer, seller                                       |
+    /// | `ModeratorReview` | buyer, seller, moderator, arbitrator, admin         |
+    /// | `AdminReview`     | buyer, seller, moderator, arbitrator, admin         |
+    /// | `TimedOut`        | anyone - permissionless safety net                   |
+    ///
+    /// Returns `false` (rather than erroring) for escrows that are not pending
+    /// disputes, for already-settled disputes, and when the tier the clock has
+    /// reached is already recorded on-chain.
+    pub fn can_escalate_dispute(env: Env, order_id: u32, caller: Address) -> bool {
+        if !env.storage().persistent().has(&(ESCROW, order_id)) {
+            return false;
+        }
+        // Routed through `get_stored_escrow` so legacy storage layouts are
+        // normalised the same way every settlement path normalises them.
+        let escrow = Self::get_stored_escrow(&env, order_id);
+        if escrow.status != EscrowStatus::Disputed || Self::has_settlement_receipt(&env, order_id) {
+            return false;
+        }
+
+        let config = Self::get_platform_config_internal(&env);
+        let schedule = match Self::escalation_schedule(&env, &escrow, &config) {
+            Ok(schedule) => schedule,
+            Err(_) => return false,
+            assignment_revision: assignment.revision,
+            escalated_by: caller,
+            escalated_at: current_time,
+        };
+        let target_tier = Self::tier_at(env.ledger().timestamp(), &schedule);
+        if target_tier <= Self::recorded_escalation_tier(&env, order_id) {
+            return false;
+        }
+        Self::is_eligible_escalator(&config, &escrow, target_tier, &caller)
+    }
+
+    /// Preview the deterministic settlement a timeout would produce (#1080).
+    ///
+    /// Derived purely from the operator's `expired_dispute_fee_policy`, so the
+    /// outcome of letting a dispute time out is knowable in advance and cannot
+    /// be influenced by whoever happens to call `resolve_expired_dispute`.
+    pub fn get_timeout_outcome(env: Env) -> TimeoutOutcome {
+        let config = Self::get_platform_config_internal(&env);
+        Self::timeout_outcome(config.expired_dispute_fee_policy)
+    }
+
+    /// Read the configured escalation checkpoint schedule (#1080).
+    pub fn get_escalation_checkpoints(env: Env) -> EscalationCheckpoints {
+        let config = Self::get_platform_config_internal(&env);
+        Self::escalation_checkpoints(&env, &config)
+    }
+
+    /// Configure the escalation checkpoint schedule (admin only) (#1080).
+    ///
+    /// Offsets are in seconds from `dispute_initiated_at` and must be strictly
+    /// increasing and strictly below `max_dispute_duration`, so that every tier
+    /// is reachable before the final deadline turns the dispute into a timeout.
+    ///
+    /// `party_checkpoint` is kept in sync with `dispute_escalation_window` so
+    /// the tier-1 window has exactly one source of truth (#941).
+    ///
+    /// # Errors
+    /// * Panics with [`Error::InvalidEscalationPolicy`] if the offsets are not
+    ///   strictly increasing or the last one is not below the final deadline.
+    pub fn set_escalation_checkpoints(
+        env: Env,
+        party_checkpoint: u32,
+        moderator_checkpoint: u32,
+        admin_checkpoint: u32,
+    ) {
+        let mut config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if party_checkpoint == 0
+            || party_checkpoint >= moderator_checkpoint
+            || moderator_checkpoint >= admin_checkpoint
+            || admin_checkpoint >= config.max_dispute_duration
+        {
+            env.panic_with_error(crate::Error::InvalidEscalationPolicy);
+        }
+
+        let checkpoints = EscalationCheckpoints {
+            party_checkpoint,
+            moderator_checkpoint,
+            admin_checkpoint,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::EscalationCheckpoints, &checkpoints);
+        Self::extend_persistent(&env, &DataKey::EscalationCheckpoints);
+
+        let old_window = config.dispute_escalation_window;
+        config.dispute_escalation_window = party_checkpoint;
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &config);
+        Self::emit_config_updated(
+            &env,
+            "dispute_escalation_window",
+            ConfigValue::U32(old_window),
+            ConfigValue::U32(party_checkpoint),
+        );
     }
 
     /// Return the assignment snapshot for a disputed order.
@@ -8909,9 +9449,25 @@ impl CraftNexusContract {
     }
 
     /// Set the dispute escalation window (admin only) (#941).
+    ///
+    /// This is the tier-1 (`PartyFlagged`) checkpoint. The stored checkpoint
+    /// schedule is updated alongside it so the two cannot diverge; the later
+    /// checkpoints are pushed out if the new window would overtake them.
     pub fn set_dispute_escalation_window(env: Env, window: u32) {
         let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
+
+        let mut checkpoints = Self::escalation_checkpoints(&env, &config);
+        checkpoints.party_checkpoint = window;
+        checkpoints.moderator_checkpoint = checkpoints.moderator_checkpoint.max(window);
+        checkpoints.admin_checkpoint = checkpoints
+            .admin_checkpoint
+            .max(checkpoints.moderator_checkpoint);
+        env.storage()
+            .persistent()
+            .set(&DataKey::EscalationCheckpoints, &checkpoints);
+        Self::extend_persistent(&env, &DataKey::EscalationCheckpoints);
+
         config.dispute_escalation_window = window;
         env.storage()
             .instance()
@@ -9006,9 +9562,37 @@ impl CraftNexusContract {
             .set(&DataKey::RateLimitConfig, &rate_config);
     }
 
-    fn emit_dispute_escalated(env: &Env, order_id: u32) {
-        env.events()
-            .publish((Symbol::new(env, "dispute_escalated"), order_id as u64), ());
+    /// Emit the auditable escalation event (#941, #1080).
+    ///
+    /// Topics are unchanged from #941 (`("dispute_escalated", order_id)`) so
+    /// existing subscriptions keep matching; the tier, the escalator, and the
+    /// timestamp are carried in the data payload.
+    fn emit_dispute_escalated(
+        env: &Env,
+        order_id: u32,
+        tier: EscalationTier,
+        escalated_by: &Address,
+        escalated_at: u64,
+    ) {
+        env.events().publish(
+            (Symbol::new(env, "dispute_escalated"), order_id as u64),
+            (tier, escalated_by.clone(), escalated_at),
+        );
+    }
+
+    /// Emit the terminal timeout event for a dispute that blew through its
+    /// final deadline (#1080).
+    fn emit_dispute_timed_out(
+        env: &Env,
+        order_id: u32,
+        outcome: TimeoutOutcome,
+        final_deadline: u64,
+        settled_at: u64,
+    ) {
+        env.events().publish(
+            (Symbol::new(env, "dispute_timed_out"), order_id as u64),
+            (outcome, final_deadline, settled_at),
+        );
     }
 
     /// Resolve a dispute by splitting funds between buyer and seller.
@@ -10319,21 +10903,45 @@ impl CraftNexusContract {
     /// # Errors
     /// * [`Error::EscrowNotFound`] — no escrow exists for `order_id`.
     /// * [`Error::InvalidEscrowState`] — the escrow is not currently `Disputed`.
+    /// * [`Error::SettlementAlreadyFinalized`] — the dispute already has a
+    ///   settlement receipt; a timed-out dispute cannot be resolved twice (#1080).
     /// * [`Error::DisputeExpired`] — the `max_dispute_duration` deadline has **not**
     ///   yet passed; the regular `resolve_dispute` path must be used instead.
     /// * [`Error::SettlementAlreadyFinalized`] — another settlement path already ran.
     pub fn resolve_expired_dispute(env: Env, order_id: u32) -> Result<(), Error> {
         let _guard = ReentryGuardScope::new(&env);
         let snapshot_opt: Option<Escrow> = env.storage().persistent().get(&(ESCROW, order_id));
+        let snapshot = match snapshot_opt {
+            Some(escrow) => escrow,
+            None => return Err(Error::EscrowNotFound),
+        };
+        Self::extend_persistent(&env, &(ESCROW, order_id));
         let snapshot = snapshot_opt.ok_or(Error::EscrowNotFound)?;
         Self::extend_persistent(&env, &(ESCROW, order_id));
         let mut snapshot = snapshot_opt.unwrap();
 
         let config = Self::get_platform_config_internal(&env);
+
+        // A dispute has exactly one terminal settlement. `assert_open_for_settlement`
+        // rejects both a second run of this path and a race with any other
+        // settlement path (arbitrated, partial, timeout) via the settlement
+        // receipt, so a timed-out dispute can never be resolved twice (#1080).
+        Self::assert_open_for_settlement(&env, &snapshot, order_id)?;
+
         // The deadline guard: if the dispute is still within the allowed window
         // the arbitrator must resolve it via `resolve_dispute`. Returning an
         // error (rather than panicking) allows the caller to detect this case
         // without rolling back unrelated ledger state.
+        Self::assert_expired_dispute_window(&env, &snapshot, &config)?;
+
+        let operation_id =
+            Self::onboarding_operation_id(&env, b"resolve_expired_dispute:", order_id);
+        Self::authorize_onboarding_state(
+            &env,
+            &snapshot.buyer,
+            operation_id.clone(),
+            UserRole::Buyer,
+        );
         if (snapshot.dispute_initiated_at.unwrap_or(0)) + config.max_dispute_duration as u64
             > env.ledger().timestamp()
         {
@@ -10346,6 +10954,8 @@ impl CraftNexusContract {
 
         // --- Effects (CEI: all writes before the token transfer) ---
 
+        let fee_bps = Self::get_effective_fee_bps(env.clone(), snapshot.seller.clone());
+        let settlement_kind = Self::timeout_settlement_kind(config.expired_dispute_fee_policy);
         // CRITICAL: Update status BEFORE external calls (CEI pattern)
         snapshot.status = EscrowStatus::Resolved;
         env.storage().persistent().set(&(ESCROW, order_id), &snapshot);
@@ -10377,9 +10987,14 @@ impl CraftNexusContract {
         let allocation =
             Self::compute_fee_allocation(&env, snapshot.amount, fee_bps, settlement_kind);
 
+        // Claim writes the `SettlementPending` sentinel and commit writes the
+        // settlement receipt plus every counter decrement - both before the
+        // token transfer below.
         let escrow = Self::claim_disputed_settlement(&env, order_id)?;
         let escrow =
             Self::commit_resolved_escrow(&env, order_id, escrow, SettlementPath::ExpiredDispute, 0);
+
+        // --- Interactions ---
 
         Self::apply_fee_allocation_transfers(
             &env,
@@ -10402,6 +11017,16 @@ impl CraftNexusContract {
                 token: escrow.token.clone(),
                 timestamp: env.ledger().timestamp(),
             },
+        );
+        Self::emit_dispute_timed_out(
+            &env,
+            order_id,
+            Self::timeout_outcome(config.expired_dispute_fee_policy),
+            time_policy::deadline(
+                snapshot.dispute_initiated_at.unwrap_or_default(),
+                config.max_dispute_duration as u64,
+            ),
+            current_time,
         );
 
         Ok(())
