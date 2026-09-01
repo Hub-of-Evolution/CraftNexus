@@ -455,3 +455,131 @@ fn test_prevent_evidence_reuse_across_disputes() {
     let result = client.try_submit_evidence(&2, &buyer, &payload);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_expired_attestation_fails_deterministically() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
+    token_admin.mint(&buyer, &100_000_000);
+
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 100;
+    });
+
+    let attestation = Attestation {
+        subject: buyer.clone(),
+        contract_instance: client.address(),
+        issuance_ledger: 50,
+        expiry_ledger: 99,
+        operation_nonce: 1,
+    };
+
+    let result = client.try_create_escrow(
+        &buyer,
+        &seller,
+        &token,
+        &50_000_000,
+        &1,
+        &Some(attestation),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_attestation_cannot_be_moved_to_another_contract_instance() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
+    token_admin.mint(&buyer, &100_000_000);
+
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 100;
+    });
+
+    let attestation = Attestation {
+        subject: buyer.clone(),
+        contract_instance: Address::generate(&env),
+        issuance_ledger: 50,
+        expiry_ledger: 200,
+        operation_nonce: 2,
+    };
+
+    let result = client.try_create_escrow(
+        &buyer,
+        &seller,
+        &token,
+        &50_000_000,
+        &2,
+        &Some(attestation),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_attestation_issuance_and_expiry_boundaries() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
+    token_admin.mint(&buyer, &300_000_000);
+
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 1_000;
+    });
+
+    let attestation = Attestation {
+        subject: buyer.clone(),
+        contract_instance: client.address(),
+        issuance_ledger: 1_000,
+        expiry_ledger: 2_000,
+        operation_nonce: 1,
+    };
+
+    // Valid at the issuance ledger boundary.
+    client.create_escrow(
+        &buyer,
+        &seller,
+        &token,
+        &50_000_000,
+        &1,
+        &Some(attestation),
+    );
+
+    // Valid at the expiry ledger boundary.
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 2_000;
+    });
+    let attestation = Attestation {
+        subject: buyer.clone(),
+        contract_instance: client.address(),
+        issuance_ledger: 1_000,
+        expiry_ledger: 2_000,
+        operation_nonce: 2,
+    };
+    client.create_escrow(
+        &buyer,
+        &seller,
+        &token,
+        &50_000_000,
+        &2,
+        &Some(attestation),
+    );
+
+    // Invalid after the expiry ledger boundary.
+    env.ledger().with_mut(|li| {
+        li.sequence_number = 2_001;
+    });
+    let attestation = Attestation {
+        subject: buyer.clone(),
+        contract_instance: client.address(),
+        issuance_ledger: 1_000,
+        expiry_ledger: 2_000,
+        operation_nonce: 3,
+    };
+    let result = client.try_create_escrow(
+        &buyer,
+        &seller,
+        &token,
+        &50_000_000,
+        &3,
+        &Some(attestation),
+    );
+    assert!(result.is_err());
+}

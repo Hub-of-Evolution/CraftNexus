@@ -167,6 +167,8 @@ const DEFAULT_MAX_SUCCESSFUL_PER_WINDOW: u32 = 5;
 const DEFAULT_MIN_REPUTATION_SETTLEMENT: i128 = 10_000_000;
 /// Bounded reputation history retained per user for abuse-pattern detection.
 const MAX_REPUTATION_HISTORY: u32 = 20;
+/// Default validity period for attestations in ledgers (24 hours at 5s per ledger).
+const DEFAULT_ATTESTATION_VALIDITY_LEDGERS: u32 = 17_280;
 /// Cap decay intervals applied in one call to bound CPU (≈ 64 periods).
 const MAX_DECAY_INTERVALS_PER_CALL: u64 = 64;
 
@@ -187,6 +189,41 @@ mod onboarding_test;
 /// Persistent storage entries incur rent. Every read/write in this contract
 /// calls [`extend_ttl`] to keep entries alive for ~30 days, preventing
 /// accidental expiry of user profiles.
+/// Cross-contract authorization evidence with a bounded validity period and
+/// explicit ledger-context binding (issue: Add Attestation Expiry and Ledger Binding).
+#[contracttype]
+#[derive(Clone)]
+pub struct AttestationEvidence {
+    /// The user the attestation was issued to.
+    pub subject: Address,
+    /// Ledger sequence at issuance.
+    pub issuance_ledger: u32,
+    /// Ledger sequence after which the attestation is expired.
+    pub expiry_ledger: u32,
+    /// Contract instance this attestation is bound to.
+    pub contract_instance: Address,
+    /// Monotonic nonce to prevent replay within the validity window.
+    pub operation_nonce: u64,
+}
+
+/// Validates that an attestation is currently valid for the calling contract.
+///
+/// The attestation must not be expired, must be bound to the current contract
+/// instance, must have been issued no earlier than the current ledger, and
+/// must match the provided operation nonce.
+pub fn validate_attestation_evidence(
+    env: &Env,
+    attestation: &AttestationEvidence,
+    expected_nonce: u64,
+) -> bool {
+    let current_ledger = env.ledger().sequence();
+    let current_contract = env.current_contract_address();
+    attestation.issuance_ledger <= current_ledger
+        && current_ledger <= attestation.expiry_ledger
+        && attestation.contract_instance == current_contract
+        && attestation.operation_nonce == expected_nonce
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -240,6 +277,8 @@ pub enum DataKey {
     ReputationHistoryIndexed(Address, u32),
     /// Proof-of-Humanity credential record keyed by user address (#940)
     UserPohCredential(Address),
+    /// Attestation record keyed by a unique attestation hash (cross-contract authorization).
+    AttestationEvidence(BytesN<32>),
     /// Secondary index mapping proof-of-humanity credential hash to owner address (#940)
     PohCredentialHash(Bytes),
     /// Secondary index mapping correlated identity hash to owner address (#940)
