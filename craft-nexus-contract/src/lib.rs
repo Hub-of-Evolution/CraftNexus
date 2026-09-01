@@ -710,6 +710,10 @@ pub enum DataKey {
     ReconciliationRepairPlan(u64),
     /// Monotonic repair-plan identifier.
     NextReconciliationRepairPlanId,
+    /// Consumed marker for executed repair plans to ensure double application is harmless
+    ConsumedRepairPlan(u64),
+    /// Cumulative residual balance allocated across repair plans for a token
+    AllocatedResidualBalance(Address),
     /// Bounded log of completed WASM upgrades. Capped at MAX_UPGRADE_HISTORY
     UpgradeHistory,
     /// Compatibility evidence for completed WASM upgrades.
@@ -1209,17 +1213,32 @@ pub struct ReconciliationReport {
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RepairAction {
+    pub action_type: u32,
+    pub target: Option<Address>,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct ReconciliationRepairPlan {
     pub id: u64,
+    pub version: u32,
     pub token: Address,
     pub expected_locked: i128,
     pub expected_staked: i128,
     pub observed_balance: i128,
     pub observed_tracked_locked: i128,
     pub observed_tracked_staked: i128,
+    pub discrepancy_digest: BytesN<32>,
+    pub allocated_amount: i128,
+    pub actions: Vec<RepairAction>,
+    pub approvals: Vec<Address>,
     pub created_at: u64,
     pub applied: bool,
     pub cancelled: bool,
+    pub consumed: bool,
 }
 
 #[contracttype]
@@ -4873,6 +4892,74 @@ impl CraftNexusContract {
                 }
             }
         }
+    }
+
+    fn apply_reconciliation_repair(env: &Env, plan_id: u64) -> Result<(), Error> {
+        let key = DataKey::ReconciliationRepairPlan(plan_id);
+        let mut plan: ReconciliationRepairPlan = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::RepairPlanNotFound)?;
+
+        // Applying a plan twice is harmless (returns Ok(()))
+        if plan.applied || plan.consumed || env.storage().persistent().has(&DataKey::ConsumedRepairPlan(plan_id)) {
+            return Ok(());
+        }
+
+        if plan.cancelled {
+            return Err(Error::RepairPlanTerminal);
+        }
+
+        let report: ReconciliationReport = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ReconciliationReport(plan.token.clone()))
+            .ok_or(Error::ReconciliationRequired)?;
+
+        let current_digest = Self::compute_reconciliation_digest(
+            env,
+            &plan.token,
+            report.expected_locked,
+            report.expected_staked,
+            report.balance,
+            report.tracked_locked,
+            report.tracked_staked,
+        );
+
+        // Repairs are blocked when the expected state digest changes
+        if current_digest != plan.discrepancy_digest {
+            return Err(Error::RepairPlanPreconditionFailed);
+        }
+
+        let allocation = Self::fund_allocation(env, &plan.token);
+        if allocation.balance != plan.observed_balance
+            || allocation.total_locked != plan.observed_tracked_locked
+            || allocation.total_staked != plan.observed_tracked_staked
+            || allocation.balance < plan.expected_locked + plan.expected_staked
+        {
+            return Err(Error::RepairPlanPreconditionFailed);
+        }
+
+        env.storage().persistent().set(
+            &DataKey::TotalLocked(plan.token.clone()),
+            &plan.expected_locked,
+        );
+        env.storage().persistent().set(
+            &DataKey::TotalStaked(plan.token.clone()),
+            &plan.expected_staked,
+        );
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ReconciliationReport(plan.token.clone()));
+        plan.applied = true;
+        plan.consumed = true;
+        env.storage().persistent().set(&key, &plan);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ConsumedRepairPlan(plan_id), &true);
+        Self::extend_persistent(env, &key);
+        Self::extend_persistent(env, &DataKey::ConsumedRepairPlan(plan_id));
         Ok(())
     }
 }
@@ -12865,9 +12952,38 @@ impl CraftNexusContract {
         })
     }
 
+    pub fn compute_reconciliation_digest(
+        env: &Env,
+        token: &Address,
+        expected_locked: i128,
+        expected_staked: i128,
+        observed_balance: i128,
+        observed_tracked_locked: i128,
+        observed_tracked_staked: i128,
+    ) -> BytesN<32> {
+        let mut bytes = Bytes::new(env);
+        bytes.append(&token.to_xdr(env));
+        bytes.append(&Bytes::from_array(env, &expected_locked.to_be_bytes()));
+        bytes.append(&Bytes::from_array(env, &expected_staked.to_be_bytes()));
+        bytes.append(&Bytes::from_array(env, &observed_balance.to_be_bytes()));
+        bytes.append(&Bytes::from_array(env, &observed_tracked_locked.to_be_bytes()));
+        bytes.append(&Bytes::from_array(env, &observed_tracked_staked.to_be_bytes()));
+        env.crypto().sha256(&bytes).into()
+    }
+
     pub fn propose_reconciliation_repair(
         env: Env,
         token: Address,
+    ) -> Result<ReconciliationRepairPlan, Error> {
+        let actions = Vec::new(&env);
+        Self::propose_reconciliation_repair_with_details(env, token, 0i128, actions)
+    }
+
+    pub fn propose_reconciliation_repair_with_details(
+        env: Env,
+        token: Address,
+        allocated_amount: i128,
+        actions: Vec<RepairAction>,
     ) -> Result<ReconciliationRepairPlan, Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
@@ -12883,23 +12999,59 @@ impl CraftNexusContract {
             return Err(Error::EmergencyAccountingInvariant);
         }
 
+        let residual_balance = report.balance - (report.expected_locked + report.expected_staked);
+        let currently_allocated: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AllocatedResidualBalance(token.clone()))
+            .unwrap_or(0);
+
+        if allocated_amount < 0 || currently_allocated.saturating_add(allocated_amount) > residual_balance {
+            return Err(Error::EmergencyAccountingInvariant);
+        }
+
+        let digest = Self::compute_reconciliation_digest(
+            &env,
+            &token,
+            report.expected_locked,
+            report.expected_staked,
+            report.balance,
+            report.tracked_locked,
+            report.tracked_staked,
+        );
+
         let id: u64 = env
             .storage()
             .persistent()
             .get(&DataKey::NextReconciliationRepairPlanId)
             .unwrap_or(1);
+
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(admin);
+
         let plan = ReconciliationRepairPlan {
             id,
-            token,
+            version: 1,
+            token: token.clone(),
             expected_locked: report.expected_locked,
             expected_staked: report.expected_staked,
             observed_balance: report.balance,
             observed_tracked_locked: report.tracked_locked,
             observed_tracked_staked: report.tracked_staked,
+            discrepancy_digest: digest,
+            allocated_amount,
+            actions,
+            approvals,
             created_at: env.ledger().timestamp(),
             applied: false,
             cancelled: false,
+            consumed: false,
         };
+
+        env.storage().persistent().set(
+            &DataKey::AllocatedResidualBalance(token.clone()),
+            &(currently_allocated.saturating_add(allocated_amount)),
+        );
         env.storage()
             .persistent()
             .set(&DataKey::ReconciliationRepairPlan(id), &plan);
@@ -12908,6 +13060,28 @@ impl CraftNexusContract {
             .set(&DataKey::NextReconciliationRepairPlanId, &(id + 1));
         Self::extend_persistent(&env, &DataKey::ReconciliationRepairPlan(id));
         Self::extend_persistent(&env, &DataKey::NextReconciliationRepairPlanId);
+        Ok(plan)
+    }
+
+    pub fn approve_reconciliation_repair(
+        env: Env,
+        plan_id: u64,
+    ) -> Result<ReconciliationRepairPlan, Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        let key = DataKey::ReconciliationRepairPlan(plan_id);
+        let mut plan: ReconciliationRepairPlan = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::RepairPlanNotFound)?;
+        if plan.applied || plan.cancelled {
+            return Err(Error::RepairPlanTerminal);
+        }
+        if !plan.approvals.contains(&admin) {
+            plan.approvals.push_back(admin);
+            env.storage().persistent().set(&key, &plan);
+        }
         Ok(plan)
     }
 
