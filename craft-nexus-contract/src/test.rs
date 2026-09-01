@@ -2618,6 +2618,225 @@ fn test_upgrade_manifest_is_recorded_and_consumed() {
         .is_none());
 }
 
+// ===== Issue #1140: Upgrade State Commitment =====
+
+#[test]
+fn test_upgrade_state_commitment_persisted_after_execution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
+
+    let commitment = client.get_upgrade_state_commitment();
+    let nonzero = BytesN::from_array(&env, &[1u8; 32]);
+    let manifest = UpgradeCompatibilityManifest {
+        source_version: 1,
+        target_version: 2,
+        state_commitment: commitment.clone(),
+        interface_commitment: nonzero.clone(),
+        authorization_commitment: nonzero.clone(),
+        preconditions_commitment: nonzero.clone(),
+        postconditions_commitment: nonzero.clone(),
+        rollback_commitment: nonzero.clone(),
+        migration_checkpoint: nonzero.clone(),
+        migration_complete: true,
+        manual_records: 0,
+    };
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    client.submit_compat_manifest(&wasm_hash, &manifest);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+
+    // No commitment exists before execution
+    assert!(client
+        .get_upgrade_state_commit(&wasm_hash)
+        .is_none());
+
+    client.execute_upgrade(&wasm_hash);
+
+    // Commitment is persisted after execution
+    let commitment_record = client
+        .get_upgrade_state_commit(&wasm_hash)
+        .expect("commitment should exist after execution");
+    assert_eq!(commitment_record.from_version, 1);
+    assert_eq!(commitment_record.to_version, 2);
+    assert_eq!(commitment_record.wasm_hash, wasm_hash);
+    assert_eq!(commitment_record.state_digest, commitment);
+    assert!(commitment_record.immutable, "commitment should be immutable after activation");
+    assert_ne!(commitment_record.activated_at, 0, "activated_at should be set");
+    assert_ne!(
+        commitment_record.migration_result_digest,
+        BytesN::from_array(&env, &[0u8; 32]),
+        "migration result digest should not be zero"
+    );
+}
+
+#[test]
+fn test_upgrade_state_commitment_immutable_prevents_reexecution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
+
+    let commitment = client.get_upgrade_state_commitment();
+    let nonzero = BytesN::from_array(&env, &[1u8; 32]);
+    let manifest = UpgradeCompatibilityManifest {
+        source_version: 1,
+        target_version: 2,
+        state_commitment: commitment.clone(),
+        interface_commitment: nonzero.clone(),
+        authorization_commitment: nonzero.clone(),
+        preconditions_commitment: nonzero.clone(),
+        postconditions_commitment: nonzero.clone(),
+        rollback_commitment: nonzero.clone(),
+        migration_checkpoint: nonzero.clone(),
+        migration_complete: true,
+        manual_records: 0,
+    };
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    client.submit_compat_manifest(&wasm_hash, &manifest);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+
+    client.execute_upgrade(&wasm_hash);
+
+    // Try to execute the same upgrade again after re-proposing. The immutable
+    // commitment must reject execution even though a fresh proposal and
+    // manifest exist, because the WASM hash was already deployed.
+    let commitment2 = client.get_upgrade_state_commitment();
+    let manifest2 = UpgradeCompatibilityManifest {
+        source_version: 2,
+        target_version: 3,
+        state_commitment: commitment2.clone(),
+        interface_commitment: nonzero.clone(),
+        authorization_commitment: nonzero.clone(),
+        preconditions_commitment: nonzero.clone(),
+        postconditions_commitment: nonzero.clone(),
+        rollback_commitment: nonzero.clone(),
+        migration_checkpoint: nonzero.clone(),
+        migration_complete: true,
+        manual_records: 0,
+    };
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    client.submit_compat_manifest(&wasm_hash, &manifest2);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+
+    let result = client.try_execute_upgrade(&wasm_hash);
+    assert_eq!(
+        result.unwrap_err(),
+        Ok(Error::UpgradeAlreadyExecuted),
+        "re-execution should fail with UpgradeAlreadyExecuted after the commitment is immutable"
+    );
+
+    // Verify commitment is still present and immutable
+    let commitment_record = client
+        .get_upgrade_state_commit(&wasm_hash)
+        .expect("commitment should still exist");
+    assert!(commitment_record.immutable, "commitment should remain immutable");
+}
+
+#[test]
+fn test_upgrade_execution_fails_without_completed_migration_result() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
+
+    let commitment = client.get_upgrade_state_commitment();
+    let nonzero = BytesN::from_array(&env, &[1u8; 32]);
+
+    // Incomplete migration: migration_complete = false
+    let manifest = UpgradeCompatibilityManifest {
+        source_version: 1,
+        target_version: 2,
+        state_commitment: commitment.clone(),
+        interface_commitment: nonzero.clone(),
+        authorization_commitment: nonzero.clone(),
+        preconditions_commitment: nonzero.clone(),
+        postconditions_commitment: nonzero.clone(),
+        rollback_commitment: nonzero.clone(),
+        migration_checkpoint: nonzero.clone(),
+        migration_complete: false,
+        manual_records: 0,
+    };
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    client.submit_compat_manifest(&wasm_hash, &manifest);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+
+    // Execution should fail - migration result is incomplete
+    let result = client.try_execute_upgrade(&wasm_hash);
+    assert!(result.is_err(), "execution should fail when migration is incomplete");
+
+    // No commitment should be persisted since execution failed
+    assert!(client
+        .get_upgrade_state_commit(&wasm_hash)
+        .is_none());
+}
+
+#[test]
+fn test_upgrade_state_commitment_shows_manual_records_incomplete() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
+
+    let commitment = client.get_upgrade_state_commitment();
+    let nonzero = BytesN::from_array(&env, &[1u8; 32]);
+
+    // Migration complete but has manual records requiring operator intervention
+    let manifest = UpgradeCompatibilityManifest {
+        source_version: 1,
+        target_version: 2,
+        state_commitment: commitment.clone(),
+        interface_commitment: nonzero.clone(),
+        authorization_commitment: nonzero.clone(),
+        preconditions_commitment: nonzero.clone(),
+        postconditions_commitment: nonzero.clone(),
+        rollback_commitment: nonzero.clone(),
+        migration_checkpoint: nonzero.clone(),
+        migration_complete: true,
+        manual_records: 2,
+    };
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    client.submit_compat_manifest(&wasm_hash, &manifest);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+
+    // Execution should fail - migration has unhandled manual records
+    let result = client.try_execute_upgrade(&wasm_hash);
+    assert!(result.is_err(), "execution should fail with manual records pending");
+
+    // No commitment persisted
+    assert!(client
+        .get_upgrade_state_commit(&wasm_hash)
+        .is_none());
+}
+
 #[test]
 fn test_get_version_initially() {
     let env = Env::default();

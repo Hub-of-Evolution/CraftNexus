@@ -305,6 +305,9 @@ pub enum Error {
     /// An active dispute, recurring escrow, or pending upgrade exists that blocks
     /// the requested emergency operation from starting (#1072).
     EmergencyConflictActive = 86,
+    /// The upgrade was already executed and its state commitment is immutable.
+    /// Re-execution with the same WASM hash is not permitted (#1140).
+    UpgradeAlreadyExecuted = 87,
     /// The caller supplied an admin revision that does not match the current
     /// monotonic revision; the request is stale and no mutation was applied (#1071).
     StaleAdminRevision = 87,
@@ -729,6 +732,10 @@ pub enum DataKey {
     LastUpgradeCancelledAt,
     /// Differential compatibility manifest keyed by the proposed WASM hash.
     UpgradeCompatibilityManifest(BytesN<32>),
+    /// Immutable upgrade state commitment record keyed by the deployed WASM hash.
+    /// Persists after successful upgrade execution to provide a verifiable,
+    /// tamper-evident record of the migrated state and compatibility evidence.
+    UpgradeStateCommitment(BytesN<32>),
     /// Structured evidence log for a disputed escrow order (#927)
     EvidenceLog(u32),
     /// Submitted evidence hash to prevent reuse across disputes (#927)
@@ -1575,6 +1582,42 @@ pub struct UpgradeCompatibilityRecord {
     pub state_commitment: BytesN<32>,
     pub migration_checkpoint: BytesN<32>,
     pub timestamp: u64,
+}
+
+/// Immutable upgrade state commitment record. Persists after successful upgrade
+/// execution to provide a verifiable, tamper-evident record of the migrated
+/// state and compatibility evidence. Commitments become immutable once activated.
+///
+/// # Immutability
+///
+/// Once `activated_at` is set and `immutable` is `true`, this record cannot be
+/// modified. Any attempt to re-execute an upgrade with the same `wasm_hash`
+/// will be rejected. This ensures upgrade state commitments are permanent and
+/// cannot be tampered with after activation.
+///
+/// # Fields
+///
+/// - `from_version` / `to_version` — version transition recorded at execution
+/// - `wasm_hash` — the deployed contract code hash
+/// - `state_digest` — SHA-256 of the migrated contract state snapshot
+/// - `migration_result_digest` — SHA-256 of migration outcome evidence
+/// - `admin` — the address that executed the upgrade
+/// - `timestamp` — ledger timestamp when the commitment was created
+/// - `activated_at` — ledger timestamp when the commitment became immutable
+/// - `immutable` — flag indicating if the commitment is locked
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeStateCommitment {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub state_digest: BytesN<32>,
+    pub migration_result_digest: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+    pub activated_at: u64,
+    pub immutable: bool,
 }
 
 /// Evidence produced by an isolated old/new implementation compatibility run.
@@ -7764,6 +7807,27 @@ impl CraftNexusContract {
             .get(&DataKey::UpgradeCompatibilityManifest(wasm_hash))
     }
 
+    /// Retrieve the immutable upgrade state commitment record for a deployed
+    /// WASM hash (#1140).
+    ///
+    /// Returns `Some(commitment)` if the upgrade was executed and a commitment
+    /// was persisted, or `None` if the hash was never executed or the record
+    /// does not exist. Operators can use this to verify the migrated state
+    /// digest, compatibility evidence, and immutability status off-chain.
+    ///
+    /// Note: This is distinct from [`Self::get_upgrade_state_commitment`],
+    /// which returns the computed state commitment hash (a `BytesN<32>`) for
+    /// the *current* contract state. This function returns the full persisted
+    /// commitment record for a *specific* deployed WASM hash.
+    pub fn get_upgrade_state_commit(
+        env: Env,
+        wasm_hash: BytesN<32>,
+    ) -> Option<UpgradeStateCommitment> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UpgradeStateCommitment(wasm_hash))
+    }
+
     /// Return the persisted storage layout version.
     pub fn get_storage_layout_version(env: Env) -> u32 {
         env.storage()
@@ -7842,6 +7906,19 @@ impl CraftNexusContract {
             return Err(Error::InvalidUpgradeHash);
         }
 
+        // Check for existing immutable commitment - prevent re-execution
+        let existing_commitment = env
+            .storage()
+            .persistent()
+            .get::<DataKey, UpgradeStateCommitment>(&DataKey::UpgradeStateCommitment(
+                proposal.wasm_hash.clone(),
+            ));
+        if let Some(commitment) = existing_commitment {
+            if commitment.immutable {
+                return Err(Error::UpgradeAlreadyExecuted);
+            }
+        }
+
         if env.ledger().timestamp() < proposal.upgrade_at {
             return Err(Error::UpgradeCooldownActive);
         }
@@ -7852,6 +7929,11 @@ impl CraftNexusContract {
             .get(&DataKey::UpgradeCompatibilityManifest(proposal.wasm_hash.clone()))
             .ok_or(Error::UpgradeCompatibilityMissing)?;
         Self::validate_compatibility_manifest(&env, &manifest)?;
+
+        // Validate migration result is complete before allowing execution
+        if !manifest.migration_complete {
+            return Err(Error::UpgradeMigrationIncomplete);
+        }
 
         env.deployer()
             .update_current_contract_wasm(proposal.wasm_hash.clone());
@@ -7885,10 +7967,38 @@ impl CraftNexusContract {
                 from_version: current_version,
                 to_version: new_version,
                 wasm_hash: proposal.wasm_hash.clone(),
-                state_commitment: manifest.state_commitment,
-                migration_checkpoint: manifest.migration_checkpoint,
+                state_commitment: manifest.state_commitment.clone(),
+                migration_checkpoint: manifest.migration_checkpoint.clone(),
                 timestamp: env.ledger().timestamp(),
             },
+        );
+
+        // Compute migration result digest as SHA-256 of the migration checkpoint
+        // captured in the validated compatibility manifest. This binds the
+        // commitment to the migration evidence while remaining deterministic.
+        let migration_result_digest =
+            env.crypto()
+                .sha256(&manifest.migration_checkpoint.to_xdr(&env));
+
+        // Persist immutable upgrade state commitment
+        let state_commitment = UpgradeStateCommitment {
+            from_version: current_version,
+            to_version: new_version,
+            wasm_hash: proposal.wasm_hash.clone(),
+            state_digest: manifest.state_commitment,
+            migration_result_digest: migration_result_digest.into(),
+            admin: admin.clone(),
+            timestamp: env.ledger().timestamp(),
+            activated_at: env.ledger().timestamp(),
+            immutable: true,
+        };
+        env.storage().persistent().set(
+            &DataKey::UpgradeStateCommitment(proposal.wasm_hash.clone()),
+            &state_commitment,
+        );
+        Self::extend_persistent(
+            &env,
+            &DataKey::UpgradeStateCommitment(proposal.wasm_hash.clone()),
         );
 
         // Clear proposal
