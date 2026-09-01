@@ -6,7 +6,8 @@ use crate::onboarding::UserOnboardedEvent;
 use crate::{
     ArtisanFeeTierUpdatedEvent, ConfigUpdatedEvent, EscrowEvent, EscrowResolvedEvent,
     MetadataVerifiedEvent, PlatformPausedEvent, PlatformUnpausedEvent, RecurringEscrowEvent,
-    ReputationUpdateEvent, TokensStakedEvent, TokensUnstakedEvent, UpgradeProposalEvent,
+    ReputationUpdateEvent, TokensStakedEvent, TokensUnstakedEvent, UpgradeApprovalEvent,
+    UpgradeProposalEvent,
 };
 
 /// Verifies each expected field exists on the struct. If a field is renamed or
@@ -69,7 +70,10 @@ fn snapshot_reputation_update_event() {
 
 #[test]
 fn snapshot_config_updated_event() {
-    check_fields!(ConfigUpdatedEvent, [field_name, old_value, new_value]);
+    check_fields!(
+        ConfigUpdatedEvent,
+        [field_name, old_value, new_value, revision]
+    );
 }
 
 #[test]
@@ -94,12 +98,12 @@ fn snapshot_metadata_verified_event() {
 
 #[test]
 fn snapshot_platform_paused_event() {
-    check_fields!(PlatformPausedEvent, [initiator, timestamp]);
+    check_fields!(PlatformPausedEvent, [initiator, timestamp, revision]);
 }
 
 #[test]
 fn snapshot_platform_unpaused_event() {
-    check_fields!(PlatformUnpausedEvent, [initiator, timestamp]);
+    check_fields!(PlatformUnpausedEvent, [initiator, timestamp, revision]);
 }
 
 #[test]
@@ -115,6 +119,14 @@ fn snapshot_upgrade_proposal_event() {
     check_fields!(
         UpgradeProposalEvent,
         [action, wasm_hash, admin, timestamp, upgrade_at]
+    );
+}
+
+#[test]
+fn snapshot_upgrade_approval_event() {
+    check_fields!(
+        UpgradeApprovalEvent,
+        [nonce, signer, wasm_hash, timestamp, approval_count]
     );
 }
 

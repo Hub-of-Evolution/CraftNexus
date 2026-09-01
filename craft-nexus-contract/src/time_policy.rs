@@ -22,6 +22,7 @@
 //! | Stake cooldown | stake_time | stake_cooldown | cooldown_end | stake_time | cooldown_end |
 //! | Dispute max duration | dispute_initiated_at | max_dispute_duration | initiated + max | initiated_at | initiated + max |
 //! | Evidence expiry | submitted_at | evidence_expiry | submitted + expiry | submitted_at | submitted + expiry |
+//! | Escalation checkpoint | dispute_initiated_at | checkpoint offset | initiated + offset | initiated_at | initiated + offset |
 //!
 //! # Constants
 //!
@@ -67,6 +68,14 @@ pub const EVIDENCE_CHALLENGE_WINDOW: u64 = 24 * 60 * 60;
 /// Window before a dispute can be escalated to arbitration (3 days).
 pub const DISPUTE_ESCALATION_WINDOW: u64 = 3 * 24 * 60 * 60;
 
+/// Second escalation checkpoint: moderator review unlocks 7 days after the
+/// dispute was opened (#1080).
+pub const MODERATOR_ESCALATION_CHECKPOINT: u64 = 7 * 24 * 60 * 60;
+
+/// Third escalation checkpoint: admin review unlocks 14 days after the dispute
+/// was opened (#1080).
+pub const ADMIN_ESCALATION_CHECKPOINT: u64 = 14 * 24 * 60 * 60;
+
 /// Default rate-limit window (1 hour).
 pub const RATE_LIMIT_WINDOW: u64 = 3600;
 
@@ -81,6 +90,9 @@ pub const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 
 /// Default timelock delay for pending critical admin actions (24 hours).
 pub const ADMIN_ACTION_TIMELOCK_DELAY: u64 = 24 * 60 * 60;
+
+/// Default bounded expiration window for two-step admin role transfers (7 days).
+pub const ADMIN_TRANSFER_WINDOW: u64 = 7 * 24 * 60 * 60;
 
 // ── Boundary helpers ──────────────────────────────────────────────────────────
 
@@ -153,6 +165,85 @@ pub fn rate_limit_bucket(now: u64, window_secs: u64) -> u64 {
         return 0;
     }
     now / window_secs
+}
+
+// ── Immutable settlement snapshots ────────────────────────────────────────────
+
+/// Revision of an immutable settlement snapshot.
+pub type SettlementSnapshotRevision = u64;
+
+/// Digest of every value that can affect a pending settlement decision:
+/// balances, fees, roles, and policy.
+pub type SettlementSnapshotDigest = [u8; 32];
+
+/// Immutable settlement snapshot.
+///
+/// A snapshot is captured before a dispute or refund decision is executed.
+/// Once captured, the digest is frozen for the life of the decision; later
+/// configuration changes cannot mutate it. All later actions MUST be bound
+/// to the same `revision`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettlementSnapshot {
+    revision: SettlementSnapshotRevision,
+    digest: SettlementSnapshotDigest,
+    frozen_at: u64,
+    expires_at: u64,
+}
+
+impl SettlementSnapshot {
+    /// Creates a snapshot at `frozen_at`.
+    ///
+    /// `audit_lifetime` is the relative duration in seconds for which the
+    /// snapshot remains queryable; the absolute `expires_at` follows the
+    /// inclusive-end convention of this module.
+    pub fn new(
+        revision: SettlementSnapshotRevision,
+        digest: SettlementSnapshotDigest,
+        frozen_at: u64,
+        audit_lifetime: u64,
+    ) -> Self {
+        Self {
+            revision,
+            digest,
+            frozen_at,
+            expires_at: deadline(frozen_at, audit_lifetime),
+        }
+    }
+
+    /// Returns the revision to which all later actions must be bound.
+    pub fn revision(&self) -> SettlementSnapshotRevision {
+        self.revision
+    }
+
+    /// Returns the frozen digest of balances, fees, roles, and policy.
+    pub fn digest(&self) -> &SettlementSnapshotDigest {
+        &self.digest
+    }
+
+    /// Returns the timestamp at which the snapshot was captured.
+    pub fn frozen_at(&self) -> u64 {
+        self.frozen_at
+    }
+
+    /// Returns the timestamp at which this snapshot stops being queryable.
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+
+    /// Returns `true` if `current_revision` still matches this snapshot.
+    pub fn binds_revision(&self, current_revision: SettlementSnapshotRevision) -> bool {
+        self.revision == current_revision
+    }
+
+    /// Reconciles this snapshot to the current escrow digest.
+    pub fn reconciles_to(&self, current_digest: &SettlementSnapshotDigest) -> bool {
+        &self.digest == current_digest
+    }
+
+    /// Returns `true` while this snapshot can be queried for audit purposes.
+    pub fn is_queryable(&self, now: u64) -> bool {
+        now >= self.frozen_at && now < self.expires_at
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
