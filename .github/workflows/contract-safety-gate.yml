@@ -1,0 +1,37 @@
+name: Contract Safety Gate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  safety-gate:
+    name: Formal contract safety gate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: craft-nexus-contract
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            craft-nexus-contract/target
+          key: ${{ runner.os }}-safety-gate-${{ hashFiles('craft-nexus-contract/Cargo.lock') }}
+      - name: Run fail-closed safety gate
+        env:
+          PROP_SEED: "0xCAFEF00DDEADBEEF"
+        run: ./scripts/safety_gate.sh
+      - name: Upload safety-gate report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safety-gate-report
+          path: craft-nexus-contract/target/safety-gate-report.json

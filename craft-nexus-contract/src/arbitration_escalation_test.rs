@@ -168,6 +168,62 @@ fn test_set_dispute_escalation_window() {
     );
 }
 
+#[test]
+fn test_arbitrator_rotation_invalidates_active_assignment() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
+    create_and_dispute(&env, &client, &buyer, &seller, &token, &token_admin, 1);
+
+    let old_assignment = client
+        .get_dispute_assignment(&1)
+        .expect("assignment should be persisted");
+    assert_eq!(old_assignment.revision, 1);
+    assert_eq!(client.get_arbitrator_assignment_revision(), 1);
+
+    let replacement = Address::generate(&env);
+    client.update_arbitrator(&replacement);
+    assert_eq!(client.get_arbitrator_assignment_revision(), 2);
+    assert_eq!(client.get_platform_config().arbitrator, replacement);
+
+    // Rotation does not alter the escrow's financial context.
+    let escrow = client.get_escrow(&1);
+    assert_eq!(escrow.amount, 50_000_000);
+    assert_eq!(escrow.token, token);
+
+    let evidence = client.try_submit_evidence(
+        &1,
+        &buyer,
+        &String::from_str(&env, "ipfs://stale-assignment"),
+    );
+    assert!(evidence.is_err());
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_DISPUTE_ESCALATION_WINDOW as u64 + 1;
+    });
+    assert!(client.try_escalate_dispute(&1, &buyer).is_err());
+    assert!(client.get_dispute_escalation(&1).is_none());
+
+    // Neither the former nor replacement arbitrator may decide an old revision.
+    assert!(client
+        .try_resolve_dispute(&1, &Resolution::RefundToBuyer, &old_assignment.arbitrator)
+        .is_err());
+    assert!(client
+        .try_resolve_dispute(&1, &Resolution::RefundToBuyer, &replacement)
+        .is_err());
+    assert_eq!(client.get_escrow(&1).amount, 50_000_000);
+
+    client.reassign_dispute(&1);
+    let reassigned = client.get_dispute_assignment(&1).unwrap();
+    assert_eq!(reassigned.arbitrator, replacement);
+    assert_eq!(reassigned.revision, 2);
+    client.submit_evidence(
+        &1,
+        &buyer,
+        &String::from_str(&env, "ipfs://reassigned-evidence"),
+    );
+
+}
+
 // ── Dispute Evidence Challenge Period (#942) ───────────────────────────
 
 #[test]
