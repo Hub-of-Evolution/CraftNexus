@@ -255,8 +255,9 @@ pub enum DataKey {
     ReputationHistoryCount(Address),
     /// Indexed compact reputation history entry (#939)
     ReputationHistoryIndexed(Address, u32),
-    /// Proof-of-Humanity credential record keyed by user address (#940)
-    UserPohCredential(Address),
+    /// Proof-of-Humanity credential record keyed by user address, operation identifier,
+    /// profile revision, and ledger context to bind attestations to operations (#940).
+    UserPohCredential(Address, Symbol, u32, u64),
     /// Secondary index mapping proof-of-humanity credential hash to owner address (#940)
     PohCredentialHash(Bytes),
     /// Secondary index mapping correlated identity hash to owner address (#940)
