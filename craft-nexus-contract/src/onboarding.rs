@@ -386,6 +386,14 @@ pub enum DataKey {
     GlobalAdminActionCount,
     /// An operation binding already consumed by an escrow contract.
     UsedAttestation(Address, Bytes),
+    /// Global counter of active users (status == Active)
+    ActiveUserCount,
+    /// Global counter of username changes performed
+    GlobalUsernameChangeCount,
+    /// Alias for UserStateRevision for backward compatibility
+    UserStateVersion(Address),
+    /// Global counter of onboarding operations
+    GlobalOnboardCount,
     /// Total number of users onboarded (global counter).
     GlobalOnboardCount,
     /// Total number of currently active user profiles (global counter).
@@ -1182,6 +1190,10 @@ pub enum Error {
     InvalidRateLimitPolicy = 30,
     /// Review decision does not match the current profile revision (#1086)
     ReviewRevisionMismatch = 31,
+    /// Attempt rate policy contains an unusable limit configuration (#1084)
+    InvalidRateLimitPolicy = 30,
+    /// Review decision does not match the current profile revision (#1086)
+    ReviewRevisionMismatch = 31,
     VolumeOverflow = 33,
     VolumeOverflow = 26,
     /// Escrow count accumulator overflowed (#1028)
@@ -1197,9 +1209,9 @@ pub enum Error {
     /// Requested review transition is not valid from the current state (#1086)
     InvalidReviewTransition = 33,
     /// Caller is not an authorized Sybil reviewer (#1086)
-    UnauthorizedReviewer = 31,
+    UnauthorizedReviewer = 34,
     /// Profile schema version is not supported by this contract (#1056)
-    UnsupportedProfileVersion = 32,
+    UnsupportedProfileVersion = 35,
 }
 
 /// Cross-contract interface the onboarding contract uses to query the escrow
@@ -5498,7 +5510,6 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFee, &fee);
-        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFee);
     }
 
@@ -5542,7 +5553,6 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFeeToken, &token);
-        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFeeToken);
     }
 
@@ -5592,7 +5602,6 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFeeWallet, &wallet);
-        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFeeWallet);
     }
 

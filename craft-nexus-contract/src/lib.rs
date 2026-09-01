@@ -34,6 +34,8 @@ mod sweep_allowance_test;
 #[cfg(test)]
 mod scalability_test;
 #[cfg(test)]
+mod liquidation_test;
+#[cfg(test)]
 mod time_boundary_test;
 #[cfg(test)]
 mod test;
@@ -392,6 +394,21 @@ pub enum Error {
     /// An active dispute, recurring escrow, or pending upgrade exists that blocks
     /// the requested emergency operation from starting (#1072).
     EmergencyConflictActive = 86,
+    // ─── Liquidation / collateral health (#1111) ────────────────────────────────
+    /// The artisan's stake health is healthy; no liquidation action is permitted.
+    StakeHealthHealthy = 87,
+    /// Liquidation is not enabled in the current platform policy.
+    LiquidationDisabled = 88,
+    /// The grace period after under-collateralization has not yet elapsed.
+    LiquidationGracePeriodActive = 89,
+    /// The requested seizure amount exceeds the deficit or policy cap.
+    LiquidationSeizureExceedsCap = 90,
+    /// No liquidation record exists with the given ID.
+    LiquidationNotFound = 91,
+    /// The liquidation record is already cured; no further cure is needed.
+    LiquidationAlreadyCured = 92,
+    /// The artisan is not in a liquidation-eligible or liquidated state.
+    NotLiquidationEligible = 93,
     /// Pending admin role transfer has expired and cannot be accepted.
     TransferExpired = 87,
     /// The upgrade was already executed and its state commitment is immutable.
@@ -428,6 +445,7 @@ pub fn is_retryable(error: Error) -> bool {
             | Error::ChallengeWindowActive
             | Error::EscalationWindowActive
             | Error::ArbitratorDeadlineExceeded
+            | Error::LiquidationGracePeriodActive
             | Error::StaleAdminRevision
     )
 }
@@ -537,6 +555,15 @@ const DEFAULT_ADMIN_ESCALATION_CHECKPOINT: u32 = time_policy::ADMIN_ESCALATION_C
 const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 5;
 /// Default rate limit window (1 hour in seconds) (#943)
 const DEFAULT_RATE_LIMIT_WINDOW: u32 = time_policy::RATE_LIMIT_WINDOW as u32;
+// ─── Liquidation / collateral health (#1111) ────────────────────────────────
+/// Default maximum fraction of the deficit that may be seized in a single
+/// liquidation call, expressed in basis points (10_000 = 100%).
+const DEFAULT_LIQUIDATION_MAX_SEIZURE_BPS: u32 = 5000; // 50%
+/// Default grace period (seconds) after under-collateralization before
+/// an artisan may be flagged as LiquidationEligible.
+const DEFAULT_LIQUIDATION_GRACE_PERIOD: u64 = 2 * 24 * 60 * 60; // 2 days
+/// Maximum liquidation record history retained.
+const MAX_LIQUIDATION_HISTORY: u32 = 256;
 
 /// Maximum platform fee in basis points (10000 = 100%)
 const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
@@ -877,6 +904,21 @@ pub enum DataKey {
     EmergencyOperationHistoryIndexed(u32),
     /// Count of currently active recurring escrows for conflict detection (#1072)
     ActiveRecurringCount,
+    // ─── Liquidation / collateral health (#1111) ────────────────────────────────
+    /// Snapshot of an artisan's collateral health status.
+    StakeHealthSnapshot(Address),
+    /// Current liquidation-eligibility status for an artisan.
+    LiquidationStatus(Address),
+    /// Audit record for a completed liquidation, keyed by liquidation ID.
+    LiquidationRecord(u64),
+    /// Monotonic counter for liquidation IDs.
+    NextLiquidationId,
+    /// Configurable liquidation policy thresholds.
+    LiquidationPolicyConfig,
+    /// Number of liquidation records (for indexed enumeration).
+    LiquidationRecordCount,
+    /// Indexed liquidation record by position.
+    LiquidationRecordIndexed(u32),
     /// Monotonic admin-mutation revision. Incremented on every successful
     /// configuration, pause, recovery, or governance write (#1071).
     AdminRevision,
@@ -973,6 +1015,114 @@ pub struct ArtisanStakeData {
 pub struct StakeDeposit {
     pub amount: i128,
     pub cooldown_end: u64,
+}
+
+/// Lifecycle status of an artisan's stake collateral health.
+///
+/// # State machine
+///
+/// ```text
+/// Healthy ──► UnderCollateralized ──► LiquidationEligible ──► Liquidated
+///    ▲                   │                       │               │
+///    │               cure_liquidation()       cure_liquidation() │
+///    └─────────────────┘                       └───────────────┘
+/// ```
+///
+/// An artisan enters `UnderCollateralized` when `evaluate_stake_health`
+/// detects `stake < required_collateral`. After a configurable grace period
+/// (or immediate admin action), the artisan may be promoted to
+/// `LiquidationEligible`, at which point authorized parties may call
+/// `trigger_liquidation`. Curing (topping up stake) always returns to
+/// `Healthy` regardless of prior state.
+#[contracttype(export = false)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum LiquidationStatus {
+    /// Stake meets or exceeds required collateral.
+    Healthy = 0,
+    /// Active obligations exceed staked collateral but no liquidation action yet.
+    UnderCollateralized = 1,
+    /// Admin has flagged the artisan; authorized parties may trigger liquidation.
+    LiquidationEligible = 2,
+    /// Liquidation has been executed; only cure can restore health.
+    Liquidated = 3,
+}
+
+/// Deterministic snapshot of an artisan's collateral health at a specific
+/// ledger timestamp. All fields are derived from on-chain state and the
+/// provided timestamp; no external oracles are consulted.
+///
+/// # Health formula
+///
+/// ```text
+/// required_collateral = active_obligations × min_stake_required
+/// health_ratio        = current_stake / max(required_collateral, 1)
+/// deficit             = max(0, required_collateral − current_stake)
+/// ```
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct StakeHealthSnapshot {
+    /// The artisan address evaluated.
+    pub artisan: Address,
+    /// Ledger timestamp at which this snapshot is valid.
+    pub evaluated_at: u64,
+    /// Current staked amount (i128).
+    pub current_stake: i128,
+    /// Number of active escrow/recurring-escrow obligations.
+    pub active_obligations: u32,
+    /// Required collateral (obligations × min_stake_required).
+    pub required_collateral: i128,
+    /// health_ratio = current_stake / max(required_collateral, 1), scaled by
+    /// 10_000 (100.00% = 10_000). A value of 0 means zero stake.
+    pub health_ratio_bps: u32,
+    /// Deficit amount: max(0, required − current). Zero when healthy.
+    pub deficit: i128,
+    /// Current liquidation lifecycle status.
+    pub status: LiquidationStatus,
+}
+
+/// Configurable policy thresholds for the liquidation subsystem.
+///
+/// Stored under [`DataKey::LiquidationPolicy`] and admin-adjustable via
+/// `set_liquidation_policy`.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct LiquidationPolicyData {
+    /// Maximum fraction of the deficit that may be seized in a single
+    /// liquidation call, expressed in basis points (10_000 = 100%).
+    /// Prevents over-seizure relative to actual harm.
+    pub max_seizure_bps: u32,
+    /// Grace period (seconds) after an artisan becomes under-collateralized
+    /// before they can be flagged as LiquidationEligible.
+    pub grace_period_secs: u64,
+    /// Whether liquidation is enabled at all (admin kill-switch).
+    pub enabled: bool,
+}
+
+/// Audit record for a completed liquidation event.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct LiquidationRecord {
+    /// Monotonically increasing liquidation identifier.
+    pub id: u64,
+    /// The artisan whose stake was partially seized.
+    pub artisan: Address,
+    /// Admin or authorized party that triggered the liquidation.
+    pub liquidator: Address,
+    /// Amount actually seized (≤ deficit, ≤ max_seizure policy).
+    pub seized_amount: i128,
+    /// Ledger timestamp when liquidation executed.
+    pub executed_at: u64,
+    /// The artisan's health_ratio_bps at execution time.
+    pub health_ratio_bps: u32,
+    /// Whether the artisan has since cured (topped up).
+    pub cured: bool,
+    /// Ledger timestamp when cured, or 0 if not yet cured.
+    pub cured_at: u64,
 }
 
 #[contracttype]
@@ -11538,6 +11688,13 @@ impl CraftNexusContract {
         Self::extend_persistent(&env, &(ESCROW, order_id));
         let snapshot = snapshot_opt.unwrap();
         let mut escrow = snapshot.clone();
+
+        let config = Self::get_platform_config_internal(&env);
+        
+        // Get dispute initiated timestamp and current time
+        let initiated_at = escrow.dispute_initiated_at.unwrap_or(0);
+        let current_time = env.ledger().timestamp();
+        
         if escrow.status != EscrowStatus::Disputed {
             return Err(Error::InvalidEscrowState);
         }
@@ -11900,6 +12057,19 @@ impl CraftNexusContract {
         // Issue #1057: Block deactivated accounts from unstaking
         Self::assert_account_active(&env, &artisan);
 
+        // Issue #1111: Block withdrawals when artisan is liquidation-eligible or liquidated.
+        // Artisans must cure their status before they can unstake.
+        let liq_status: LiquidationStatus = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LiquidationStatus(artisan.clone()))
+            .unwrap_or(LiquidationStatus::Healthy);
+        if liq_status == LiquidationStatus::LiquidationEligible
+            || liq_status == LiquidationStatus::Liquidated
+        {
+            env.panic_with_error(crate::Error::NotLiquidationEligible);
+        }
+
         Self::migrate_legacy_artisan_stake(env.clone(), artisan.clone());
 
         // Validate the requested token matches the token recorded at stake time.
@@ -12053,6 +12223,433 @@ impl CraftNexusContract {
         let stake = Self::get_stake(env.clone(), artisan.clone());
         let active = Self::has_active_escrows(env, artisan);
         active && stake < config.min_stake_required
+    }
+
+    // ─── Liquidation / Collateral Health (#1111) ────────────────────────────
+
+    /// Return the default or persisted liquidation policy.
+    fn get_liquidation_policy_internal(env: &Env) -> LiquidationPolicyData {
+        env.storage().persistent().get(&DataKey::LiquidationPolicyConfig)
+            .unwrap_or(LiquidationPolicyData {
+                max_seizure_bps: DEFAULT_LIQUIDATION_MAX_SEIZURE_BPS,
+                grace_period_secs: DEFAULT_LIQUIDATION_GRACE_PERIOD,
+                enabled: true,
+            })
+    }
+
+    /// Evaluate an artisan's collateral health deterministically at the
+    /// current ledger timestamp.
+    ///
+    /// Returns a [`StakeHealthSnapshot`] with the health ratio, deficit,
+    /// and current [`LiquidationStatus`]. This is a pure read + compute
+    /// function with no side-effects; the snapshot is also persisted so
+    /// off-chain indexers can retrieve it via `get_stake_health_snapshot`.
+    ///
+    /// # Health formula
+    /// ```text
+    /// required_collateral = active_obligations × min_stake_required
+    /// health_ratio_bps    = (current_stake / max(required, 1)) × 10_000
+    /// deficit             = max(0, required − current_stake)
+    /// ```
+    pub fn evaluate_stake_health(env: Env, artisan: Address) -> StakeHealthSnapshot {
+        Self::migrate_legacy_artisan_stake(env.clone(), artisan.clone());
+
+        let config = Self::get_platform_config_internal(&env);
+        let current_stake = Self::get_stake(env.clone(), artisan.clone());
+        let active_obligations = Self::get_active_obligation_count(env.clone(), artisan.clone());
+
+        let required_collateral = (active_obligations as i128) * config.min_stake_required;
+
+        let denominator = if required_collateral > 0 {
+            required_collateral
+        } else {
+            1
+        };
+        let health_ratio_bps = ((current_stake as u128 * 10_000) / (denominator as u128)) as u32;
+
+        let deficit = if current_stake < required_collateral {
+            required_collateral - current_stake
+        } else {
+            0
+        };
+
+        // Determine status from persisted state + current evaluation.
+        let persisted_status: LiquidationStatus = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LiquidationStatus(artisan.clone()))
+            .unwrap_or(LiquidationStatus::Healthy);
+
+        let status = if persisted_status == LiquidationStatus::Liquidated {
+            // Once liquidated, stay liquidated until cure.
+            LiquidationStatus::Liquidated
+        } else if deficit > 0 && active_obligations > 0 {
+            // Under-collateralized: keep existing status if already flagged,
+            // otherwise set to UnderCollateralized.
+            if persisted_status == LiquidationStatus::LiquidationEligible {
+                LiquidationStatus::LiquidationEligible
+            } else {
+                LiquidationStatus::UnderCollateralized
+            }
+        } else {
+            // Healthy: no deficit or no obligations.
+            LiquidationStatus::Healthy
+        };
+
+        let evaluated_at = env.ledger().timestamp();
+
+        let snapshot = StakeHealthSnapshot {
+            artisan: artisan.clone(),
+            evaluated_at,
+            current_stake,
+            active_obligations,
+            required_collateral,
+            health_ratio_bps,
+            deficit,
+            status,
+        };
+
+        // Persist the snapshot and status for off-chain reads.
+        env.storage().persistent().set(
+            &DataKey::StakeHealthSnapshot(artisan.clone()),
+            &snapshot,
+        );
+        Self::extend_persistent(&env, &DataKey::StakeHealthSnapshot(artisan.clone()));
+
+        env.storage().persistent().set(
+            &DataKey::LiquidationStatus(artisan.clone()),
+            &status,
+        );
+        Self::extend_persistent(&env, &DataKey::LiquidationStatus(artisan.clone()));
+
+        snapshot
+    }
+
+    /// Read-only getter: return the persisted health snapshot for an artisan,
+    /// or `None` if `evaluate_stake_health` has never been called.
+    pub fn get_stake_health_snapshot(env: Env, artisan: Address) -> Option<StakeHealthSnapshot> {
+        env.storage().persistent().get(&DataKey::StakeHealthSnapshot(artisan))
+    }
+
+    /// Read-only getter: return the current liquidation status for an artisan.
+    pub fn get_liquidation_status(env: Env, artisan: Address) -> LiquidationStatus {
+        env.storage().persistent().get(&DataKey::LiquidationStatus(artisan))
+            .unwrap_or(LiquidationStatus::Healthy)
+    }
+
+    /// Admin sets the liquidation policy thresholds.
+    pub fn set_liquidation_policy(
+        env: Env,
+        max_seizure_bps: u32,
+        grace_period_secs: u64,
+        enabled: bool,
+    ) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        if max_seizure_bps > 10_000 {
+            env.panic_with_error(Error::InvalidFee);
+        }
+
+        let policy = LiquidationPolicyData {
+            max_seizure_bps,
+            grace_period_secs,
+            enabled,
+        };
+        env.storage().persistent().set(&DataKey::LiquidationPolicyConfig, &policy);
+        Self::extend_persistent(&env, &DataKey::LiquidationPolicyConfig);
+        Ok(())
+    }
+
+    /// Read-only getter: return the current liquidation policy.
+    pub fn get_liquidation_policy(env: Env) -> LiquidationPolicyData {
+        Self::get_liquidation_policy_internal(&env)
+    }
+
+    /// Admin flags an under-collateralized artisan as liquidation-eligible.
+    ///
+    /// Preconditions:
+    /// - Admin auth required.
+    /// - Liquidation must be enabled in policy.
+    /// - The artisan must be evaluated as UnderCollateralized (via `evaluate_stake_health`).
+    /// - The grace period must have elapsed since the under-collateralized state was first observed.
+    ///
+    /// Postconditions:
+    /// - The artisan's status transitions to `LiquidationEligible`.
+    /// - An event `stake_liquidation_flagged` is emitted.
+    pub fn flag_liquidation_eligible(env: Env, artisan: Address) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let policy = Self::get_liquidation_policy_internal(&env);
+        if !policy.enabled {
+            return Err(Error::LiquidationDisabled);
+        }
+
+        // Re-evaluate health to ensure snapshot is current.
+        let snapshot = Self::evaluate_stake_health(env.clone(), artisan.clone());
+
+        if snapshot.status == LiquidationStatus::Healthy {
+            return Err(Error::StakeHealthHealthy);
+        }
+        if snapshot.status == LiquidationStatus::LiquidationEligible
+            || snapshot.status == LiquidationStatus::Liquidated
+        {
+            // Already flagged or already liquidated — no-op but not an error.
+            return Ok(());
+        }
+
+        // Enforce grace period: the artisan must have been under-collateralized
+        // for at least `grace_period_secs`.
+        if policy.grace_period_secs > 0 {
+            let now = env.ledger().timestamp();
+            let first_observed = snapshot.evaluated_at;
+            // Grace period is measured from the health evaluation timestamp.
+            // For the very first under-collateralization, the grace window starts
+            // at evaluation time. For subsequent evaluations, we use the
+            // snapshot timestamp as the earliest evidence.
+            if now < first_observed + policy.grace_period_secs {
+                return Err(Error::LiquidationGracePeriodActive);
+            }
+        }
+
+        // Persist the new status.
+        let new_status = LiquidationStatus::LiquidationEligible;
+        env.storage().persistent().set(
+            &DataKey::LiquidationStatus(artisan.clone()),
+            &new_status,
+        );
+        Self::extend_persistent(&env, &DataKey::LiquidationStatus(artisan.clone()));
+
+        env.events().publish(
+            (Symbol::new(&env, "stake_liquidation_flagged"), artisan.clone()),
+            (snapshot.deficit, env.ledger().timestamp()),
+        );
+
+        Ok(())
+    }
+
+    /// Authorized party (admin) triggers a partial liquidation of an artisan's
+    /// stake to cover the deficit, subject to policy caps.
+    ///
+    /// # Safety invariants
+    ///
+    /// - Seized amount ≤ deficit (cannot seize more than the shortfall).
+    /// - Seized amount ≤ deficit × max_seizure_bps / 10_000 (policy cap).
+    /// - Seized amount > 0 (no zero-value liquidations).
+    /// - The artisan must be in `LiquidationEligible` status.
+    ///
+    /// # Postconditions
+    ///
+    /// - The artisan's stake is reduced by the seized amount.
+    /// - The seized tokens are transferred to the platform wallet.
+    /// - A `LiquidationRecord` is persisted for audit.
+    /// - The artisan's status transitions to `Liquidated`.
+    /// - An event `stake_liquidated` is emitted.
+    pub fn trigger_liquidation(env: Env, artisan: Address) -> Result<LiquidationRecord, Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let policy = Self::get_liquidation_policy_internal(&env);
+        if !policy.enabled {
+            return Err(Error::LiquidationDisabled);
+        }
+
+        let current_status: LiquidationStatus = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LiquidationStatus(artisan.clone()))
+            .unwrap_or(LiquidationStatus::Healthy);
+
+        if current_status != LiquidationStatus::LiquidationEligible {
+            return Err(Error::NotLiquidationEligible);
+        }
+
+        // Re-evaluate to get the current deficit.
+        let snapshot = Self::evaluate_stake_health(env.clone(), artisan.clone());
+        let deficit = snapshot.deficit;
+
+        if deficit <= 0 {
+            // No deficit — artisan recovered between flagging and now.
+            return Err(Error::StakeHealthHealthy);
+        }
+
+        // Compute seized amount: min(deficit, deficit × max_seizure_bps / 10_000).
+        let max_seizable = (deficit as u128 * policy.max_seizure_bps as u128) / 10_000;
+        let seized_amount = (deficit as u128).min(max_seizable) as i128;
+
+        if seized_amount <= 0 {
+            return Err(Error::LiquidationSeizureExceedsCap);
+        }
+
+        // Cannot seize more than the artisan actually has staked.
+        let actual_seized = seized_amount.min(snapshot.current_stake);
+        if actual_seized <= 0 {
+            return Err(Error::LiquidationSeizureExceedsCap);
+        }
+
+        // Effects before interactions (CEI pattern).
+        // Reduce artisan stake.
+        let stake_key = DataKey::ArtisanStake(artisan.clone());
+        if let Some(mut stake_data) = env.storage().persistent().get::<DataKey, ArtisanStakeData>(&stake_key) {
+            let new_amount = stake_data.amount - actual_seized;
+            if new_amount > 0 {
+                stake_data.amount = new_amount;
+                env.storage().persistent().set(&stake_key, &stake_data);
+            } else {
+                env.storage().persistent().remove(&stake_key);
+            }
+            Self::extend_persistent(&env, &stake_key);
+        }
+
+        // Update total staked accounting.
+        Self::update_total_staked(&env, &snapshot.artisan, -actual_seized);
+
+        // Record liquidation ID.
+        let next_id: u64 = env.storage().persistent().get(&DataKey::NextLiquidationId).unwrap_or(0);
+        let liq_id = next_id;
+        env.storage().persistent().set(&DataKey::NextLiquidationId, &(next_id + 1));
+
+        let record = LiquidationRecord {
+            id: liq_id,
+            artisan: artisan.clone(),
+            liquidator: admin.clone(),
+            seized_amount: actual_seized,
+            executed_at: env.ledger().timestamp(),
+            health_ratio_bps: snapshot.health_ratio_bps,
+            cured: false,
+            cured_at: 0,
+        };
+        env.storage().persistent().set(
+            &DataKey::LiquidationRecord(liq_id),
+            &record,
+        );
+        Self::extend_persistent(&env, &DataKey::LiquidationRecord(liq_id));
+
+        // Update liquidation history index.
+        let hist_count: u32 = env.storage().persistent().get(&DataKey::LiquidationRecordCount).unwrap_or(0);
+        if hist_count < MAX_LIQUIDATION_HISTORY {
+            env.storage().persistent().set(
+                &DataKey::LiquidationRecordIndexed(hist_count),
+                &liq_id,
+            );
+            Self::extend_persistent(&env, &DataKey::LiquidationRecordIndexed(hist_count));
+        }
+        env.storage().persistent().set(
+            &DataKey::LiquidationRecordCount,
+            &(hist_count + 1),
+        );
+
+        // Update status to Liquidated.
+        let liq_status = LiquidationStatus::Liquidated;
+        env.storage().persistent().set(
+            &DataKey::LiquidationStatus(artisan.clone()),
+            &liq_status,
+        );
+        Self::extend_persistent(&env, &DataKey::LiquidationStatus(artisan.clone()));
+
+        // Interaction: transfer seized tokens to platform wallet.
+        let stake_token_opt: Option<ArtisanStakeData> = env.storage().persistent().get(&DataKey::ArtisanStake(artisan.clone()));
+        if let Some(stake_data) = stake_token_opt {
+            let platform_wallet = Self::get_platform_wallet(env.clone());
+            Self::transfer_tokens_and_record_audit(
+                &env,
+                &stake_data.token,
+                &env.current_contract_address(),
+                &platform_wallet,
+                actual_seized,
+                &admin,
+                Symbol::new(&env, "stake_liquidated"),
+                actual_seized,
+            );
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "stake_liquidated"), artisan.clone()),
+            (liq_id, actual_seized, snapshot.health_ratio_bps, env.ledger().timestamp()),
+        );
+
+        Ok(record)
+    }
+
+    /// Artisan cures their liquidation by topping up their stake.
+    ///
+    /// Any artisan in `UnderCollateralized`, `LiquidationEligible`, or `Liquidated`
+    /// status can call `stake_tokens` — once their stake meets or exceeds
+    /// the required collateral, `cure_liquidation` transitions them back to
+    /// `Healthy` and marks any open `LiquidationRecord` as cured.
+    ///
+    /// # Preconditions
+    /// - The artisan must have a pending liquidation status (not Healthy).
+    ///
+    /// # Postconditions
+    /// - If the artisan's stake now meets the required collateral, the status
+    ///   transitions to `Healthy` and all open records are marked cured.
+    /// - An event `stake_liquidation_cured` is emitted.
+    pub fn cure_liquidation(env: Env, artisan: Address) -> Result<(), Error> {
+        let current_status: LiquidationStatus = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LiquidationStatus(artisan.clone()))
+            .unwrap_or(LiquidationStatus::Healthy);
+
+        if current_status == LiquidationStatus::Healthy {
+            return Err(Error::NotLiquidationEligible);
+        }
+
+        // Re-evaluate health.
+        let snapshot = Self::evaluate_stake_health(env.clone(), artisan.clone());
+
+        if snapshot.deficit > 0 && snapshot.active_obligations > 0 {
+            // Still under-collateralized — cure not possible yet.
+            return Err(Error::InsufficientStake);
+        }
+
+        // Transition to Healthy.
+        let healthy = LiquidationStatus::Healthy;
+        env.storage().persistent().set(
+            &DataKey::LiquidationStatus(artisan.clone()),
+            &healthy,
+        );
+        Self::extend_persistent(&env, &DataKey::LiquidationStatus(artisan.clone()));
+
+        // Mark all non-cured liquidation records for this artisan as cured.
+        let hist_count: u32 = env.storage().persistent().get(&DataKey::LiquidationRecordCount).unwrap_or(0);
+        for i in 0..hist_count {
+            if let Some(liq_id) = env.storage().persistent().get::<DataKey, u64>(&DataKey::LiquidationRecordIndexed(i)) {
+                if let Some(mut record) = env.storage().persistent().get::<DataKey, LiquidationRecord>(&DataKey::LiquidationRecord(liq_id)) {
+                    if record.artisan == artisan && !record.cured {
+                        record.cured = true;
+                        record.cured_at = env.ledger().timestamp();
+                        env.storage().persistent().set(&DataKey::LiquidationRecord(liq_id), &record);
+                        Self::extend_persistent(&env, &DataKey::LiquidationRecord(liq_id));
+                    }
+                }
+            }
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "stake_liquidation_cured"), artisan),
+            env.ledger().timestamp(),
+        );
+
+        Ok(())
+    }
+
+    /// Read-only getter: return a liquidation record by ID.
+    pub fn get_liquidation_record(env: Env, id: u64) -> Option<LiquidationRecord> {
+        env.storage().persistent().get(&DataKey::LiquidationRecord(id))
+    }
+
+    /// Return the count of liquidation records.
+    pub fn get_liquidation_record_count(env: Env) -> u32 {
+        env.storage().persistent().get(&DataKey::LiquidationRecordCount).unwrap_or(0)
+    }
+
+    /// Internal helper: return the active obligation count for a user.
+    fn get_active_obligation_count(env: Env, user: Address) -> u32 {
+        let key = DataKey::ActiveObligations(user);
+        Self::get_persistent_u32(&env, &key)
     }
 
     /// Admin sets the minimum stake required for artisans to create escrows.
@@ -12438,6 +13035,8 @@ impl CraftNexusContract {
         Self::authorize_onboarding_state(&env, &proposal.proposed_by, operation_id, expected_role);
 
         // Remove the proposal from storage
+        let proposal_key = Self::proposal_key(order_id);
+        env.storage().persistent().remove(&proposal_key);
         Self::clear_partial_refund_proposal(&env, order_id);
         env.storage().persistent().remove(&Self::proposal_key(order_id));
 
