@@ -7999,6 +7999,12 @@ impl CraftNexusContract {
         env.storage()
             .persistent()
             .remove(&DataKey::WasmUpgradeProposal);
+        
+        env.storage()
+            .persistent()
+            .remove(&DataKey::UpgradeCompatibilityManifest(
+                proposal.wasm_hash.clone(),
+            ));
 
         // Increment the round nonce inside the approval state so that any
         // residual approvals cannot be replayed in the next round.
