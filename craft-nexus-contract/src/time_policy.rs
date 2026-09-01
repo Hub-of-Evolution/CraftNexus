@@ -22,6 +22,7 @@
 //! | Stake cooldown | stake_time | stake_cooldown | cooldown_end | stake_time | cooldown_end |
 //! | Dispute max duration | dispute_initiated_at | max_dispute_duration | initiated + max | initiated_at | initiated + max |
 //! | Evidence expiry | submitted_at | evidence_expiry | submitted + expiry | submitted_at | submitted + expiry |
+//! | Escalation checkpoint | dispute_initiated_at | checkpoint offset | initiated + offset | initiated_at | initiated + offset |
 //!
 //! # Constants
 //!
@@ -67,6 +68,14 @@ pub const EVIDENCE_CHALLENGE_WINDOW: u64 = 24 * 60 * 60;
 /// Window before a dispute can be escalated to arbitration (3 days).
 pub const DISPUTE_ESCALATION_WINDOW: u64 = 3 * 24 * 60 * 60;
 
+/// Second escalation checkpoint: moderator review unlocks 7 days after the
+/// dispute was opened (#1080).
+pub const MODERATOR_ESCALATION_CHECKPOINT: u64 = 7 * 24 * 60 * 60;
+
+/// Third escalation checkpoint: admin review unlocks 14 days after the dispute
+/// was opened (#1080).
+pub const ADMIN_ESCALATION_CHECKPOINT: u64 = 14 * 24 * 60 * 60;
+
 /// Default rate-limit window (1 hour).
 pub const RATE_LIMIT_WINDOW: u64 = 3600;
 
@@ -81,6 +90,9 @@ pub const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 
 /// Default timelock delay for pending critical admin actions (24 hours).
 pub const ADMIN_ACTION_TIMELOCK_DELAY: u64 = 24 * 60 * 60;
+
+/// Default bounded expiration window for two-step admin role transfers (7 days).
+pub const ADMIN_TRANSFER_WINDOW: u64 = 7 * 24 * 60 * 60;
 
 // ── Boundary helpers ──────────────────────────────────────────────────────────
 
