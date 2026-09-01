@@ -42,6 +42,9 @@ mod pagination_boundary_test;
 #[cfg(test)]
 mod prop_test;
 #[cfg(test)]
+mod stake_cooldown_test; // Add this line
+mod staking;
+pub use staking::*; // Or explicitly use the contract struct: pub use staking::StakeContract;
 mod safe_arithmetic_counters_test;
 
 // Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
@@ -1826,6 +1829,12 @@ pub struct PlatformConfig {
     /// Evidence/counter-evidence challenge window before arbitrator resolution
     pub evidence_challenge_window: u32,
 }
+#[cfg(test)]
+mod test;
+#[cfg(test)]
+mod pagination_boundary_test;
+#[cfg(test)]
+mod prop_test;
 
 /// Structured record of dispute evidence with metadata and expiry thresholds (#927).
 #[contracttype]
@@ -10970,28 +10979,10 @@ impl CraftNexusContract {
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
 
-        // Initialize cooldown only if artisan doesn't already have one.
-        // This prevents cooldown reset gaming where artisans extend their cooldown by continuously staking.
-        let existing_cooldown = if current_count > 0 {
-            let last_deposit_key =
-                DataKey::ArtisanStakeQueueIndexed(artisan.clone(), current_count - 1);
-            let deposit: StakeDeposit = env.storage().persistent().get(&last_deposit_key).unwrap();
-            deposit.cooldown_end
-        } else {
-            0
-        };
-
-        let cooldown_end = if existing_cooldown == 0 {
-            // No existing cooldown, initialize new one
-            let config = Self::get_platform_config_internal(&env);
-            env.ledger().timestamp() + config.stake_cooldown as u64
-        } else {
-            existing_cooldown
-        };
-
-        // Check queue capacity and prune if necessary
-        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
-        let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        // Issue #1050 Fix: Track deposit maturity independently.
+        // Every new deposit receives its own full cooldown period, preventing 
+        // new funds from bypassing maturity by piggybacking on older deposits.
+        let cooldown_end = env.ledger().timestamp() + config.stake_cooldown as u64;
 
         if current_count >= STAKE_QUEUE_PRUNE_THRESHOLD {
             Self::prune_matured_stake_deposits(&env, &artisan);
