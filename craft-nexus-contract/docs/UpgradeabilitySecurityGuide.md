@@ -71,12 +71,13 @@ The upgrade process uses an **M-of-N multi-signature** model:
 
 ### How approval accumulation works
 
-Each signer calls `propose_upgrade_wasm` with the **exact same `new_wasm_hash`**. Approvals for that hash are stored and counted. Two integrity checks enforce correctness:
+Each signer calls `propose_upgrade_wasm` with the **exact same `new_wasm_hash`**. Approvals are stored canonically under `DataKey::UpgradeSignerApproval(nonce, signer)` so each signer can count at most once for a given proposal revision (#1059). Integrity checks:
 
-1. **No duplicate approvals** — if the same address calls again for the same hash, the call returns `Error::AlreadyApproved`. The approval is not counted twice.
-2. **Only current signers count** — when threshold is checked, only approvals from addresses still present in the active UpgradeSigners list are counted. If a signer is removed after approving, their approval is no longer counted toward the threshold. This prevents stale or rotated keys from lingering as an implicit vote.
+1. **No duplicate approvals** — a second call from the same signer returns the stable error `Error::AlreadyApproved`. The keyed slot and the in-round `approvals` vec both reject the duplicate.
+2. **Count cannot exceed the signer set** — after a unique signer is recorded, `approvals.len()` is bounded by the snapshotted `signers` list. Excess approvals are rejected with `AlreadyApproved`.
+3. **Approval events identify revision and signer** — every accepted approval emits `UPG_APPR` (`UpgradeApprovalEvent`) with `nonce`, `signer`, `wasm_hash`, and `approval_count`.
 
-Once the threshold is reached, the proposal is **committed**: the `WasmUpgradeProposal` record is stored on-chain, the approval accumulator is cleared, and the cooldown clock starts. The event `UPG_PROP` is emitted on the `wasm_upgrade` topic.
+Once the threshold is reached, the proposal is **committed**: the `WasmUpgradeProposal` record is stored on-chain, the round accumulator is cleared, and the cooldown clock starts. The event `UPG_PROP` is emitted in addition to the last `UPG_APPR`.
 
 Only **one proposal may be pending at a time**. Attempting to propose while one already exists returns `Error::UpgradeProposalExists`.
 
@@ -166,7 +167,7 @@ stellar contract invoke \
   --paused true
 ```
 
-When `is_paused` is `true`, escrow creation, release, refund initiation, dispute initiation, staking, and recurring cycle releases return `Error::ContractPaused` (code 15). Read-only views remain available. Admin/arbitrator paths needed to *clear* emergency conflicts — dispute resolution, upgrade cancel, fund sweep, and admin recovery — stay reachable while paused. Emits the `platform_paused` event.
+The public read-only `is_paused()` query returns the current pause bit as a boolean. It reads the same `PlatformConfig::is_paused` value used by write guards, requires no authentication, and returns `false` before initialization. When `is_paused` is `true`, escrow creation, release, refund initiation, dispute initiation, staking, and recurring cycle releases return `Error::ContractPaused` (code 15). Read-only views remain available. Admin/arbitrator paths needed to *clear* emergency conflicts — dispute resolution, upgrade cancel, fund sweep, and admin recovery — stay reachable while paused. Emits the `platform_paused` event.
 
 To resume normal operations:
 

@@ -868,10 +868,37 @@ function parseContractError(error: any): number {
 }
 ```
 
+#### Error 87: StaleAdminRevision
+**Description**: The caller supplied an admin revision that does not match the current monotonic revision. No storage was written.
+
+**Triggering Conditions**:
+- `apply_admin_mutation(expected_revision, …)` where `expected_revision != get_admin_revision()`
+- The supplied revision is neither the current head nor the revision that already applied this exact fingerprint
+
+**Suggested Client Action**:
+1. Call `get_admin_revision()` and retry with the fresh value
+2. Re-read platform config before constructing a different mutation
+
+---
+
+#### Error 88: AdminActionAlreadyApplied
+**Description**: This admin mutation was already applied at the supplied revision. Replaying it cannot repeat its effect.
+
+**Triggering Conditions**:
+- Retry of `set_paused`, `update_platform_fee`, `apply_admin_mutation`, or another gated admin write with the same arguments after a successful apply
+- `apply_admin_mutation` with the revision that already consumed this fingerprint
+
+**Suggested Client Action**:
+1. Treat the call as a successful no-op for idempotent clients
+2. If a different outcome is required, submit a new mutation at `get_admin_revision()`
+
+---
+
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.1 | 2026-08-31 | Added `StaleAdminRevision` (87) and `AdminActionAlreadyApplied` (88) for revision-bound admin mutations (#1071) |
 | 1.0 | 2026-08-25 | Initial catalog creation from error enum |
 
 ---
