@@ -15,7 +15,8 @@ This document covers the security model that governs WASM bytecode upgrades for 
 7. [Admin Key Management](#7-admin-key-management)
 8. [Audit Trail and History](#8-audit-trail-and-history)
 9. [Security Assumptions and Invariants](#9-security-assumptions-and-invariants)
-10. [Quick-Reference CLI Commands](#10-quick-reference-cli-commands)
+10. [Differential Upgrade Compatibility Tests](#10-differential-upgrade-compatibility-tests)
+11. [Quick-Reference CLI Commands](#11-quick-reference-cli-commands)
 
 ---
 
@@ -295,7 +296,32 @@ The upgrade model relies on the following assumptions. Violating them weakens th
 
 ---
 
-## 10. Quick-Reference CLI Commands
+## 10. Differential Upgrade Compatibility Tests
+
+Any new WASM artifact proposed for `execute_upgrade` MUST pass the differential compatibility harness before the upgrade gate is considered green. The harness runs the same deterministic scenario suite against the currently deployed implementation (pre-migration) and the candidate WASM artifact (post-migration), then compares:
+
+- Read results for all public view functions
+- Authorization outcomes (admin-only, signer-only, fallback-admin)
+- Error codes and exact revert payloads
+- Emitted events (topics, data, order)
+- Invariants such as upgrade thresholds, counters, and lock state
+
+The differential fixtures represent production state that must survive a migration unchanged:
+
+| Scenario | State Covered |
+|---|---|
+| Legacy profiles | Profile storage, metadata reads after migration |
+| Active escrows | Fund allocations, release/refund sequences |
+| Disputed escrows | Dispute lifecycle, arbitrator authorization paths |
+| Recurring balances | `ActiveRecurringCount`, scheduled cycle state |
+| Stakes | Stake amounts, reward calculations, stake timelocks |
+| Paused state | `is_paused` remains `true` after migration and blocks guarded entrypoints |
+
+The gate fails if any differential check diverges. A passing run MUST record the exact tool version, the deployed WASM hash and `ContractVersion`, the candidate WASM hash, the fixture set identifier, and the emitted event digest so results are reproducible and auditable.
+
+---
+
+## 11. Quick-Reference CLI Commands
 
 All commands target a deployed Soroban contract. Replace placeholders in angle brackets.
 

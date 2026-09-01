@@ -36,6 +36,26 @@ mod test;
 #[cfg(test)]
 mod pagination_boundary_test;
 #[cfg(test)]
+mod differential_upgrade_compatibility_test {
+    use super::*;
+
+    /// Verifies that the public error codes are stable across upgrades.
+    /// ABI compatibility requires that error discriminants never change.
+    #[test]
+    fn error_discriminants_are_stable() {
+        assert_eq!(Error::Unauthorized as u32, 1);
+        assert_eq!(Error::EscrowNotFound as u32, 2);
+        assert_eq!(Error::InvalidEscrowState as u32, 3);
+        assert_eq!(Error::ContractPaused as u32, 15);
+        assert_eq!(Error::InsufficientStake as u32, 17);
+        assert_eq!(Error::RecurringEscrowNotFound as u32, 36);
+        assert_eq!(Error::StorageLayoutMismatch as u32, 48);
+        assert_eq!(Error::UpgradeCompatibilityMissing as u32, 45);
+        assert_eq!(Error::UpgradeCompatibilityInvalid as u32, 46);
+        assert_eq!(Error::UpgradeMigrationIncomplete as u32, 47);
+    }
+}
+#[cfg(test)]
 mod prop_test;
 #[cfg(test)]
 mod safe_arithmetic_counters_test;

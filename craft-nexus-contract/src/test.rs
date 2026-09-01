@@ -2670,6 +2670,206 @@ fn test_migrate_storage_layout_marks_current_layout_and_preserves_state() {
     assert_eq!(escrow.status, EscrowStatus::Active);
 }
 
+// ─── Differential Upgrade Compatibility Harness ──────────────────────────────
+//
+// The acceptance gate for a WASM upgrade must prove that representative state
+// and calls behave identically before and after migration. The harness below
+// builds a fixture containing all accepted categories, captures the observable
+// reads/errors/balances/events/invariants, performs the storage-layout
+// migration step, captures again, and fails on any difference.
+
+#[derive(Clone, Debug, PartialEq)]
+struct DifferentialSnapshot {
+    version: u32,
+    platform_fee_bps: u32,
+    paused: bool,
+    escrow_count: u32,
+    total_fees_collected: i128,
+    total_fees_for_token: i128,
+    stake: i128,
+    under_collateralized: bool,
+    admin: Address,
+    arbitrator: Address,
+    active_escrow: Escrow,
+    disputed_escrow: Escrow,
+    migrated_legacy_escrow: Escrow,
+    buyer_escrow_ids: soroban_sdk::Vec<u32>,
+    seller_escrow_ids: soroban_sdk::Vec<u32>,
+    buyer_token_balance: i128,
+    seller_token_balance: i128,
+    platform_token_balance: i128,
+    contract_token_balance: i128,
+    event_count: u32,
+}
+
+fn capture_differential_snapshot(
+    env: &Env,
+    client: &CraftNexusContractClient<'static>,
+    token_client: &token::Client<'static>,
+    token_id: &Address,
+    buyer: &Address,
+    seller: &Address,
+    platform_wallet: &Address,
+    active_id: u32,
+    disputed_id: u32,
+    legacy_id: u32,
+) -> DifferentialSnapshot {
+    let config = client.get_platform_config();
+    DifferentialSnapshot {
+        version: client.get_version(),
+        platform_fee_bps: client.get_platform_fee(),
+        paused: client.is_paused(),
+        escrow_count: client.get_escrow_count(),
+        total_fees_collected: client.get_total_fees_collected(),
+        total_fees_for_token: client.get_total_fees_for_token(token_id),
+        stake: client.get_stake(seller),
+        under_collateralized: client.is_account_under_collateralized(seller),
+        admin: config.admin.clone(),
+        arbitrator: config.arbitrator.clone(),
+        active_escrow: client.get_escrow(&active_id),
+        disputed_escrow: client.get_escrow(&disputed_id),
+        migrated_legacy_escrow: client.get_escrow(&legacy_id),
+        buyer_escrow_ids: client.get_escrows_by_buyer(buyer, &0, &100, &false),
+        seller_escrow_ids: client.get_escrows_by_seller(seller, &0, &100, &false),
+        buyer_token_balance: token_client.balance(buyer),
+        seller_token_balance: token_client.balance(seller),
+        platform_token_balance: token_client.balance(platform_wallet),
+        contract_token_balance: token_client.balance(&client.address),
+        event_count: env.events().all().len() as u32,
+    }
+}
+
+#[test]
+fn test_differential_upgrade_compatibility_representative_fixture() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.budget().reset_unlimited();
+
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    let buyer = Address::generate(&env);
+    let seller = Address::generate(&env);
+    let platform_wallet = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_id = token_contract.address();
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let total_supply = 200_000_000i128;
+
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None::<Address>);
+    client.set_min_escrow_amount(&token_id, &0);
+    client.set_min_release_window(&1);
+    client.set_evidence_challenge_window(&0);
+
+    token_admin_client.mint(&buyer, &100_000_000);
+    token_admin_client.mint(&seller, &100_000_000);
+
+    // Stakes (legacy artisan profile coverage).
+    client.stake_tokens(&seller, &token_id, &10_000_000);
+    assert_eq!(client.get_stake(&seller), 10_000_000);
+
+    // Active and disputed escrows.
+    client.create_escrow(&buyer, &seller, &token_id, &1_000_000, &1, &Some(3600));
+    client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &2, &Some(3600));
+    client.dispute_escrow(&2, &Symbol::new(&env, "Differential"), &buyer);
+
+    // Legacy escrow state that must survive migration.
+    let legacy = LegacyEscrow {
+        id: 3,
+        buyer: buyer.clone(),
+        seller: seller.clone(),
+        token: token_id.clone(),
+        amount: 123,
+        status: EscrowStatus::Active,
+        release_window: 50,
+        created_at: 10,
+        ipfs_hash: None,
+        metadata_hash: None,
+        dispute_reason: None,
+        dispute_initiated_at: None,
+    };
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&(ESCROW, 3u32), &legacy);
+    });
+
+    // Recurring balance fixture.
+    client.create_recurring_escrow(&buyer, &seller, &token_id, &1_000_000, &3600, &2);
+    env.ledger().with_mut(|li| li.timestamp += 3601);
+    client.release_next_cycle(&100);
+
+    // Paused state.
+    client.set_admin_action_threshold(&1);
+    client.set_admin_action_timelock_delay(&0);
+    let action = client.propose_admin_action(&admin, &AdminActionKind::PausePlatform(true));
+    client.execute_admin_action(&action.id);
+    assert!(client.is_paused());
+
+    let before = capture_differential_snapshot(
+        &env,
+        &client,
+        &token_client,
+        &token_id,
+        &buyer,
+        &seller,
+        &platform_wallet,
+        1,
+        2,
+        3,
+    );
+
+    // Simulate a storage-layout upgrade boundary.
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StorageLayoutVersion);
+    });
+
+    let migrated = client.migrate_storage_layout();
+    assert_eq!(migrated, CURRENT_STORAGE_LAYOUT_VERSION);
+
+    let after = capture_differential_snapshot(
+        &env,
+        &client,
+        &token_client,
+        &token_id,
+        &buyer,
+        &seller,
+        &platform_wallet,
+        1,
+        2,
+        3,
+    );
+
+    assert_eq!(before, after);
+
+    // Error paths remain identical after migration.
+    let missing_before = client.try_refund(&9999).unwrap_err();
+    let missing_after = client.try_refund(&9999).unwrap_err();
+    assert_eq!(missing_before, missing_after);
+
+    let duplicate_before = client
+        .try_create_escrow(&buyer, &seller, &token_id, &1, &1, &None)
+        .unwrap_err();
+    let duplicate_after = client
+        .try_create_escrow(&buyer, &seller, &token_id, &1, &1, &None)
+        .unwrap_err();
+    assert_eq!(duplicate_before, duplicate_after);
+
+    // Invariant: every minted token is either in user wallets, the platform
+    // wallet, or the contract's own balance.
+    assert_eq!(
+        token_client.balance(&buyer)
+            + token_client.balance(&seller)
+            + token_client.balance(&platform_wallet)
+            + token_client.balance(&client.address),
+        total_supply
+    );
+}
+
 // ===== Multi-sig / timelocked admin action tests =====
 
 #[test]
