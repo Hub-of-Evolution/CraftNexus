@@ -1016,6 +1016,87 @@ pub fn execute_onboarding_op(
 
 // ── Unit Tests ────────────────────────────────────────────────────────___
 
+// ── Upgrade State Commitment (Issue #1140) ──────────────────────────────────
+
+/// Model of the immutable upgrade state commitment recorded after a successful
+/// WASM upgrade. Mirrors the on-chain `UpgradeStateCommitment`: commitments
+/// become immutable immediately at activation and re-execution of the same
+/// WASM hash is rejected forever (#1140).
+///
+/// # Model vs. Ledger Semantics
+/// - `wasm_hash` and the two digests are modeled as opaque `u32` identifiers
+///   rather than `BytesN<32>` to keep the model dependency-light and easy to
+///   exercise in property tests. The on-chain record uses real SHA-256 digests.
+/// - The immutability and single-execution invariants are preserved exactly:
+///   a hash with an immutable commitment can never be recorded again.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeStateCommitmentModel {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: u32,
+    pub state_digest: u32,
+    pub migration_result_digest: u32,
+    pub admin: Address,
+    pub timestamp: u64,
+    pub activated_at: u64,
+    pub immutable: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum UpgradeCommitmentOp {
+    /// Record a commitment for a successfully executed upgrade. Returns
+    /// `UpgradeAlreadyExecuted` if the hash already has an immutable
+    /// commitment (#1140).
+    Record {
+        from_version: u32,
+        to_version: u32,
+        wasm_hash: u32,
+        state_digest: u32,
+        migration_result_digest: u32,
+        admin: Address,
+        now: u64,
+    },
+}
+
+/// Apply an upgrade-commitment transition to the collection of recorded
+/// commitments. Commitments are created already immutable; a second record for
+/// an immutable hash is rejected (mirrors `Error::UpgradeAlreadyExecuted`).
+pub fn execute_upgrade_commitment_op(
+    commitments: &mut Vec<UpgradeStateCommitmentModel>,
+    op: UpgradeCommitmentOp,
+) -> Result<(), String> {
+    match op {
+        UpgradeCommitmentOp::Record {
+            from_version,
+            to_version,
+            wasm_hash,
+            state_digest,
+            migration_result_digest,
+            admin,
+            now,
+        } => {
+            if commitments
+                .iter()
+                .any(|c| c.wasm_hash == wasm_hash && c.immutable)
+            {
+                return Err("UpgradeAlreadyExecuted".into());
+            }
+            commitments.push(UpgradeStateCommitmentModel {
+                from_version,
+                to_version,
+                wasm_hash,
+                state_digest,
+                migration_result_digest,
+                admin,
+                timestamp: now,
+                activated_at: now,
+                immutable: true,
+            });
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1187,5 +1268,94 @@ mod tests {
         execute_escrow_op(&mut state, escrow_op2).unwrap();
 
         assert!(state.check_all_invariants());
+    }
+
+    #[test]
+    fn test_upgrade_commitment_recorded_immutable() {
+        let mut commitments = Vec::new();
+        let admin = Address::generate(&soroban_sdk::Env::default());
+
+        execute_upgrade_commitment_op(
+            &mut commitments,
+            UpgradeCommitmentOp::Record {
+                from_version: 1,
+                to_version: 2,
+                wasm_hash: 0xABCD,
+                state_digest: 100,
+                migration_result_digest: 200,
+                admin: admin.clone(),
+                now: 1_711_368_000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(commitments.len(), 1);
+        let commitment = &commitments[0];
+        assert_eq!(commitment.from_version, 1);
+        assert_eq!(commitment.to_version, 2);
+        assert_eq!(commitment.wasm_hash, 0xABCD);
+        assert!(commitment.immutable, "commitment must be immutable after activation");
+        assert_eq!(commitment.activated_at, commitment.timestamp);
+    }
+
+    #[test]
+    fn test_upgrade_commitment_rejects_reexecution_of_immutable_hash() {
+        let mut commitments = Vec::new();
+        let admin = Address::generate(&soroban_sdk::Env::default());
+
+        execute_upgrade_commitment_op(
+            &mut commitments,
+            UpgradeCommitmentOp::Record {
+                from_version: 1,
+                to_version: 2,
+                wasm_hash: 0xAAAA,
+                state_digest: 1,
+                migration_result_digest: 2,
+                admin: admin.clone(),
+                now: 1_711_368_000,
+            },
+        )
+        .unwrap();
+
+        // A second record for the same hash must be rejected (#1140).
+        let result = execute_upgrade_commitment_op(
+            &mut commitments,
+            UpgradeCommitmentOp::Record {
+                from_version: 2,
+                to_version: 3,
+                wasm_hash: 0xAAAA,
+                state_digest: 3,
+                migration_result_digest: 4,
+                admin,
+                now: 1_711_376_000,
+            },
+        );
+        assert_eq!(result.unwrap_err(), "UpgradeAlreadyExecuted");
+        assert_eq!(commitments.len(), 1);
+    }
+
+    #[test]
+    fn test_upgrade_commitment_allows_distinct_hashes() {
+        let mut commitments = Vec::new();
+        let admin = Address::generate(&soroban_sdk::Env::default());
+
+        for (idx, hash) in [0xBEEF, 0xCAFE].iter().enumerate() {
+            execute_upgrade_commitment_op(
+                &mut commitments,
+                UpgradeCommitmentOp::Record {
+                    from_version: idx as u32 + 1,
+                    to_version: idx as u32 + 2,
+                    wasm_hash: *hash,
+                    state_digest: idx as u32,
+                    migration_result_digest: idx as u32,
+                    admin: admin.clone(),
+                    now: 1_711_368_000 + idx as u64,
+                },
+            )
+            .unwrap();
+        }
+
+        assert_eq!(commitments.len(), 2);
+        assert!(commitments.iter().all(|c| c.immutable));
     }
 }
