@@ -91,6 +91,9 @@ pub const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 /// Default timelock delay for pending critical admin actions (24 hours).
 pub const ADMIN_ACTION_TIMELOCK_DELAY: u64 = 24 * 60 * 60;
 
+/// Default bounded expiration window for two-step admin role transfers (7 days).
+pub const ADMIN_TRANSFER_WINDOW: u64 = 7 * 24 * 60 * 60;
+
 // ── Boundary helpers ──────────────────────────────────────────────────────────
 
 /// Returns `true` if the window that opened at `start` with `duration` seconds
