@@ -172,6 +172,21 @@ const OBSERVABILITY_METRICS_VERSION: u32 = 1;
 /// Cap decay intervals applied in one call to bound CPU (≈ 64 periods).
 const MAX_DECAY_INTERVALS_PER_CALL: u64 = 64;
 
+/// Shared authorization adapter for privileged entry points.
+///
+/// Every privileged marketplace flow (escrow, dispute, stake, recovery,
+/// governance) MUST call [`AuthorizationAdapter::authorize`] at its own
+/// boundary to reject stale, deactivated, or inconsistent onboarding state.
+/// Implementations MUST read the latest persisted onboarding state and MUST
+/// NOT rely on cached or caller-supplied values.
+pub trait AuthorizationAdapter {
+    /// Rejects the call if `user` is not currently onboarded and active.
+    ///
+    /// Panics with [`Error::Unauthorized`] if the state is missing, deactivated,
+    /// or inconsistent.
+    fn authorize(&self, env: Env, user: Address);
+}
+
 #[cfg(not(target_family = "wasm"))]
 #[path = "decimal_test_token.rs"]
 pub mod decimal_test_token;
