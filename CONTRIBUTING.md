@@ -97,6 +97,15 @@ Both **must** pass with zero errors. The `cargo check --tests` command catches t
 cargo build --target wasm32v1-none --release
 ```
 
+### Formal Safety Gate
+
+Release and upgrade PRs must pass the fail-closed contract safety gate (#1148):
+
+```bash
+cd craft-nexus-contract
+./scripts/safety_gate.sh
+```
+
 ## Code Style & Linting
 
 - Rust code follows standard `rustfmt` conventions. Format before committing:
