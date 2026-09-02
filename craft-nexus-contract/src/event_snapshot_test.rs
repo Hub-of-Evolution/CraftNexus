@@ -11,7 +11,8 @@ use crate::{
     ArtisanFeeTierUpdatedEvent, ConfigUpdatedEvent, EscrowEvent, EscrowResolvedEvent,
     FeeTokenConfigsMigratedEvent, MetadataVerifiedEvent, PlatformPausedEvent,
     PlatformUnpausedEvent, RecurringEscrowEvent, ReputationUpdateEvent, TokensStakedEvent,
-    TokensUnstakedEvent, UpgradeProposalEvent, LIFECYCLE_EVENT_SCHEMA_VERSION,
+    TokensUnstakedEvent, UpgradeApprovalEvent, UpgradeProposalEvent,
+    LIFECYCLE_EVENT_SCHEMA_VERSION,
 };
 
 /// Verifies each expected field exists on the struct. Canonical declaration
@@ -82,13 +83,16 @@ fn snapshot_reputation_update_event() {
 fn snapshot_config_updated_event() {
     check_fields!(
         ConfigUpdatedEvent,
-        [schema_version, field_name, old_value, new_value]
+        [schema_version, field_name, old_value, new_value, revision]
     );
 }
 
 #[test]
 fn snapshot_artisan_fee_tier_updated_event() {
-    check_fields!(ArtisanFeeTierUpdatedEvent, [schema_version, artisan, fee_bps]);
+    check_fields!(
+        ArtisanFeeTierUpdatedEvent,
+        [schema_version, artisan, fee_bps]
+    );
 }
 
 #[test]
@@ -98,7 +102,10 @@ fn snapshot_tokens_staked_event() {
 
 #[test]
 fn snapshot_tokens_unstaked_event() {
-    check_fields!(TokensUnstakedEvent, [schema_version, artisan, token, amount]);
+    check_fields!(
+        TokensUnstakedEvent,
+        [schema_version, artisan, token, amount]
+    );
 }
 
 #[test]
@@ -111,19 +118,33 @@ fn snapshot_metadata_verified_event() {
 
 #[test]
 fn snapshot_platform_paused_event() {
-    check_fields!(PlatformPausedEvent, [schema_version, initiator, timestamp]);
+    check_fields!(
+        PlatformPausedEvent,
+        [schema_version, initiator, timestamp, revision]
+    );
 }
 
 #[test]
 fn snapshot_platform_unpaused_event() {
-    check_fields!(PlatformUnpausedEvent, [schema_version, initiator, timestamp]);
+    check_fields!(
+        PlatformUnpausedEvent,
+        [schema_version, initiator, timestamp, revision]
+    );
 }
 
 #[test]
 fn snapshot_recurring_escrow_event() {
     check_fields!(
         RecurringEscrowEvent,
-        [schema_version, id, action, buyer, artisan, amount, timestamp]
+        [
+            schema_version,
+            id,
+            action,
+            buyer,
+            artisan,
+            amount,
+            timestamp
+        ]
     );
 }
 
@@ -131,7 +152,22 @@ fn snapshot_recurring_escrow_event() {
 fn snapshot_upgrade_proposal_event() {
     check_fields!(
         UpgradeProposalEvent,
-        [schema_version, action, wasm_hash, admin, timestamp, upgrade_at]
+        [
+            schema_version,
+            action,
+            wasm_hash,
+            admin,
+            timestamp,
+            upgrade_at
+        ]
+    );
+}
+
+#[test]
+fn snapshot_upgrade_approval_event() {
+    check_fields!(
+        UpgradeApprovalEvent,
+        [nonce, signer, wasm_hash, timestamp, approval_count]
     );
 }
 
@@ -189,7 +225,10 @@ fn snapshot_poh_credential_registered_event() {
 
 #[test]
 fn snapshot_identity_correlated_event() {
-    check_fields!(IdentityCorrelatedEvent, [schema_version, user, identity_hash]);
+    check_fields!(
+        IdentityCorrelatedEvent,
+        [schema_version, user, identity_hash]
+    );
 }
 
 #[test]
