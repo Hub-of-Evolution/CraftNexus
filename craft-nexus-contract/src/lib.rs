@@ -49,6 +49,42 @@ pub mod onboarding;
 /// Centralized pagination input validation (Issue #1022).
 pub mod pagination_validation;
 
+/// Price oracle input validation for fee and settlement calculations.
+pub mod price_oracle {
+    use soroban_sdk::{Env, Symbol};
+
+    /// Max allowed confidence interval (in basis points).
+    const MAX_CONFIDENCE_BPS: u32 = 100;
+
+    /// Validates a price oracle update before it is used in conversions.
+    ///
+    /// Rejects stale timestamps, malformed asset pairs, excessive precision,
+    /// and confidence bounds outside the configured range. The function is
+    /// pure and deterministic: identical valid inputs always succeed.
+    ///
+    /// # Errors
+    /// Returns [`crate::Error::PriceOracleStale`] if the update is too old,
+    /// or [`crate::Error::PriceOracleInvalid`] when any field is malformed.
+    pub fn validate_oracle_price(
+        env: &Env,
+        timestamp: u64,
+        max_age_secs: u64,
+        asset_pair: &Symbol,
+        price_precision: u32,
+        confidence_bps: u32,
+    ) -> Result<(), crate::Error> {
+        let now = env.ledger().timestamp();
+        if timestamp > now || now.saturating_sub(timestamp) > max_age_secs {
+            return Err(crate::Error::PriceOracleStale);
+        }
+        if asset_pair.is_empty() || price_precision > 18 || confidence_bps == 0 || confidence_bps > MAX_CONFIDENCE_BPS {
+            return Err(crate::Error::PriceOracleInvalid);
+        }
+        Ok(())
+    }
+}
+
+
 /// Error codes grouped by category for off-chain triage.
 ///
 /// # Categories
@@ -253,6 +289,10 @@ pub enum Error {
     /// The user's onboarding role does not permit the requested marketplace
     /// operation.
     OnboardingRoleMismatch = 77,
+    /// The price oracle timestamp is older than the configured maximum age.
+    PriceOracleStale = 78,
+    /// The price oracle asset pair, precision, or confidence is invalid.
+    PriceOracleInvalid = 79,
     /// The user's onboarding profile state version does not match the expected
     /// current version — stale onboarding state detected.
     OnboardingProfileStale = 78,
