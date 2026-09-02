@@ -161,6 +161,10 @@ fn test_repair_plan_requires_approval_and_is_idempotent() {
 
     let plan = client.propose_reconciliation_repair(&token).unwrap();
     assert!(!plan.applied);
+    assert!(!plan.consumed);
+    assert_eq!(plan.version, 1);
+    assert_eq!(plan.approvals.len(), 1);
+
     client.set_admin_action_timelock_delay(&0);
     let action = client.propose_admin_action(
         &admin,
@@ -170,8 +174,107 @@ fn test_repair_plan_requires_approval_and_is_idempotent() {
 
     let repaired = client.get_reconciliation_repair_plan(&plan.id).unwrap();
     assert!(repaired.applied);
+    assert!(repaired.consumed);
     assert_eq!(client.get_fund_allocation(&token).total_locked, 100_000);
+
+    // Applying plan a second time is harmless (idempotent no-op)
+    let action2 = client.propose_admin_action(
+        &admin,
+        &AdminActionKind::ApplyReconciliationRepair(plan.id),
+    );
+    let res2 = client.try_execute_admin_action(&action2.id);
+    assert!(res2.is_ok());
+
     assert_eq!(client.sweep_unallocated_funds(&token, &wallet), 25_000);
+}
+
+#[test]
+fn test_repair_plan_blocked_when_state_digest_changes() {
+    let (env, client, buyer, seller, token, token_admin, _wallet, admin) =
+        setup_emergency_env();
+
+    token_admin.mint(&buyer, &500_000);
+    client.create_escrow(&buyer, &seller, &token, &100_000, &1, &Some(3600));
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalLocked(token.clone()), &200_000i128);
+    });
+    client.reconcile_token(&token, &0, &1).unwrap();
+
+    let plan = client.propose_reconciliation_repair(&token).unwrap();
+
+    // Mutate the live reconciliation report state to invalidate digest
+    env.as_contract(&client.address, || {
+        let mut report: ReconciliationReport = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ReconciliationReport(token.clone()))
+            .unwrap();
+        report.balance += 50_000;
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReconciliationReport(token.clone()), &report);
+    });
+
+    client.set_admin_action_timelock_delay(&0);
+    let action = client.propose_admin_action(
+        &admin,
+        &AdminActionKind::ApplyReconciliationRepair(plan.id),
+    );
+
+    // Execution fails because state digest does not match expected digest
+    let res = client.try_execute_admin_action(&action.id);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_double_allocation_of_residual_balance_rejected() {
+    let (env, client, buyer, seller, token, token_admin, _wallet, _admin) =
+        setup_emergency_env();
+
+    token_admin.mint(&buyer, &500_000);
+    client.create_escrow(&buyer, &seller, &token, &100_000, &1, &Some(3600));
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalLocked(token.clone()), &200_000i128);
+    });
+    client.reconcile_token(&token, &0, &1).unwrap();
+
+    // Residual unallocated balance is 500_000 - 100_000 = 400_000
+    // Plan 1 allocates 300_000
+    let plan1 = client
+        .propose_reconciliation_repair_with_details(&token, &300_000i128, &Vec::new(&env))
+        .unwrap();
+    assert_eq!(plan1.allocated_amount, 300_000);
+
+    // Plan 2 attempts to allocate 200_000 (total 500_000 > 400_000 available residual balance)
+    let plan2_res = client.try_propose_reconciliation_repair_with_details(
+        &token,
+        &200_000i128,
+        &Vec::new(&env),
+    );
+    assert!(plan2_res.is_err());
+}
+
+#[test]
+fn test_repair_plan_approval_registration() {
+    let (env, client, buyer, seller, token, token_admin, _wallet, _admin) =
+        setup_emergency_env();
+
+    token_admin.mint(&buyer, &500_000);
+    client.create_escrow(&buyer, &seller, &token, &100_000, &1, &Some(3600));
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalLocked(token.clone()), &200_000i128);
+    });
+    client.reconcile_token(&token, &0, &1).unwrap();
+
+    let plan = client.propose_reconciliation_repair(&token).unwrap();
+    let approved_plan = client.approve_reconciliation_repair(&plan.id).unwrap();
+    assert_eq!(approved_plan.approvals.len(), 1);
 }
 
 #[test]

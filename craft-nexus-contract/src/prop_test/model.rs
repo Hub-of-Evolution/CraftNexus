@@ -83,13 +83,13 @@ impl ModelEscrow {
 
     /// Whether the release window has elapsed relative to `now`.
     pub fn window_elapsed(&self, now: u64) -> bool {
-        now >= self.created_at.saturating_add(self.release_window)
+        crate::time_policy::is_window_elapsed(now, self.created_at, self.release_window)
     }
 
     /// Whether the maximum dispute duration has elapsed relative to `now`.
     pub fn dispute_expired(&self, now: u64, max_dispute_duration: u64) -> bool {
         match self.dispute_initiated_at {
-            Some(t) => now >= t.saturating_add(max_dispute_duration),
+            Some(t) => crate::time_policy::is_window_elapsed(now, t, max_dispute_duration),
             None => false,
         }
     }
@@ -119,14 +119,14 @@ impl ModelArtisanStake {
 
     /// True if at least one deposit can be unstaked at `now`.
     pub fn has_matured(&self, now: u64) -> bool {
-        self.queue.iter().any(|d| now >= d.cooldown_end)
+        self.queue.iter().any(|d| crate::time_policy::is_deadline_reached(now, d.cooldown_end))
     }
 
     /// Sum of matured amounts at `now`.
     pub fn matured_amount(&self, now: u64) -> i128 {
         self.queue
             .iter()
-            .filter(|d| now >= d.cooldown_end)
+            .filter(|d| crate::time_policy::is_deadline_reached(now, d.cooldown_end))
             .map(|d| d.amount)
             .sum()
     }
@@ -473,7 +473,7 @@ impl ModelState {
         let mut released = 0i128;
         let mut new_queue = Vec::new();
         for deposit in stake.queue.drain(..) {
-            if remaining > 0 && now >= deposit.cooldown_end {
+            if remaining > 0 && crate::time_policy::is_deadline_reached(now, deposit.cooldown_end) {
                 let take = remaining.min(deposit.amount);
                 released += take;
                 remaining -= take;
@@ -506,7 +506,7 @@ impl ModelState {
         }
         // Cancel-repropose cooldown check
         if let Some(cancelled_at) = self.last_cancel_at {
-            if now < cancelled_at.saturating_add(7 * 24 * 60 * 60) {
+            if crate::time_policy::is_window_active(now, cancelled_at, crate::time_policy::CANCEL_REPROPOSE_COOLDOWN) {
                 return Err(ModelError::UpgradeCooldownActive);
             }
         }
@@ -532,7 +532,8 @@ impl ModelState {
     pub fn execute_upgrade(&mut self, now: u64) -> Result<(), ModelError> {
         match self.upgrade_status {
             ModelUpgradeStatus::Proposed { upgrade_at } => {
-                if now < upgrade_at {
+                // Time policy: upgrade is ready when now >= upgrade_at (inclusive end)
+                if crate::time_policy::is_deadline_pending(now, upgrade_at) {
                     return Err(ModelError::UpgradeCooldownActive);
                 }
                 self.upgrade_status = ModelUpgradeStatus::Executed;
