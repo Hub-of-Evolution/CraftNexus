@@ -13,6 +13,12 @@ extern crate alloc;
 /// Centralised time-boundary policy for the contract.
 pub mod time_policy;
 
+/// Bounded, overflow-safe oracle-price conversion (Issue #1088).
+pub mod conversion;
+
+/// Storage lifecycle, compaction, and TTL-management framework (#920).
+pub mod storage_lifecycle;
+
 #[cfg(test)]
 mod admin_idempotency_test;
 #[cfg(test)]
@@ -36,7 +42,10 @@ mod prop_test;
 #[cfg(test)]
 mod reentrancy_test;
 #[cfg(test)]
+mod safe_arithmetic_counters_test;
+#[cfg(test)]
 mod scalability_test;
+#[cfg(test)]
 mod stake_cooldown_test; // Add this line
 mod staking;
 #[cfg(test)]
@@ -48,7 +57,6 @@ mod time_boundary_test;
 #[cfg(test)]
 mod token_compatibility_test;
 pub use staking::*; // Or explicitly use the contract struct: pub use staking::StakeContract;
-mod safe_arithmetic_counters_test;
 
 // Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
 // artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
@@ -155,11 +163,11 @@ pub mod settlement_snapshot {
 ///
 /// | Range   | Category     | Meaning                                         | Triage                    |
 /// |---------|-------------|-------------------------------------------------|---------------------------|
-/// | 1–9     | Auth/Access | Authorization, ownership, or existence failures | Rollback immediately      |
-/// | 10–19   | State       | Invalid state transitions or preconditions      | Retry after state change  |
-/// | 20–29   | Config      | Operator-configurable limits or misconfig       | Operator must act         |
-/// | 30–39   | Operational | System or cooldown gates                        | Retry after cooldown      |
-/// | 40–42   | Validation  | Input validation failures                       | Fix caller input          |
+/// | 1â€“9     | Auth/Access | Authorization, ownership, or existence failures | Rollback immediately      |
+/// | 10â€“19   | State       | Invalid state transitions or preconditions      | Retry after state change  |
+/// | 20â€“29   | Config      | Operator-configurable limits or misconfig       | Operator must act         |
+/// | 30â€“39   | Operational | System or cooldown gates                        | Retry after cooldown      |
+/// | 40â€“42   | Validation  | Input validation failures                       | Fix caller input          |
 ///
 /// Use [`is_retryable`] to determine whether an error may succeed on retry.
 #[contracterror(export = false)]
@@ -167,7 +175,7 @@ pub mod settlement_snapshot {
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 #[repr(u32)]
 pub enum Error {
-    // ── Auth / Access (1–9): rollback immediately ──
+    // â”€â”€ Auth / Access (1â€“9): rollback immediately â”€â”€
     /// The caller is not authorized for this operation. Ensure you are using
     /// the correct admin, arbitrator, moderator, buyer, or seller address.
     Unauthorized = 1,
@@ -195,7 +203,7 @@ pub enum Error {
     NotInDispute = 8,
     /// DEPRECATED: Handled by onboarding contract. Retained for ABI compatibility.
     AlreadyOnboarded = 9,
-    // ── State / Transition (10–19): retry after state change ──
+    // â”€â”€ State / Transition (10â€“19): retry after state change â”€â”€
     /// The fee exceeds the maximum allowed platform fee (MAX_PLATFORM_FEE_BPS,
     /// currently 10%). Reduce fee_bps and retry.
     InvalidFee = 10,
@@ -226,7 +234,7 @@ pub enum Error {
     /// The partial refund amount is invalid: it must be positive and not
     /// exceed the escrow amount. Adjust refund_amount and retry.
     InvalidRefundAmount = 19,
-    // ── Config / Resource (20–29): operator must act ──
+    // â”€â”€ Config / Resource (20â€“29): operator must act â”€â”€
     /// Partial refund proposal not found
     ProposalNotFound = 20,
     /// Partial refund proposal already exists for this order
@@ -250,7 +258,7 @@ pub enum Error {
     AdminRecoveryFailed = 28,
     /// Batch operation limit exceeded
     BatchLimitExceeded = 29,
-    // ── Operational / Gates (30–39): retry after cooldown ──
+    // â”€â”€ Operational / Gates (30â€“39): retry after cooldown â”€â”€
     /// Deprecated function called (no-op for ABI compatibility)
     DeprecatedFunction = 30,
     /// No pending admin transfer to accept or cancel
@@ -307,55 +315,55 @@ pub enum Error {
     /// Invalid dispute session for evidence submission (#927)
     InvalidDisputeSession = 55,
     /// Contract does not implement the supported token interface.
-    UnsupportedToken = 57,
+    UnsupportedToken = 56,
     /// The requested continuation size is outside the scheduler bound.
-    InvalidBatchWorkLimit = 58,
+    InvalidBatchWorkLimit = 57,
     /// The scheduled batch was cancelled.
-    BatchJobCancelled = 59,
+    BatchJobCancelled = 58,
     /// The requested scheduled batch does not exist.
-    BatchJobNotFound = 60,
+    BatchJobNotFound = 59,
     /// The caller is not the account that scheduled the batch.
-    BatchJobUnauthorized = 61,
+    BatchJobUnauthorized = 60,
     /// The scheduled batch has already reached a terminal state.
-    BatchJobCompleted = 62,
+    BatchJobCompleted = 61,
     /// Platform wallet cannot be the contract address.
-    InvalidPlatformWallet = 63,
+    InvalidPlatformWallet = 62,
     /// Provided service-agreement hash is invalid
-    InvalidServiceAgreementHash = 64,
+    InvalidServiceAgreementHash = 63,
     /// Evidence challenge window has not elapsed; arbitrator resolution is blocked.
-    ChallengeWindowActive = 65,
+    ChallengeWindowActive = 64,
     /// The arbitrator address is blacklisted.
-    ArbitratorBlacklisted = 66,
+    ArbitratorBlacklisted = 65,
     /// Dispute action is not valid in the current session (duplicate escalate, bad parent evidence).
-    InvalidDisputeAction = 67,
+    InvalidDisputeAction = 66,
     /// Dispute escalation window has not elapsed.
-    EscalationWindowActive = 68,
+    EscalationWindowActive = 67,
     /// Arbitrator resolution deadline (`max_dispute_duration`) has elapsed.
-    ArbitratorDeadlineExceeded = 69,
+    ArbitratorDeadlineExceeded = 68,
     /// This escrow was already settled; a second settlement path cannot run.
-    SettlementAlreadyFinalized = 70,
+    SettlementAlreadyFinalized = 69,
     /// Tracked obligations exceed the token balance held by the contract.
-    EmergencyAccountingInvariant = 71,
+    EmergencyAccountingInvariant = 70,
     /// A reconciliation report has unresolved customer or collateral liabilities.
-    ReconciliationRequired = 72,
+    ReconciliationRequired = 71,
     /// The requested reconciliation repair plan does not exist.
-    RepairPlanNotFound = 73,
+    RepairPlanNotFound = 72,
     /// The reconciliation repair plan has already reached a terminal state.
-    RepairPlanTerminal = 74,
+    RepairPlanTerminal = 73,
     /// The live token state no longer matches the reviewed repair plan.
-    RepairPlanPreconditionFailed = 75,
+    RepairPlanPreconditionFailed = 74,
     /// The user does not have an onboarding profile registered with the
     /// configured onboarding contract.
-    OnboardingProfileNotFound = 76,
+    OnboardingProfileNotFound = 75,
     /// The user's onboarding profile is not in an active state (deactivated,
     /// under review, or flagged).
-    OnboardingProfileInactive = 77,
+    OnboardingProfileInactive = 76,
     /// The user's onboarding role does not permit the requested marketplace
     /// operation.
-    OnboardingRoleMismatch = 78,
+    OnboardingRoleMismatch = 77,
     /// The user's onboarding profile state version does not match the expected
     /// current version — stale onboarding state detected.
-    OnboardingProfileStale = 79,
+    OnboardingProfileStale = 78,
     /// The user's verification status has been revoked or is not current.
     OnboardingVerificationRevoked = 80,
     /// An escrow with this order ID already exists. Duplicate escrow
@@ -419,6 +427,47 @@ pub enum Error {
     TokenTransferFailed = 103,
     /// Idempotency record exists for a different operation or parameter hash.
     IdempotencyMismatch = 104,
+    /// An oracle-driven currency conversion produced a negative amount,
+    /// price, or liquidity input (#1088).
+    ConversionNegativeInput = 105,
+    /// An oracle-driven currency conversion used a decimals value outside
+    /// the supported range (#1088).
+    ConversionUnsupportedDecimals = 106,
+    /// An oracle-driven currency conversion overflowed `i128` arithmetic
+    /// (#1088).
+    ConversionOverflow = 107,
+    /// The oracle quote's reported liquidity is below the configured
+    /// minimum; the conversion is rejected rather than settled against a
+    /// thin book (#1088).
+    ConversionInsufficientLiquidity = 108,
+    /// The oracle quote moved further from the trusted reference price than
+    /// the configured maximum movement allows (#1088).
+    ConversionExcessiveMovement = 109,
+    /// A strictly positive conversion input produced a zero output, which
+    /// would silently destroy value; rejected instead of settling for zero
+    /// (#1088).
+    ConversionOutputUnderflow = 110,
+}
+
+/// Maps a [`conversion::ConversionError`] onto the contract's own [`Error`]
+/// enum so settlement paths that call into [`conversion::convert_amount`] or
+/// [`conversion::convert_amount_ceiling`] can propagate a single, ABI-stable
+/// error type to callers.
+impl From<conversion::ConversionError> for Error {
+    fn from(err: conversion::ConversionError) -> Self {
+        match err {
+            conversion::ConversionError::NegativeInput => Error::ConversionNegativeInput,
+            conversion::ConversionError::UnsupportedDecimals => {
+                Error::ConversionUnsupportedDecimals
+            }
+            conversion::ConversionError::Overflow => Error::ConversionOverflow,
+            conversion::ConversionError::InsufficientLiquidity => {
+                Error::ConversionInsufficientLiquidity
+            }
+            conversion::ConversionError::ExcessiveMovement => Error::ConversionExcessiveMovement,
+            conversion::ConversionError::OutputUnderflow => Error::ConversionOutputUnderflow,
+        }
+    }
 }
 
 /// Returns `true` if the error is transient and the operation may succeed on retry.
@@ -444,8 +493,6 @@ pub fn is_retryable(error: Error) -> bool {
             | Error::ChallengeWindowActive
             | Error::EscalationWindowActive
             | Error::ArbitratorDeadlineExceeded
-            | Error::LiquidationGracePeriodActive
-            | Error::StaleAdminRevision
     )
 }
 
@@ -494,6 +541,13 @@ const BASE58_BTC_CHARSET: [bool; 256] = {
     }
 
     chars
+};
+
+/// Storage lifecycle, compaction, and TTL-management framework (#920).
+pub use storage_lifecycle::{
+    CompactionReport, StorageRetentionPolicy, DEFAULT_RETAINED_AUDIT_ENTRIES,
+    DEFAULT_RETAINED_EMERGENCY_HISTORY, DEFAULT_RETAINED_STAKE_HISTORY,
+    DEFAULT_RETAINED_UPGRADE_HISTORY,
 };
 const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
 
@@ -2677,23 +2731,8 @@ pub trait OnboardingInterface {
     fn is_user_verified(env: Env, user: Address) -> bool;
 }
 
+/// The CraftNexus escrow contract.
 #[contract]
-/// CraftNexus escrow contract.
-///
-/// # Storage model
-/// - Escrows are stored under `(ESCROW, order_id)` as a single compact record.
-/// - Enumeration uses count + indexed keys (e.g. `EscrowCount` +
-///   `GlobalEscrowIdIndexed(i)`) to avoid unbounded `Vec` growth.
-///
-/// # TTL model
-/// - Persistent entries extend TTL on write via `extend_persistent`.
-/// - Hot index reads use `extend_persistent_read` with a lower threshold to
-///   reduce rent-refresh overhead while still preventing accidental expiry.
-///
-/// # Onboarding integration
-/// - The admin can register an onboarding contract address.
-/// - Cross-contract calls are wrapped in `try_invoke_contract` helpers so an
-///   onboarding failure never bricks escrow settlement.
 pub struct CraftNexusContract;
 
 impl CraftNexusContract {
@@ -2709,14 +2748,9 @@ impl CraftNexusContract {
     }
 }
 
-/// Alias and compatibility layers
-pub const ESCROW_CONTRACT: CraftNexusContract = CraftNexusContract;
-
 pub type EscrowContractClient<'a> = CraftNexusContractClient<'a>;
 
-/// Guard to ensure reentry protection is cleared even if a panic or error occurs.
-/// This is essential to prevent contract locks from persisting across failed calls.
-/// Automatically removes the guard when dropped, ensuring cleanup in all control flows.
+/// Guard to ensure reentry protection is cleared across all control flows.
 struct ReentryGuardScope<'a> {
     env: &'a Env,
 }
@@ -2755,7 +2789,6 @@ impl CraftNexusContract {
             return true;
         }
 
-        // CIDv1: minimum 3 chars (multibase prefix + version byte + codec)
         if len < 3 {
             return false;
         }
@@ -2764,7 +2797,6 @@ impl CraftNexusContract {
         let payload = &cid_bytes[1..];
 
         match prefix {
-            // base32lower (most common CIDv1 encoding)
             b'b' => {
                 if !(50..=100).contains(&len) || cid_bytes[1] != b'a' {
                     return false;
@@ -2773,7 +2805,6 @@ impl CraftNexusContract {
                     .iter()
                     .all(|b| matches!(*b, b'a'..=b'z' | b'2'..=b'7'))
             }
-            // base16lower (hex)
             b'f' => {
                 if !(60..=120).contains(&len) || cid_bytes[1] != b'0' || cid_bytes[2] != b'1' {
                     return false;
@@ -2782,7 +2813,6 @@ impl CraftNexusContract {
                     .iter()
                     .all(|b| matches!(*b, b'0'..=b'9' | b'a'..=b'f'))
             }
-            // base58btc
             b'z' => {
                 if !(40..=100).contains(&len) {
                     return false;
