@@ -334,3 +334,173 @@ pub fn shrink_sequence<T: Clone>(
 
     current
 }
+
+// ── Model-based shrinking for operation sequences ─────────────────────────────
+
+/// Shrinkable operation representation for model-based testing.
+#[derive(Clone, Debug)]
+pub struct ShrinkableOp<T: Clone> {
+    pub op: T,
+    pub actor_id: u8,
+    pub timestamp: u64,
+    pub amount: Option<i128>,
+    pub token_id: Option<u8>,
+}
+
+/// Shrink a sequence while reducing call complexity, actor diversity,
+/// timestamp jumps, amounts, and preserving the failure condition.
+///
+/// This implements model-based shrinking that produces minimal reproducible
+/// scenarios from generated property test failures.
+pub fn shrink_model_based<T, F>(
+    seq: Vec<ShrinkableOp<T>>,
+    mut is_failure: F,
+) -> Vec<ShrinkableOp<T>>
+where
+    T: Clone + core::fmt::Debug,
+    F: FnMut(&[ShrinkableOp<T>]) -> bool,
+{
+    let mut current = seq;
+
+    // Phase 1: Remove operations (preserve failure)
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut i = 0;
+        while i < current.len() {
+            let mut candidate = current.clone();
+            candidate.remove(i);
+            if !candidate.is_empty() && is_failure(&candidate) {
+                current = candidate;
+                changed = true;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    // Phase 2: Reduce actor diversity (normalize actor IDs to 0, 1, 2...)
+    changed = true;
+    while changed {
+        changed = false;
+        for target in 0..current.len() {
+            if current[target].actor_id > 0 {
+                let mut candidate = current.clone();
+                candidate[target].actor_id = candidate[target].actor_id.saturating_sub(1);
+                if is_failure(&candidate) {
+                    current = candidate;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Phase 3: Reduce timestamp jumps (minimize time deltas)
+    changed = true;
+    while changed {
+        changed = false;
+        for i in 1..current.len() {
+            if current[i].timestamp > current[i - 1].timestamp {
+                let mut candidate = current.clone();
+                let delta = candidate[i].timestamp - candidate[i - 1].timestamp;
+                let new_delta = delta / 2;
+                if new_delta > 0 {
+                    candidate[i].timestamp = candidate[i - 1].timestamp + new_delta;
+                    // Adjust subsequent timestamps proportionally
+                    for j in (i + 1)..candidate.len() {
+                        if candidate[j].timestamp > candidate[i].timestamp {
+                            candidate[j].timestamp =
+                                candidate[j].timestamp.saturating_sub(delta - new_delta);
+                        }
+                    }
+                    if is_failure(&candidate) {
+                        current = candidate;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 4: Reduce amounts (shrink to smaller values)
+    changed = true;
+    while changed {
+        changed = false;
+        for i in 0..current.len() {
+            if let Some(amt) = current[i].amount {
+                if amt > 1_000 {
+                    let mut candidate = current.clone();
+                    candidate[i].amount = Some(amt / 2);
+                    if is_failure(&candidate) {
+                        current = candidate;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 5: Reduce token diversity (normalize token IDs)
+    changed = true;
+    while changed {
+        changed = false;
+        for i in 0..current.len() {
+            if let Some(token_id) = current[i].token_id {
+                if token_id > 0 {
+                    let mut candidate = current.clone();
+                    candidate[i].token_id = Some(token_id.saturating_sub(1));
+                    if is_failure(&candidate) {
+                        current = candidate;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    current
+}
+
+/// Shrink parameters within a single operation while preserving failure.
+pub fn shrink_operation_params<T, F>(
+    op: &ShrinkableOp<T>,
+    mut is_failure: F,
+) -> ShrinkableOp<T>
+where
+    T: Clone,
+    F: FnMut(&ShrinkableOp<T>) -> bool,
+{
+    let mut current = op.clone();
+
+    // Shrink amount
+    if let Some(amt) = current.amount {
+        let mut candidate = current.clone();
+        let mut test_amount = amt / 2;
+        while test_amount >= 1 {
+            candidate.amount = Some(test_amount);
+            if is_failure(&candidate) {
+                current = candidate.clone();
+            }
+            test_amount /= 2;
+        }
+    }
+
+    // Shrink actor ID
+    let mut test_actor = current.actor_id;
+    while test_actor > 0 {
+        let mut candidate = current.clone();
+        candidate.actor_id = test_actor - 1;
+        if is_failure(&candidate) {
+            current = candidate;
+            test_actor -= 1;
+        } else {
+            break;
+        }
+    }
+
+    current
+}
