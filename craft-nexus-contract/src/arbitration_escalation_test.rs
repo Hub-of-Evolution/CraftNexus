@@ -38,7 +38,7 @@ fn setup(
     let platform_wallet = Address::generate(env);
     let admin = Address::generate(env);
     let arbitrator = Address::generate(env);
-    let onboarding_contract = Address::generate(env);
+    let onboarding = crate::test_utils::deploy_onboarding(env, &contract_id);
 
     let token_admin = Address::generate(env);
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
@@ -53,10 +53,11 @@ fn setup(
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &Some(onboarding.address.clone()),
     );
     client.set_min_escrow_amount(&token_contract.address(), &0);
     client.set_min_release_window(&1);
+    crate::test_utils::onboard_buyer_and_seller(env, &onboarding, &buyer, &seller);
 
     (
         client,

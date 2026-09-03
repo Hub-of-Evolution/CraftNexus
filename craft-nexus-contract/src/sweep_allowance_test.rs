@@ -123,10 +123,42 @@ fn sweep_rejects_stale_reconciliation_after_balance_changes() {
     token_admin.mint(&buyer, &1_000_000);
     client.create_escrow(&buyer, &seller, &token, &200_000, &2, &Some(3_600));
 
+    // Creating a new escrow moves the tracked state, which *removes* the prior
+    // clean reconciliation revision (#1069): a stale clean report can never
+    // authorize a new sweep, so the sweep is blocked because no current clean
+    // revision backs it.
     let result = client.try_sweep_unallocated_funds(&token, &wallet);
     assert!(
         matches!(result, Err(Ok(Error::ReconciliationRequired))),
         "a reconciliation report that predates a balance-affecting operation must not vouch for a sweep"
+    );
+}
+
+#[test]
+fn sweep_rejects_clean_report_once_tracked_state_drifts() {
+    let (_env, client, buyer, seller, token, token_admin, wallet, _admin) = setup_sweep_env();
+
+    token_admin.mint(&buyer, &500_000);
+    client.create_escrow(&buyer, &seller, &token, &200_000, &1, &Some(3_600));
+
+    // Establish a clean revision that matches tracked state.
+    let report = client.reconcile_token(&token, &0, &20);
+    assert!(report.complete && !report.unresolved);
+
+    // Drift the tracked counter *below* the reported value directly, keeping the
+    // unallocated balance non-negative so the update-total helpers (which would
+    // otherwise delete the report) are bypassed. The revision now no longer
+    // describes the current canonical state.
+    _env.as_contract(&client.address, || {
+        _env.storage()
+            .persistent()
+            .set(&DataKey::TotalLocked(token.clone()), &50_000i128);
+    });
+
+    let result = client.try_sweep_unallocated_funds(&token, &wallet);
+    assert!(
+        matches!(result, Err(Ok(Error::ReconciliationOutdated))),
+        "a clean revision that no longer matches the current tracked state must reject a sweep as outdated"
     );
 }
 
@@ -152,8 +184,13 @@ fn sweep_rejects_reconciliation_that_found_a_mismatch() {
         "reconciliation must detect the tracked/expected mismatch"
     );
 
+    // The rejection names the unresolved accounting category so operators know
+    // exactly which ledger must be repaired: the customer (escrow) ledger.
     let result = client.try_sweep_unallocated_funds(&token, &wallet);
-    assert!(matches!(result, Err(Ok(Error::ReconciliationRequired))));
+    assert!(
+        matches!(result, Err(Ok(Error::UnresolvedCustomerLiability))),
+        "a reconciliation that found a customer-liability mismatch must reject a sweep with that category"
+    );
 }
 
 #[test]
@@ -179,8 +216,67 @@ fn sweep_rejects_accounting_invariant_breach_even_with_report() {
     assert!(matches!(
         result,
         Err(Ok(Error::EmergencyAccountingInvariant))
-            | Err(Ok(Error::ReconciliationRequired))
+            | Err(Ok(Error::ReconciliationOutdated))
     ));
+}
+
+#[test]
+fn sweep_rejection_explains_unresolved_customer_liability() {
+    let (_env, client, buyer, seller, token, token_admin, wallet, _admin) = setup_sweep_env();
+
+    token_admin.mint(&buyer, &1_000_000);
+    client.create_escrow(&buyer, &seller, &token, &200_000, &1, &Some(3_600));
+
+    // Establish a clean revision first (tracked totals match canonical records).
+    let report = client.reconcile_token(&token, &0, &20);
+    assert!(report.complete && !report.unresolved);
+
+    // Introduce a customer-liability discrepancy *after* reconciliation: the
+    // tracked locked counter diverges from the canonical escrow record, which
+    // only the next reconcile_token run can surface.
+    _env.as_contract(&client.address, || {
+        _env.storage()
+            .persistent()
+            .set(&DataKey::TotalLocked(token.clone()), &50_000i128);
+    });
+    let report = client.reconcile_token(&token, &0, &20);
+    assert!(report.unresolved);
+
+    // The sweep rejection names the customer ledger as the cause (#1069).
+    let result = client.try_sweep_unallocated_funds(&token, &wallet);
+    assert!(
+        matches!(result, Err(Ok(Error::UnresolvedCustomerLiability))),
+        "an unresolved customer liability must reject a sweep with that category"
+    );
+}
+
+#[test]
+fn sweep_rejection_explains_unresolved_collateral_liability() {
+    let (_env, client, _buyer, seller, token, token_admin, wallet, _admin) = setup_sweep_env();
+
+    token_admin.mint(&seller, &1_000_000);
+    client.stake_tokens(&seller, &token, &200_000);
+
+    // Establish a clean revision (tracked staked total matches canonical record).
+    let report = client.reconcile_token(&token, &0, &20);
+    assert!(report.complete && !report.unresolved);
+
+    // Introduce a collateral-liability discrepancy *after* reconciliation: the
+    // tracked staked counter diverges from the actual stake record.
+    _env.as_contract(&client.address, || {
+        _env.storage()
+            .persistent()
+            .set(&DataKey::TotalStaked(token.clone()), &50_000i128);
+    });
+    let report = client.reconcile_token(&token, &0, &20);
+    assert!(report.unresolved);
+
+    // The sweep rejection names the collateral ledger as the cause (#1069).
+    let result = client.try_sweep_unallocated_funds(&token, &wallet);
+    assert!(
+        matches!(result, Err(Ok(Error::UnresolvedCollateralLiability))),
+        "an unresolved collateral liability must reject a sweep with that category"
+    );
 }
 
 #[test]

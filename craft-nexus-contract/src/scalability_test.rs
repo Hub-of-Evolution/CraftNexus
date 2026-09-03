@@ -40,7 +40,7 @@ fn setup_test() -> (
     token_asset.mint(&buyer, &1_000_000_000);
 
     // Deploy mock onboarding contract
-    let onboarding_contract = Address::generate(&env);
+    let onboarding = crate::test_utils::deploy_onboarding(&env, &contract_id);
 
     // Initialize the escrow contract
     client.initialize(
@@ -48,8 +48,9 @@ fn setup_test() -> (
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &Some(onboarding.address.clone()),
     );
+    crate::test_utils::onboard_buyer_and_seller(&env, &onboarding, &buyer, &seller_addr);
 
     (
         env,
@@ -426,6 +427,13 @@ fn test_indexed_storage_multiple_users() {
     let (env, client, buyer1, seller1, token, _, _, _) = setup_test();
     let buyer2 = Address::generate(&env);
     let seller2 = Address::generate(&env);
+
+    // Onboard the additional parties so escrow creation passes the
+    // attestation boundary.
+    let oboarding_addr = client.get_onboarding_contract();
+    let onboarding = crate::onboarding::OnboardingContractClient::new(&env, &oboarding_addr);
+    crate::test_utils::onboard(&env, &onboarding, &buyer2, "buyer2", crate::onboarding::UserRole::Buyer);
+    crate::test_utils::onboard(&env, &onboarding, &seller2, "seller2", crate::onboarding::UserRole::Artisan);
 
     // Mint tokens to buyer2
     let token_asset = token::StellarAssetClient::new(&env, &token);
