@@ -172,6 +172,76 @@ const OBSERVABILITY_METRICS_VERSION: u32 = 1;
 /// Cap decay intervals applied in one call to bound CPU (≈ 64 periods).
 const MAX_DECAY_INTERVALS_PER_CALL: u64 = 64;
 
+/// Immutable snapshot of user/global state at settlement decision time.
+#[contracttype]
+#[derive(Clone)]
+pub struct SettlementSnapshot {
+    pub revision: u64,
+    pub user: Address,
+    pub role: UserRole,
+    pub metrics: UserMetrics,
+    pub trust_score: u32,
+    pub reputation_policy: ReputationPolicy,
+    pub min_reputation_settlement: i128,
+    pub config: OnboardingConfig,
+    pub timestamp: u64,
+}
+
+#[contractimpl]
+impl OnboardingContract {
+    /// Creates an immutable settlement snapshot for a user and returns its revision.
+    /// Can only be called by the configured escrow contract (or platform_admin fallback).
+    pub fn create_settlement_snapshot(env: Env, user: Address) -> u64 {
+        let config = Self::get_config(env.clone());
+        let caller = env.invoker();
+        let authorized = match config.escrow_contract.clone() {
+            Some(escrow) => caller == escrow,
+            None => caller == config.platform_admin.clone(),
+        };
+        if !authorized {
+            panic!("unauthorized");
+        }
+
+        let mut counter: u64 = env.storage().persistent().get(&DataKey::SettlementSnapshotCounter).unwrap_or(0);
+        counter += 1;
+        let revision = counter;
+
+        let snapshot = SettlementSnapshot {
+            revision,
+            user: user.clone(),
+            role: Self::get_user_role(env.clone(), user.clone()),
+            metrics: Self::get_user_metrics(env.clone(), user.clone()),
+            trust_score: Self::get_trust_score(env.clone(), user.clone()),
+            reputation_policy: Self::get_reputation_policy(env.clone()),
+            min_reputation_settlement: Self::get_min_reputation_settlement(env.clone()),
+            config: Self::get_config(env.clone()),
+            timestamp: env.ledger().timestamp(),
+        };
+
+        env.storage().persistent().set(&DataKey::SettlementSnapshot(revision), &snapshot);
+        env.storage().persistent().set(&DataKey::SettlementSnapshotCounter, &revision);
+        revision
+    }
+
+    /// Returns the immutable settlement snapshot for audit by revision.
+    pub fn get_settlement_snapshot(env: Env, revision: u64) -> SettlementSnapshot {
+        env.storage().persistent().get(&DataKey::SettlementSnapshot(revision)).expect("settlement snapshot not found")
+    }
+/// Shared authorization adapter for privileged entry points.
+///
+/// Every privileged marketplace flow (escrow, dispute, stake, recovery,
+/// governance) MUST call [`AuthorizationAdapter::authorize`] at its own
+/// boundary to reject stale, deactivated, or inconsistent onboarding state.
+/// Implementations MUST read the latest persisted onboarding state and MUST
+/// NOT rely on cached or caller-supplied values.
+pub trait AuthorizationAdapter {
+    /// Rejects the call if `user` is not currently onboarded and active.
+    ///
+    /// Panics with [`Error::Unauthorized`] if the state is missing, deactivated,
+    /// or inconsistent.
+    fn authorize(&self, env: Env, user: Address);
+}
+
 #[cfg(not(target_family = "wasm"))]
 #[path = "decimal_test_token.rs"]
 pub mod decimal_test_token;
@@ -255,8 +325,15 @@ pub enum DataKey {
     ReputationHistoryCount(Address),
     /// Indexed compact reputation history entry (#939)
     ReputationHistoryIndexed(Address, u32),
+    /// Immutable settlement snapshot keyed by revision.
+    SettlementSnapshot(u64),
+    /// Monotonic counter for settlement snapshot revisions.
+    SettlementSnapshotCounter,
     /// Proof-of-Humanity credential record keyed by user address (#940)
     UserPohCredential(Address),
+    /// Proof-of-Humanity credential record keyed by user address, operation identifier,
+    /// profile revision, and ledger context to bind attestations to operations (#940).
+    UserPohCredential(Address, Symbol, u32, u64),
     /// Secondary index mapping proof-of-humanity credential hash to owner address (#940)
     PohCredentialHash(Bytes),
     /// Secondary index mapping correlated identity hash to owner address (#940)
@@ -309,6 +386,14 @@ pub enum DataKey {
     GlobalAdminActionCount,
     /// An operation binding already consumed by an escrow contract.
     UsedAttestation(Address, Bytes),
+    /// Global counter of active users (status == Active)
+    ActiveUserCount,
+    /// Global counter of username changes performed
+    GlobalUsernameChangeCount,
+    /// Alias for UserStateRevision for backward compatibility
+    UserStateVersion(Address),
+    /// Global counter of onboarding operations
+    GlobalOnboardCount,
     /// Total number of users onboarded (global counter).
     GlobalOnboardCount,
     /// Total number of currently active user profiles (global counter).
@@ -1105,6 +1190,10 @@ pub enum Error {
     InvalidRateLimitPolicy = 30,
     /// Review decision does not match the current profile revision (#1086)
     ReviewRevisionMismatch = 31,
+    /// Attempt rate policy contains an unusable limit configuration (#1084)
+    InvalidRateLimitPolicy = 30,
+    /// Review decision does not match the current profile revision (#1086)
+    ReviewRevisionMismatch = 31,
     VolumeOverflow = 33,
     VolumeOverflow = 26,
     /// Escrow count accumulator overflowed (#1028)
@@ -1120,9 +1209,9 @@ pub enum Error {
     /// Requested review transition is not valid from the current state (#1086)
     InvalidReviewTransition = 33,
     /// Caller is not an authorized Sybil reviewer (#1086)
-    UnauthorizedReviewer = 31,
+    UnauthorizedReviewer = 34,
     /// Profile schema version is not supported by this contract (#1056)
-    UnsupportedProfileVersion = 32,
+    UnsupportedProfileVersion = 35,
 }
 
 /// Cross-contract interface the onboarding contract uses to query the escrow
@@ -5421,7 +5510,6 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFee, &fee);
-        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFee);
     }
 
@@ -5465,7 +5553,6 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFeeToken, &token);
-        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFeeToken);
     }
 
@@ -5515,7 +5602,6 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFeeWallet, &wallet);
-        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFeeWallet);
     }
 
