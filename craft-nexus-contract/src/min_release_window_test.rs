@@ -3,7 +3,7 @@
 use crate::{CraftNexusContract, CraftNexusContractClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
-    token, vec, Address, Env,
+    token, Address, Env,
 };
 
 const DEFAULT_MIN_RELEASE_WINDOW: u32 = 24 * 60 * 60; // 1 day
@@ -45,7 +45,6 @@ fn setup_test() -> (
     token_asset.mint(&buyer, &10_000_000);
 
     // Deploy mock onboarding contract
-    let onboarding_contract = Address::generate(&env);
 
     // Initialize the escrow contract
     client.initialize(
@@ -53,7 +52,7 @@ fn setup_test() -> (
         &admin,
         &arbitrator,
         &500, // 5% platform fee
-        &Some(onboarding_contract),
+        &None,
     );
 
     (

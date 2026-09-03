@@ -57,7 +57,6 @@ fn setup() -> TestEnv {
     let token_asset = token::StellarAssetClient::new(&env, &token_addr);
     token_asset.mint(&buyer, &100_000_000);
 
-    let onboarding_contract = Address::generate(&env);
 
     env.ledger().with_mut(|li| {
         li.timestamp = 1711368000;
@@ -68,7 +67,7 @@ fn setup() -> TestEnv {
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
     client.set_min_escrow_amount(&token_addr, &0);
     client.set_min_release_window(&1);
