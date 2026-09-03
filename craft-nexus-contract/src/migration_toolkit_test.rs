@@ -13,14 +13,13 @@ fn setup(env: &Env) -> (CraftNexusContractClient<'static>, Address, Address) {
     let platform_wallet = Address::generate(env);
     let admin = Address::generate(env);
     let arbitrator = Address::generate(env);
-    let onboarding_contract = Address::generate(env);
 
     client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     (client, admin, platform_wallet)
@@ -95,7 +94,6 @@ fn test_backup_platform_config_requires_admin() {
     let platform_wallet = Address::generate(&env);
     let admin = Address::generate(&env);
     let arbitrator = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     env.mock_all_auths();
     client.initialize(
@@ -103,7 +101,7 @@ fn test_backup_platform_config_requires_admin() {
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     // Without mocked auth, a non-admin backup attempt must fail.
