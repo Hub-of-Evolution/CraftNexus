@@ -115,7 +115,6 @@ fn test_release_cei_pattern() {
     let seller = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
@@ -129,7 +128,7 @@ fn test_release_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     // Mint tokens to buyer
@@ -179,7 +178,6 @@ fn test_refund_cei_pattern() {
     let seller = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
@@ -192,7 +190,7 @@ fn test_refund_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &10000);
@@ -232,7 +230,6 @@ fn test_resolve_dispute_cei_pattern() {
     let arbitrator = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
@@ -245,7 +242,7 @@ fn test_resolve_dispute_cei_pattern() {
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
     client.set_evidence_challenge_window(&0);
     client.set_min_release_window(&1);
@@ -289,7 +286,6 @@ fn test_resolve_expired_dispute_cei_pattern() {
     let seller = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
@@ -302,7 +298,7 @@ fn test_resolve_expired_dispute_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &10000);
@@ -349,7 +345,6 @@ fn test_accept_partial_refund_cei_pattern() {
     let seller = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
@@ -362,7 +357,7 @@ fn test_accept_partial_refund_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &10000);
@@ -407,7 +402,6 @@ fn test_cancel_recurring_escrow_cei_pattern() {
     let artisan = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
@@ -420,7 +414,7 @@ fn test_cancel_recurring_escrow_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &20000);
@@ -515,7 +509,6 @@ fn test_auto_release_cei_pattern() {
     let seller = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
@@ -528,7 +521,7 @@ fn test_auto_release_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &10000);
@@ -572,7 +565,6 @@ fn test_state_consistency_during_concurrent_operations() {
     let seller = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
@@ -585,7 +577,7 @@ fn test_state_consistency_during_concurrent_operations() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &30000);
@@ -664,7 +656,6 @@ fn test_active_obligations_updated_before_transfers() {
     let seller = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
@@ -677,7 +668,7 @@ fn test_active_obligations_updated_before_transfers() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &10000);
@@ -755,7 +746,6 @@ fn test_reentry_guard_cleared_after_failing_call() {
     let seller = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
@@ -768,7 +758,7 @@ fn test_reentry_guard_cleared_after_failing_call() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &10000);
@@ -831,7 +821,6 @@ fn test_fund_escrow_cei_pattern() {
     let seller = Address::generate(&env);
     let platform_wallet = Address::generate(&env);
     let token_admin = Address::generate(&env);
-    let onboarding_contract = Address::generate(&env);
 
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
@@ -844,7 +833,7 @@ fn test_fund_escrow_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     // Mint enough tokens for the buyer to fund the escrow

@@ -40,7 +40,6 @@ fn setup_test() -> (
     token_asset.mint(&buyer, &1_000_000_000);
 
     // Deploy mock onboarding contract
-    let onboarding_contract = Address::generate(&env);
 
     // Initialize the escrow contract
     client.initialize(
@@ -48,7 +47,7 @@ fn setup_test() -> (
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     (

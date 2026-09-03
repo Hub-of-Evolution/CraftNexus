@@ -7924,7 +7924,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_distinguishes_locked_staked_categories() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &100_000_000);
 
         // Create an escrow to lock funds
@@ -7967,7 +7967,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_extra_funds_no_discrepancy() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         
         // Mint excess funds to contract
         let excess_amount = 10_000_000i128;
@@ -8005,7 +8005,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_negative_discrepancy_insufficient_balance() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &100_000_000);
 
         // Create escrow
@@ -8043,7 +8043,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_pagination_multiple_pages() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &1_000_000_000);
 
         // Create 60 escrows
@@ -8087,7 +8087,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_page_size_cap_enforced() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &1_000_000_000);
 
         // Create 150 escrows
@@ -8120,7 +8120,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_recurring_escrows_on_first_page() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &100_000_000);
 
         // Create a recurring escrow
@@ -8149,7 +8149,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_read_only_no_storage_writes() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &100_000_000);
 
         // Create escrow
@@ -8189,7 +8189,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_multiple_escrow_statuses_included() {
         let env = Env::default();
-        let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
+        let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
         token_admin_client.mint(&buyer, &100_000_000);
 
         // Create an escrow (Active status by default)
