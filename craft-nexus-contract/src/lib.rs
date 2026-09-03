@@ -172,7 +172,7 @@ pub enum Error {
     /// Onboarding contract address has not been configured
     OnboardingContractNotSet = 39,
     /// The configured onboarding contract rejected the participant state proof
-    OnboardingAuthorizationFailed = 56,
+    OnboardingAuthorizationFailed = 88,
     // â”€â”€ Validation (40+): fix caller input â”€â”€
     /// Provided metadata hash is invalid
     InvalidMetadataHash = 40,

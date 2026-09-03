@@ -372,6 +372,10 @@ pub enum DataKey {
     PohRequiredForAutoVerify,
     /// Optional Proof-of-Humanity verifier address (#940)
     PohVerifier,
+    ActiveUserCount,
+    GlobalOnboardCount,
+    GlobalUsernameChangeCount,
+    GlobalAdminActionCount,
     /// Monotonic canonical onboarding state revision per user.
     UserStateRevision(Address),
     /// User state revision alias.
