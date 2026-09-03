@@ -44,17 +44,18 @@ fn setup_test() -> (
     let token_asset = token::StellarAssetClient::new(&env, &token_addr);
     token_asset.mint(&buyer, &10_000_000);
 
-    // Deploy mock onboarding contract
-    let onboarding_contract = Address::generate(&env);
-
-    // Initialize the escrow contract
+    // Deploy a real onboarding contract so escrow creation passes the
+    // attestation boundary, and onboard the standard buyer/seller.
+    let onboarding =
+        crate::test_utils::deploy_onboarding(&env, &contract_id);
     client.initialize(
         &platform_wallet,
         &admin,
         &arbitrator,
         &500, // 5% platform fee
-        &Some(onboarding_contract),
+        &Some(onboarding.address.clone()),
     );
+    crate::test_utils::onboard_buyer_and_seller(&env, &onboarding, &buyer, &seller);
 
     (
         env,

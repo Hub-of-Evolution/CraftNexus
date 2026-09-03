@@ -59,6 +59,19 @@ fn setup_test(
     client.set_min_release_window(&1);
     client.set_evidence_challenge_window(&0);
 
+    // Onboard the standard buyer (Buyer) and seller (Artisan) so escrow
+    // operations pass the onboarding attestation boundary.
+    onboarding_client.onboard_user(
+        &buyer,
+        &String::from_str(env, "buyer_user"),
+        &crate::onboarding::UserRole::Buyer,
+    );
+    onboarding_client.onboard_user(
+        &seller,
+        &String::from_str(env, "seller_user"),
+        &crate::onboarding::UserRole::Artisan,
+    );
+
     (
         client,
         buyer,
