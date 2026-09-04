@@ -1,0 +1,10 @@
+{
+  "struct": "FeeTokenConfigsMigratedEvent",
+  "schema_version": 1,
+  "fields": [
+    {"name": "schema_version", "type": "u32"},
+    {"name": "scanned_tokens", "type": "u32"},
+    {"name": "migrated_configs", "type": "u32"},
+    {"name": "skipped_existing", "type": "u32"}
+  ]
+}

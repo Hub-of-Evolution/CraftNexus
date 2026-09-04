@@ -1,0 +1,10 @@
+{
+  "struct": "SybilPatternDetectedEvent",
+  "schema_version": 1,
+  "fields": [
+    {"name": "schema_version", "type": "u32"},
+    {"name": "user", "type": "Address"},
+    {"name": "reason", "type": "Symbol"},
+    {"name": "timestamp", "type": "u64"}
+  ]
+}

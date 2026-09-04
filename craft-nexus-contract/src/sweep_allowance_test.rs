@@ -42,13 +42,7 @@ fn setup_sweep_env() -> (
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_admin_client = token::StellarAssetClient::new(&env, &token_contract.address());
 
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &500,
-        &None,
-    );
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None);
     client.set_min_escrow_amount(&token_contract.address(), &0);
     client.set_min_release_window(&1);
 
@@ -178,8 +172,7 @@ fn sweep_rejects_accounting_invariant_breach_even_with_report() {
     let result = client.try_sweep_unallocated_funds(&token, &wallet);
     assert!(matches!(
         result,
-        Err(Ok(Error::EmergencyAccountingInvariant))
-            | Err(Ok(Error::ReconciliationRequired))
+        Err(Ok(Error::EmergencyAccountingInvariant)) | Err(Ok(Error::ReconciliationRequired))
     ));
 }
 
@@ -206,8 +199,5 @@ fn sweep_via_admin_action_enforces_the_same_reconciliation_precondition() {
     assert!(report.complete && !report.unresolved);
     client.execute_admin_action(&action.id);
 
-    assert_eq!(
-        token::Client::new(&_env, &token).balance(&wallet),
-        25_000
-    );
+    assert_eq!(token::Client::new(&_env, &token).balance(&wallet), 25_000);
 }

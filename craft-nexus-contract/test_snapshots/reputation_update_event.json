@@ -1,6 +1,8 @@
 {
   "struct": "ReputationUpdateEvent",
+  "schema_version": 1,
   "fields": [
+    {"name": "schema_version", "type": "u32"},
     {"name": "address", "type": "Address"},
     {"name": "successful_delta", "type": "u32"},
     {"name": "disputed_delta", "type": "u32"},

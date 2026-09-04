@@ -160,13 +160,17 @@ fn stake_cooldown_exact_boundary() {
 
     // Stake tokens at t=1000
     set_timestamp(&te, 1000);
-    te.client.stake_tokens(&te.buyer, &te.token_addr, &1_000_000);
+    te.client
+        .stake_tokens(&te.buyer, &te.token_addr, &1_000_000);
 
     let stake_time = get_timestamp(&te);
 
     // t = stake_time + ONE_DAY - 1 → cooldown still ACTIVE → unstake should fail
     set_timestamp(&te, stake_time + ONE_DAY as u64 - 1);
-    assert!(te.client.try_unstake_tokens(&te.buyer, &te.token_addr).is_err());
+    assert!(te
+        .client
+        .try_unstake_tokens(&te.buyer, &te.token_addr)
+        .is_err());
 
     // t = stake_time + ONE_DAY → cooldown ELAPSED → unstake should succeed
     set_timestamp(&te, stake_time + ONE_DAY as u64);
@@ -212,19 +216,15 @@ fn evidence_challenge_window_exact_boundary() {
 
     // t = dispute_time + ONE_DAY - 1 → challenge window ACTIVE → resolve_dispute should fail
     set_timestamp(&te, dispute_time + ONE_DAY as u64 - 1);
-    assert!(te.client.try_resolve_dispute(
-        &order_id,
-        &crate::Resolution::ReleaseToSeller,
-        &te.admin,
-    ).is_err());
+    assert!(te
+        .client
+        .try_resolve_dispute(&order_id, &crate::Resolution::ReleaseToSeller, &te.admin,)
+        .is_err());
 
     // t = dispute_time + ONE_DAY → challenge window CLOSED → resolve_dispute should proceed
     set_timestamp(&te, dispute_time + ONE_DAY as u64);
-    te.client.resolve_dispute(
-        &order_id,
-        &crate::Resolution::ReleaseToSeller,
-        &te.admin,
-    );
+    te.client
+        .resolve_dispute(&order_id, &crate::Resolution::ReleaseToSeller, &te.admin);
 }
 
 // ── Dispute escalation window boundary ────────────────────────────────────────
@@ -243,7 +243,10 @@ fn escalation_window_exact_boundary() {
 
     // t = dispute_time + THREE_DAYS - 1 → escalation window ACTIVE → escalate should fail
     set_timestamp(&te, dispute_time + THREE_DAYS as u64 - 1);
-    assert!(te.client.try_escalate_dispute(&order_id, &te.buyer).is_err());
+    assert!(te
+        .client
+        .try_escalate_dispute(&order_id, &te.buyer)
+        .is_err());
 
     // t = dispute_time + THREE_DAYS → escalation window CLOSED → escalate should succeed
     set_timestamp(&te, dispute_time + THREE_DAYS as u64);
@@ -299,7 +302,10 @@ fn wasm_upgrade_cooldown_exact_boundary() {
 
     // t = cancel_time + cooldown - 1 → cooldown ACTIVE → repropose should fail
     set_timestamp(&te, cancel_time + cooldown - 1);
-    assert!(te.client.try_propose_upgrade_wasm(&te.admin, &wasm_hash).is_err());
+    assert!(te
+        .client
+        .try_propose_upgrade_wasm(&te.admin, &wasm_hash)
+        .is_err());
 
     // t = cancel_time + cooldown → cooldown ELAPSED → repropose should succeed
     set_timestamp(&te, cancel_time + cooldown);
@@ -377,8 +383,11 @@ fn full_lifecycle_deadline_progression() {
     for &offset in offsets {
         set_timestamp(&te, created_at + offset);
         if offset < ONE_DAY as u64 {
-            assert!(te.client.try_auto_release(&order_id).is_err(),
-                "auto_release should fail at offset={}", offset);
+            assert!(
+                te.client.try_auto_release(&order_id).is_err(),
+                "auto_release should fail at offset={}",
+                offset
+            );
         } else {
             te.client.auto_release(&order_id);
             break;
