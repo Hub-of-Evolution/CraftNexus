@@ -9,7 +9,7 @@ import { useState, useCallback } from "react";
 import {
   EscrowService,
   CreateEscrowParams,
-  getPlatformFeePercentage,
+  calculateDeterministicFee,
   getEscrowContractAddress,
 } from "@/lib/stellar/escrow";
 import { useEscrowWallet, TransactionStatusDisplay, TransactionStatus } from "@/components/features/wallet/EscrowWalletIntegration";
@@ -55,11 +55,12 @@ export function EscrowCreationForm({
   const [error, setError] = useState<string | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
 
-  // Calculate platform fee
-  const platformFeePercentage = getPlatformFeePercentage();
+  // Calculate platform fee using deterministic integer arithmetic (matches on-chain contract)
   const amountNum = parseFloat(formData.amount) || 0;
-  const platformFee = (amountNum * platformFeePercentage) / 100;
-  const sellerReceives = amountNum - platformFee;
+  const platformFeeResult = calculateDeterministicFee(amountNum);
+  const platformFee = platformFeeResult.platformFee;
+  const sellerReceives = platformFeeResult.sellerReceives;
+  const platformFeePercentage = 2.5;
 
   // Handle form input changes
   const handleChange = useCallback(

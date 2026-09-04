@@ -23,6 +23,7 @@ import {
 } from "./config";
 import { getCurrentAddress } from "./wallet";
 import { Horizon } from "@stellar/stellar-sdk";
+import { getFundMovementHistory, recordFundMovement } from "./audit";
 
 // ============================================================================
 // Types and Interfaces
@@ -85,7 +86,9 @@ export interface IEscrowService {
   refund(orderId: number, authorizedAddress: string): Promise<TransactionResult>;
   getEscrow(orderId: number): Promise<Escrow | null>;
   canAutoRelease(orderId: number): Promise<boolean>;
+  isPaused(): Promise<boolean>;
   getEscrowContractAddress(): string;
+  getFundMovementHistory(account: string): ReturnType<typeof getFundMovementHistory>;
 }
 
 // ============================================================================
@@ -109,6 +112,26 @@ export function getEscrowContractAddress(): string {
 export function getPlatformFeePercentage(): number {
   const fee = process.env.NEXT_PUBLIC_PLATFORM_FEE_PERCENTAGE;
   return fee ? parseFloat(fee) : 5; // Default 5%
+}
+
+const USDC_DECIMALS = 7;
+const USDC_FACTOR = 10 ** USDC_DECIMALS;
+
+/**
+ * Calculate platform fee deterministically using the same integer arithmetic
+ * as the on-chain Soroban contract. Eliminates floating-point rounding
+ * discrepancies between off-chain previews and on-chain outcomes.
+ */
+export function calculateDeterministicFee(amount: number): { platformFee: number; sellerReceives: number } {
+  const feePercent = getPlatformFeePercentage();
+  const feeBps = feePercent * 100;
+  const amountInt = Math.floor(amount * USDC_FACTOR);
+  const platformFeeInt = Math.floor((amountInt * feeBps) / 10_000);
+  const sellerReceivesInt = amountInt - platformFeeInt;
+  return {
+    platformFee: platformFeeInt / USDC_FACTOR,
+    sellerReceives: sellerReceivesInt / USDC_FACTOR,
+  };
 }
 
 /**
@@ -347,11 +370,10 @@ export class EscrowService implements IEscrowService {
   async releaseFunds(orderId: number): Promise<TransactionResult> {
     if (this.mockMode) {
       console.log("[MOCK] Releasing funds for order:", orderId);
-      return {
-        success: true,
-        transactionHash: `mock_tx_${Date.now()}`,
-        mockMode: true,
-      };
+      const transactionHash = `mock_tx_${Date.now()}`;
+      const caller = await getCurrentAddress();
+      if (caller) recordFundMovement({ kind: "release", actor: caller, account: caller, asset: "USDC", amount: "0", reason: `Release order ${orderId}`, transactionHash });
+      return { success: true, transactionHash, mockMode: true };
     }
 
     this.validateConfiguration();
@@ -400,11 +422,10 @@ export class EscrowService implements IEscrowService {
   async autoRelease(orderId: number): Promise<TransactionResult> {
     if (this.mockMode) {
       console.log("[MOCK] Auto-releasing funds for order:", orderId);
-      return {
-        success: true,
-        transactionHash: `mock_tx_${Date.now()}`,
-        mockMode: true,
-      };
+      const transactionHash = `mock_tx_${Date.now()}`;
+      const caller = await getCurrentAddress();
+      if (caller) recordFundMovement({ kind: "release", actor: caller, account: caller, asset: "USDC", amount: "0", reason: `Release order ${orderId}`, transactionHash });
+      return { success: true, transactionHash, mockMode: true };
     }
 
     this.validateConfiguration();
@@ -452,11 +473,10 @@ export class EscrowService implements IEscrowService {
   async refund(orderId: number, authorizedAddress: string): Promise<TransactionResult> {
     if (this.mockMode) {
       console.log("[MOCK] Refunding order:", orderId);
-      return {
-        success: true,
-        transactionHash: `mock_tx_${Date.now()}`,
-        mockMode: true,
-      };
+      const transactionHash = `mock_tx_${Date.now()}`;
+      const caller = await getCurrentAddress();
+      if (caller) recordFundMovement({ kind: "refund", actor: caller, account: caller, asset: "USDC", amount: "0", reason: `Refund order ${orderId}`, transactionHash });
+      return { success: true, transactionHash, mockMode: true };
     }
 
     this.validateConfiguration();
@@ -569,6 +589,31 @@ export class EscrowService implements IEscrowService {
   }
 
   /**
+   * Query the public pause state used by the escrow write guards.
+   */
+  async isPaused(): Promise<boolean> {
+    if (this.mockMode || !this.contract) {
+      return false;
+    }
+
+    try {
+      const contractCall = this.contract.call("is_paused");
+
+      // The public query has no arguments and requires no wallet auth.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const simulation = await this.rpc.simulateTransaction(contractCall as any);
+      if ("error" in simulation || !simulation.result?.retval) {
+        return false;
+      }
+
+      return Boolean(scValToNative(simulation.result.retval));
+    } catch (error) {
+      console.error("Failed to query escrow pause state:", error);
+      return false;
+    }
+  }
+
+  /**
    * Check if escrow can be auto-released (release window has passed)
    */
   async canAutoRelease(orderId: number): Promise<boolean> {
@@ -613,6 +658,10 @@ export class EscrowService implements IEscrowService {
    */
   getEscrowContractAddress(): string {
     return getEscrowContractAddress();
+  }
+
+  getFundMovementHistory(account: string) {
+    return getFundMovementHistory(account);
   }
 }
 

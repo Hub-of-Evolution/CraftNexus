@@ -2,7 +2,7 @@ use super::decimal_test_token::{DecimalTestToken, DecimalTestTokenClient};
 use super::*;
 use crate::alloc::string::ToString;
 use soroban_sdk::{
-    testutils::{storage::Persistent as _, Address as _},
+    testutils::{storage::Persistent as _, Address as _, Ledger},
     token, Address, Bytes, Env, String, Symbol,
 };
 
@@ -35,6 +35,17 @@ fn setup_test(env: &Env) -> (OnboardingContractClient<'static>, Address) {
     (client, admin)
 }
 
+/// Disable cooldown/farming caps so Issue #100 counter-math tests stay focused.
+fn set_permissive_reputation_policy(client: &OnboardingContractClient) {
+    client.set_reputation_policy(
+        &DEFAULT_REPUTATION_DECAY_INTERVAL_SECS,
+        &DEFAULT_REPUTATION_DECAY_BPS,
+        &0u64,     // no update cooldown
+        &0u64,     // disable farming window
+        &u32::MAX, // unlimited successes when window re-enabled
+    );
+}
+
 // ===== Initialization =====
 
 #[test]
@@ -65,6 +76,48 @@ fn test_initialize_reserves_admin_username() {
     assert!(client.is_username_taken(&String::from_str(&env, "admin")));
     assert!(client.is_username_taken(&String::from_str(&env, "ADMIN")));
     assert!(client.is_username_taken(&String::from_str(&env, "Admin")));
+}
+
+#[test]
+fn test_onboarding_attestation_rejects_forgery_and_replay() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let escrow_contract = Address::generate(&env);
+    client.set_escrow_contract(&escrow_contract);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "attested"), &UserRole::Buyer);
+    let operation_id = Bytes::from_slice(&env, b"operation-1");
+
+    let attestation = client.get_onboarding_attestation(&user, &operation_id, &escrow_contract);
+    assert!(client.validate_onboarding_attestation(&attestation));
+    assert!(client
+        .try_validate_onboarding_attestation(&attestation)
+        .is_err());
+
+    let mut forged = attestation.clone();
+    forged.role = UserRole::Artisan;
+    assert!(client.try_validate_onboarding_attestation(&forged).is_err());
+}
+
+#[test]
+fn test_onboarding_attestation_becomes_stale_after_role_change() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let escrow_contract = Address::generate(&env);
+    client.set_escrow_contract(&escrow_contract);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "revision"), &UserRole::Buyer);
+    let operation_id = Bytes::from_slice(&env, b"operation-2");
+    let attestation = client.get_onboarding_attestation(&user, &operation_id, &escrow_contract);
+
+    client.update_user_role(&user, &UserRole::Artisan);
+    assert!(client
+        .try_validate_onboarding_attestation(&attestation)
+        .is_err());
 }
 
 // ===== Onboarding =====
@@ -164,6 +217,94 @@ fn test_onboard_duplicate_user() {
     client.onboard_user(&user, &username1, &UserRole::Buyer);
     let result = client.try_onboard_user(&user, &username2, &UserRole::Artisan);
     assert!(result.is_err());
+}
+
+#[test]
+fn test_repeated_identical_onboarding_is_idempotent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "retry_user");
+
+    let before = client.get_active_user_count();
+    let first = client.onboard_user(&user, &username, &UserRole::Artisan);
+    let after_first = client.get_active_user_count();
+    let retried = client.onboard_user(&user, &username, &UserRole::Artisan);
+
+    assert_eq!(retried, first);
+    assert_eq!(after_first, before + 1);
+    assert_eq!(client.get_active_user_count(), after_first);
+    assert_eq!(client.get_user_by_username(&username).address, user);
+}
+
+#[test]
+fn test_idempotent_retry_repairs_missing_secondary_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "repair_user");
+    let original = client.onboard_user(&user, &username, &UserRole::Buyer);
+    let active_count = client.get_active_user_count();
+    let normalized = normalize_username(&env, &username);
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Username(normalized.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::UserStateRevision(user.clone()));
+    });
+
+    let recovered = client.onboard_user(&user, &username, &UserRole::Buyer);
+    assert_eq!(recovered.address, original.address);
+    assert_eq!(recovered.registered_at, original.registered_at);
+    assert_eq!(recovered.state_version, 1);
+    assert_eq!(client.get_active_user_count(), active_count);
+    assert_eq!(client.get_user_by_username(&username).address, user);
+}
+
+#[test]
+fn test_explicit_recovery_restores_profile_indexes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "explicit_repair");
+    client.onboard_user(&user, &username, &UserRole::Artisan);
+    let normalized = normalize_username(&env, &username);
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Username(normalized.clone()));
+    });
+
+    let recovered = client.recover_onboarding_profile(&user, &username);
+    assert_eq!(recovered.address, user);
+    assert_eq!(client.get_user_by_username(&username).address, user);
+}
+
+#[test]
+fn test_same_account_username_reservation_is_retryable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let username = String::from_str(&env, "reserved_retry");
+    let normalized = normalize_username(&env, &username);
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Username(normalized), &user);
+    });
+
+    let profile = client.onboard_user(&user, &username, &UserRole::Buyer);
+    assert_eq!(profile.address, user);
+    assert_eq!(client.get_user_by_username(&username).address, user);
 }
 
 #[test]
@@ -843,7 +984,7 @@ fn test_process_verification_request_unauthorized() {
             .set(&DataKey::UserProfile(user.clone()), &profile);
     });
 
-       // No platform-admin signature is present, so require_auth() must panic and
+    // No platform-admin signature is present, so require_auth() must panic and
     // the verification state transition must never execute.
     client.process_verification_request(&user, &true);
 }
@@ -963,6 +1104,7 @@ fn test_update_reputation_increments_counters() {
     env.mock_all_auths();
 
     let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
     let user = Address::generate(&env);
     client.onboard_user(&user, &String::from_str(&env, "rep1"), &UserRole::Artisan);
 
@@ -1006,6 +1148,612 @@ fn test_update_reputation_unknown_address_is_no_op() {
     let (successful, disputed) = client.get_user_reputation(&unknown);
     assert_eq!(successful, 0);
     assert_eq!(disputed, 0);
+}
+
+/// Issue #100 / #666 — update_reputation with zero trades is a no-op.
+#[test]
+fn test_reputation_zero_trades_no_op() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "repzero"),
+        &UserRole::Artisan,
+    );
+
+    client.update_reputation(&user, &0u32, &0u32);
+    let (successful, disputed) = client.get_user_reputation(&user);
+    assert_eq!(successful, 0);
+    assert_eq!(disputed, 0);
+}
+
+/// Issue #100 / #666 — update_reputation with u32::MAX handles overflow with saturating add.
+#[test]
+fn test_reputation_max_trades_no_overflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "repmax"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &u32::MAX, &u32::MAX);
+    let (successful, disputed) = client.get_user_reputation(&user);
+    assert_eq!(successful, u32::MAX);
+    assert_eq!(disputed, u32::MAX);
+
+    // Adding more does not overflow or panic, saturates at u32::MAX
+    client.update_reputation(&user, &10u32, &10u32);
+    let (successful2, disputed2) = client.get_user_reputation(&user);
+    assert_eq!(successful2, u32::MAX);
+    assert_eq!(disputed2, u32::MAX);
+}
+
+// ============================================================
+// Issue #939 – Reputation Decay & Anti-Farming Controls
+// ============================================================
+
+/// Default policy is seeded on initialize.
+#[test]
+fn test_reputation_policy_defaults_on_initialize() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let policy = client.get_reputation_policy();
+
+    assert_eq!(
+        policy.decay_interval_secs,
+        DEFAULT_REPUTATION_DECAY_INTERVAL_SECS
+    );
+    assert_eq!(policy.decay_bps, DEFAULT_REPUTATION_DECAY_BPS);
+    assert_eq!(
+        policy.update_cooldown_secs,
+        DEFAULT_REPUTATION_UPDATE_COOLDOWN_SECS
+    );
+    assert_eq!(
+        policy.farming_window_secs,
+        DEFAULT_REPUTATION_FARMING_WINDOW_SECS
+    );
+    assert_eq!(
+        policy.max_successful_per_window,
+        DEFAULT_MAX_SUCCESSFUL_PER_WINDOW
+    );
+    assert_eq!(
+        client.get_min_reputation_settlement(),
+        DEFAULT_MIN_REPUTATION_SETTLEMENT
+    );
+}
+
+/// Low-value completions are audited without changing score or consuming limits.
+#[test]
+fn test_reputation_requires_meaningful_completed_settlement() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 2_000);
+
+    let (client, _) = setup_test(&env);
+    client.set_reputation_policy(&1_000_000u64, &0u32, &3_600u64, &86_400u64, &2u32);
+    client.set_min_reputation_settlement(&10_000_000i128);
+
+    let token = register_decimal_test_token(&env, 7);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "settle1"),
+        &UserRole::Artisan,
+    );
+
+    // Repeated dust settlements never gain trust or consume the account cap.
+    for _ in 0..3 {
+        client.update_reputation_for_settlement(&user, &1u32, &0u32, &9_999_999i128, &token);
+    }
+    assert_eq!(client.get_trust_score(&user), 0);
+    assert_eq!(client.get_user_reputation(&user), (0, 0));
+    assert_eq!(
+        client.get_reputation_state(&user).window_successful_applied,
+        0
+    );
+
+    // A meaningful completion at the same timestamp still receives its score.
+    client.update_reputation_for_settlement(&user, &1u32, &0u32, &10_000_000i128, &token);
+    assert_eq!(client.get_trust_score(&user), 1);
+    assert_eq!(client.get_user_reputation(&user), (1, 0));
+
+    // A second qualifying completion is still subject to the normal cooldown.
+    client.update_reputation_for_settlement(&user, &1u32, &0u32, &10_000_000i128, &token);
+    assert_eq!(client.get_trust_score(&user), 1);
+    assert_eq!(client.get_user_reputation(&user), (1, 0));
+
+    let history = client.get_reputation_history(&user);
+    assert_eq!(history.len(), 5);
+    for index in 0..3 {
+        let entry = history.get(index).unwrap();
+        assert_eq!(entry.reason, Symbol::new(&env, "below_minimum_settlement"));
+        assert_eq!(entry.successful_requested, 1);
+        assert_eq!(entry.successful_applied, 0);
+        assert_eq!(entry.trust_score_after, 0);
+    }
+    assert_eq!(history.get(3).unwrap().reason, Symbol::new(&env, "applied"));
+    assert_eq!(
+        history.get(4).unwrap().reason,
+        Symbol::new(&env, "cooldown_blocked")
+    );
+}
+
+/// Settlement thresholds compare normalized values across token decimals.
+#[test]
+fn test_reputation_minimum_settlement_normalizes_token_decimals() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+    client.set_min_reputation_settlement(&10_000_000i128);
+
+    let six_decimal_token = register_decimal_test_token(&env, 6);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "settle2"),
+        &UserRole::Artisan,
+    );
+
+    // One whole 6-decimal token normalizes to one whole 7-decimal token.
+    client.update_reputation_for_settlement(
+        &user,
+        &1u32,
+        &0u32,
+        &1_000_000i128,
+        &six_decimal_token,
+    );
+    assert_eq!(client.get_trust_score(&user), 1);
+}
+
+/// Adverse outcomes cannot be hidden behind the minimum-settlement gate.
+#[test]
+fn test_reputation_low_value_settlement_still_applies_dispute() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+    let token = register_decimal_test_token(&env, 7);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "settle3"),
+        &UserRole::Artisan,
+    );
+
+    client.update_reputation(&user, &2u32, &0u32);
+    client.update_reputation_for_settlement(&user, &1u32, &1u32, &1i128, &token);
+
+    assert_eq!(client.get_trust_score(&user), 1);
+    assert_eq!(client.get_user_reputation(&user), (2, 1));
+    let history = client.get_reputation_history(&user);
+    let last = history.get(history.len() - 1).unwrap();
+    assert_eq!(last.successful_applied, 0);
+    assert_eq!(last.disputed_applied, 1);
+    assert_eq!(last.reason, Symbol::new(&env, "below_minimum_settlement"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_minimum_reputation_settlement_rejects_negative_value() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    client.set_min_reputation_settlement(&-1i128);
+}
+
+/// Successful reputation gains are blocked by the update cooldown.
+#[test]
+fn test_reputation_cooldown_blocks_rapid_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1_000;
+    });
+
+    let (client, _) = setup_test(&env);
+    // Keep farming permissive; exercise cooldown only.
+    client.set_reputation_policy(
+        &DEFAULT_REPUTATION_DECAY_INTERVAL_SECS,
+        &DEFAULT_REPUTATION_DECAY_BPS,
+        &3_600u64, // 1 hour cooldown
+        &0u64,
+        &u32::MAX,
+    );
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "cool1"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &1u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 1);
+    assert_eq!(client.get_user_reputation(&user), (1, 0));
+
+    // Immediate second success must be blocked.
+    client.update_reputation(&user, &1u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 1);
+    assert_eq!(client.get_user_reputation(&user), (1, 0));
+
+    let history = client.get_reputation_history(&user);
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        history.get(1).unwrap().reason,
+        Symbol::new(&env, "cooldown_blocked")
+    );
+    assert_eq!(history.get(1).unwrap().successful_applied, 0);
+
+    // After cooldown elapses, success is credited again.
+    env.ledger().with_mut(|li| {
+        li.timestamp = 1_000 + 3_600 + 1;
+    });
+    client.update_reputation(&user, &1u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 2);
+    assert_eq!(client.get_user_reputation(&user), (2, 0));
+}
+
+/// Disputed increments still apply while success is cooldown-blocked.
+#[test]
+fn test_reputation_cooldown_allows_disputed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 5_000;
+    });
+
+    let (client, _) = setup_test(&env);
+    client.set_reputation_policy(
+        &DEFAULT_REPUTATION_DECAY_INTERVAL_SECS,
+        &0u32, // no decay noise
+        &3_600u64,
+        &0u64,
+        &u32::MAX,
+    );
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "cool2"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &3u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 3);
+
+    // Success blocked, dispute applied → trust drops.
+    client.update_reputation(&user, &2u32, &1u32);
+    assert_eq!(client.get_trust_score(&user), 2);
+    assert_eq!(client.get_user_reputation(&user), (3, 1));
+
+    let history = client.get_reputation_history(&user);
+    let last = history.get(history.len() - 1).unwrap();
+    assert_eq!(last.reason, Symbol::new(&env, "cooldown_blocked"));
+    assert_eq!(last.successful_applied, 0);
+    assert_eq!(last.disputed_applied, 1);
+}
+
+/// Anti-farming window caps rapid successful inflation.
+#[test]
+fn test_reputation_farming_window_caps_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 10_000;
+    });
+
+    let (client, _) = setup_test(&env);
+    client.set_reputation_policy(
+        &DEFAULT_REPUTATION_DECAY_INTERVAL_SECS,
+        &0u32,
+        &0u64, // no cooldown so farming alone is tested
+        &86_400u64,
+        &5u32,
+    );
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "farm1"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &3u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 3);
+
+    client.update_reputation(&user, &3u32, &0u32);
+    // Only 2 more fit under the cap of 5.
+    assert_eq!(client.get_trust_score(&user), 5);
+    assert_eq!(client.get_user_reputation(&user), (5, 0));
+
+    let history = client.get_reputation_history(&user);
+    let last = history.get(history.len() - 1).unwrap();
+    assert_eq!(last.reason, Symbol::new(&env, "farming_capped"));
+    assert_eq!(last.successful_requested, 3);
+    assert_eq!(last.successful_applied, 2);
+
+    // Further success in the same window is fully blocked.
+    client.update_reputation(&user, &1u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 5);
+
+    // After the window rolls, credits resume.
+    env.ledger().with_mut(|li| {
+        li.timestamp = 10_000 + 86_400 + 1;
+    });
+    client.update_reputation(&user, &2u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 7);
+}
+
+/// Trust score decays over time according to policy.
+#[test]
+fn test_reputation_decay_over_time() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 100;
+    });
+
+    let (client, _) = setup_test(&env);
+    // 10% decay every 1_000 seconds; no cooldown/farming interference.
+    client.set_reputation_policy(&1_000u64, &1_000u32, &0u64, &0u64, &u32::MAX);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "decay1"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &100u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 100);
+    // Lifetime counters are an audit trail and do not decay.
+    assert_eq!(client.get_user_reputation(&user), (100, 0));
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 100 + 1_000;
+    });
+    // One interval: 100 * 0.9 = 90
+    assert_eq!(client.get_trust_score(&user), 90);
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = 100 + 2_000;
+    });
+    // Second interval: 90 * 0.9 = 81
+    assert_eq!(client.get_trust_score(&user), 81);
+    assert_eq!(client.get_user_reputation(&user), (100, 0));
+}
+
+/// Score history records applied and blocked updates for pattern detection.
+#[test]
+fn test_reputation_history_detects_farming_pattern() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| {
+        li.timestamp = 50_000;
+    });
+
+    let (client, _) = setup_test(&env);
+    client.set_reputation_policy(&1_000_000u64, &0u32, &0u64, &86_400u64, &2u32);
+
+    let user = Address::generate(&env);
+    client.onboard_user(&user, &String::from_str(&env, "hist1"), &UserRole::Artisan);
+
+    client.update_reputation(&user, &2u32, &0u32);
+    client.update_reputation(&user, &1u32, &0u32); // capped to 0 remaining
+    client.update_reputation(&user, &1u32, &0u32); // still capped
+
+    let history = client.get_reputation_history(&user);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history.get(0).unwrap().reason, Symbol::new(&env, "applied"));
+    assert_eq!(history.get(0).unwrap().successful_applied, 2);
+    assert_eq!(
+        history.get(1).unwrap().reason,
+        Symbol::new(&env, "farming_capped")
+    );
+    assert_eq!(history.get(1).unwrap().successful_applied, 0);
+    assert_eq!(
+        history.get(2).unwrap().reason,
+        Symbol::new(&env, "farming_capped")
+    );
+
+    // Repeated zero-applied successes in history = detectable farming pattern.
+    let blocked: u32 = history
+        .iter()
+        .filter(|e| e.successful_requested > 0 && e.successful_applied == 0)
+        .count() as u32;
+    assert_eq!(blocked, 2);
+}
+
+/// Invalid decay_bps is rejected.
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_set_reputation_policy_rejects_invalid_decay_bps() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    client.set_reputation_policy(&1_000u64, &10_001u32, &0u64, &0u64, &5u32);
+}
+
+// ============================================================
+// Issue #1082 – Deterministic Reputation Decay Policy
+// ============================================================
+
+/// Advance the ledger clock for deterministic decay assertions.
+fn set_ledger_time(env: &Env, ts: u64) {
+    env.ledger().with_mut(|li| {
+        li.timestamp = ts;
+    });
+}
+
+/// Decay applies exactly one bucket per `decay_interval_secs` of elapsed time,
+/// with floor integer arithmetic and no decay inside a partial bucket (#1082).
+#[test]
+fn test_decay_at_bucket_boundaries_is_deterministic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+
+    let user = Address::generate(&env);
+    let interval = DEFAULT_REPUTATION_DECAY_INTERVAL_SECS; // 30 days
+                                                           // retain_bps = 10_000 - 500 = 9500
+
+    // Seed at t0 with trust_score = 100.
+    set_ledger_time(&env, 1_000_000);
+    client.onboard_user(&user, &String::from_str(&env, "decayb"), &UserRole::Artisan);
+    client.update_reputation(&user, &100u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 100);
+
+    // t0 + 1 bucket: 100 * 9500 / 10000 = 95
+    set_ledger_time(&env, 1_000_000 + interval);
+    assert_eq!(client.get_trust_score(&user), 95);
+
+    // t0 + 2 buckets: 95 * 9500 / 10000 = 90 (floor of 90.25)
+    set_ledger_time(&env, 1_000_000 + 2 * interval);
+    assert_eq!(client.get_trust_score(&user), 90);
+
+    // t0 + 3 buckets: 90 * 9500 / 10000 = 85 (floor of 85.5)
+    set_ledger_time(&env, 1_000_000 + 3 * interval);
+    assert_eq!(client.get_trust_score(&user), 85);
+
+    // Inside the next bucket (one second before the boundary) → no further decay.
+    set_ledger_time(&env, 1_000_000 + 4 * interval - 1);
+    assert_eq!(client.get_trust_score(&user), 85);
+
+    // Exactly at the boundary → one more decay: 85 * 9500 / 10000 = 80 (80.75)
+    set_ledger_time(&env, 1_000_000 + 4 * interval);
+    assert_eq!(client.get_trust_score(&user), 80);
+}
+
+/// Repeated reads at the same ledger time always return the same score, and
+/// replaying the same history reproduces the same score (#1082 determinism).
+#[test]
+fn test_decay_is_deterministic_and_reproducible() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+
+    let user = Address::generate(&env);
+    let interval = DEFAULT_REPUTATION_DECAY_INTERVAL_SECS;
+
+    set_ledger_time(&env, 5_000_000);
+    client.onboard_user(&user, &String::from_str(&env, "decayr"), &UserRole::Artisan);
+    client.update_reputation(&user, &200u32, &0u32);
+
+    // Jump forward 7 buckets.
+    set_ledger_time(&env, 5_000_000 + 7 * interval);
+
+    let a = client.get_trust_score(&user);
+    let b = client.get_trust_score(&user); // same ledger time, second read
+    let c = client.get_trust_score(&user); // third read
+    assert_eq!(a, b);
+    assert_eq!(b, c);
+    assert!(a < 200, "decay must reduce the score");
+    assert!(a > 0, "decay must not underflow to nothing here");
+
+    // Replay the identical history on a fresh user → identical final score.
+    let user2 = Address::generate(&env);
+    set_ledger_time(&env, 5_000_000);
+    client.onboard_user(
+        &user2,
+        &String::from_str(&env, "decayr2"),
+        &UserRole::Artisan,
+    );
+    client.update_reputation(&user2, &200u32, &0u32);
+    set_ledger_time(&env, 5_000_000 + 7 * interval);
+    assert_eq!(client.get_trust_score(&user2), a);
+}
+
+/// Decay can never underflow below zero nor create score from nothing (#1082).
+#[test]
+fn test_decay_never_underflows_or_inflates() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+
+    let user = Address::generate(&env);
+    let interval = DEFAULT_REPUTATION_DECAY_INTERVAL_SECS;
+
+    set_ledger_time(&env, 3_000_000);
+    client.onboard_user(&user, &String::from_str(&env, "decayu"), &UserRole::Artisan);
+    client.update_reputation(&user, &1u32, &0u32); // smallest possible score
+
+    // One bucket: 1 * 9500 / 10000 = 0 → score collapses, never negative.
+    set_ledger_time(&env, 3_000_000 + interval);
+    assert_eq!(client.get_trust_score(&user), 0);
+
+    // Even after enormous idle time it stays at 0 (no underflow, no inflation).
+    set_ledger_time(&env, 3_000_000 + 1000 * interval);
+    assert_eq!(client.get_trust_score(&user), 0);
+
+    // Disputes can only reduce further or hold at 0; they never mint trust.
+    client.update_reputation(&user, &0u32, &5u32);
+    assert_eq!(client.get_trust_score(&user), 0);
+}
+
+/// The scheduled application (`apply_reputation_decay_now`) produces the same
+/// decayed score as the lazy read path at the same ledger time (#1082).
+#[test]
+fn test_scheduled_decay_matches_lazy_decay() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+
+    let user = Address::generate(&env);
+    let interval = DEFAULT_REPUTATION_DECAY_INTERVAL_SECS;
+
+    set_ledger_time(&env, 9_000_000);
+    client.onboard_user(&user, &String::from_str(&env, "decays"), &UserRole::Artisan);
+    client.update_reputation(&user, &50u32, &0u32);
+
+    set_ledger_time(&env, 9_000_000 + 5 * interval);
+
+    // Scheduled evaluation applies and persists the same decayed value.
+    let scheduled = client.apply_reputation_decay_now(&user);
+    // Lazy read at the identical ledger time must agree (no further elapsed time).
+    let lazy = client.get_trust_score(&user);
+    assert_eq!(scheduled, lazy);
+    // 50 * 9500 / 10000 = 475000 / 10000 = 47 (floor).
+    assert_eq!(lazy, 47);
+}
+
+/// A single evaluation is CPU-bounded by [`MAX_DECAY_INTERVALS_PER_CALL`]; any
+/// remaining elapsed buckets are carried forward on the next evaluation, so the
+/// decay is applied in full over time yet never oversteps the per-call budget.
+#[test]
+fn test_decay_cap_is_carried_forward() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+
+    let user = Address::generate(&env);
+    let interval = DEFAULT_REPUTATION_DECAY_INTERVAL_SECS;
+
+    set_ledger_time(&env, 2_000_000);
+    client.onboard_user(&user, &String::from_str(&env, "decayc"), &UserRole::Artisan);
+    client.update_reputation(&user, &100u32, &0u32);
+
+    // Jump far beyond the per-call cap (64 buckets).
+    let elapsed = (MAX_DECAY_INTERVALS_PER_CALL + 10) * interval;
+    set_ledger_time(&env, 2_000_000 + elapsed);
+
+    let first = client.get_trust_score(&user);
+    assert!(first > 0, "capped decay still leaves residual trust");
+    assert!(first < 100, "decay must have reduced the score");
+
+    // A second read at the SAME ledger time carries the remaining 10 buckets
+    // forward; the score keeps decreasing deterministically.
+    let second = client.get_trust_score(&user);
+    assert!(second < first);
+
+    // A third read at the same time: nothing left to apply → stable.
+    let third = client.get_trust_score(&user);
+    assert_eq!(second, third);
 }
 
 #[test]
@@ -1271,6 +2019,33 @@ fn test_change_username_fee_requires_token_configuration() {
 }
 
 #[test]
+#[should_panic]
+fn test_change_username_fee_transfer_failure_leaves_state_unchanged() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let fee_wallet = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+    // User has 0 balance, so fee transfer will fail
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "fee_user_no_bal"),
+        &UserRole::Buyer,
+    );
+    client.set_username_change_fee(&1_000_000);
+    client.set_username_fee_token(&token_contract.address());
+    client.set_username_fee_wallet(&fee_wallet);
+
+    // This should panic with TokenTransferFailed
+    client.change_username(&user, &String::from_str(&env, "new_username_attempt"));
+}
+
+#[test]
 fn test_change_username_with_special_characters() {
     let env = Env::default();
     env.mock_all_auths();
@@ -1281,14 +2056,11 @@ fn test_change_username_with_special_characters() {
     client.onboard_user(&user, &String::from_str(&env, "original"), &UserRole::Buyer);
 
     // Change to username with special characters (should be normalized)
-       let new_username = String::from_str(&env, "New-User_Name.123");
+    let new_username = String::from_str(&env, "New-User_Name.123");
     let updated = client.change_username(&user, &new_username);
 
     // Should be normalized with underscores
-    assert_eq!(
-        updated.username,
-        Symbol::new(&env, "new_user_name_123")
-    );
+    assert_eq!(updated.username, Symbol::new(&env, "new_user_name_123"));
 }
 
 #[test]
@@ -1739,6 +2511,7 @@ fn test_migrate_user_profile_moves_embedded_portfolio_to_separate_key() {
         disputed_trades: 1,
         portfolio_cid: Some(expected.clone()),
         status: ProfileStatus::Active,
+        state_version: 0,
     };
 
     env.as_contract(&client.address, || {
@@ -2353,6 +3126,7 @@ fn test_get_user_reputation_authorized() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
     let user = Address::generate(&env);
 
     // Onboard user
@@ -2395,6 +3169,25 @@ fn test_has_active_contracts_unauthorized() {
     });
 
     client.has_active_contracts(&user);
+}
+
+/// Issue #452 / #622 — has_active_contracts succeeds for authorized user and refreshes TTL.
+#[test]
+fn test_has_active_contracts_authorized_returns_boolean_and_extends_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "activeusr"),
+        &UserRole::Buyer,
+    );
+
+    // Initial query returns false (no escrows registered)
+    assert!(!client.has_active_contracts(&user));
 }
 
 // ===== set_verification_thresholds auth tests (#422) =====
@@ -2448,11 +3241,8 @@ fn test_onboard_rejected_when_escrow_paused() {
     escrow_client.set_paused(&true);
 
     // Onboarding should be rejected
-    let result = client.try_onboard_user(
-        &user,
-        &String::from_str(&env, "newuser"),
-        &UserRole::Buyer,
-    );
+    let result =
+        client.try_onboard_user(&user, &String::from_str(&env, "newuser"), &UserRole::Buyer);
     assert!(result.is_err());
 }
 
@@ -2505,6 +3295,85 @@ fn test_get_verification_queue_extends_ttl_for_every_slot() {
             );
         }
     });
+}
+
+// ============================================================
+// Issue #702 – no extend_ttl on temporary verification markers
+// ============================================================
+
+/// Pending verification markers live in temporary storage and must not pay for
+/// persistent `extend_ttl` on enqueue or pending checks.
+#[test]
+fn test_verification_request_uses_temporary_storage_without_extend_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "temp_vrfy"),
+        &UserRole::Artisan,
+    );
+    client.request_verification(&user);
+
+    assert!(client.is_verification_pending(&user));
+
+    env.as_contract(&client.address, || {
+        let key = DataKey::VerificationRequest(user.clone());
+        assert!(
+            env.storage().temporary().has(&key),
+            "pending marker must be stored in temporary storage"
+        );
+        assert!(
+            !env.storage().persistent().has(&key),
+            "pending marker must not be duplicated into persistent storage"
+        );
+    });
+
+    // Clearing removes the temporary marker and empties the queue.
+    assert!(client.admin_clear_verification_request(&user));
+    assert!(!client.is_verification_pending(&user));
+    env.as_contract(&client.address, || {
+        let key = DataKey::VerificationRequest(user.clone());
+        assert!(!env.storage().temporary().has(&key));
+        assert!(!env.storage().persistent().has(&key));
+    });
+}
+
+/// Legacy persistent pending markers are still recognized without refreshing TTL.
+#[test]
+fn test_legacy_persistent_verification_request_cleared_without_ttl_bump() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "legacy_vrfy"),
+        &UserRole::Artisan,
+    );
+
+    // Simulate a pre-#702 persistent pending marker + queue slot.
+    env.as_contract(&client.address, || {
+        let pending_key = DataKey::VerificationRequest(user.clone());
+        env.storage()
+            .persistent()
+            .set(&pending_key, &env.ledger().timestamp());
+        // Intentionally do not extend_ttl — mirrors the #702 policy.
+        env.storage()
+            .persistent()
+            .set(&DataKey::VerificationQueueIndex(0), &user);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VerificationQueueTail, &1u64);
+    });
+
+    assert!(client.is_verification_pending(&user));
+    assert!(client.admin_clear_verification_request(&user));
+    assert!(!client.is_verification_pending(&user));
+    assert_eq!(client.get_verification_queue().len(), 0);
 }
 
 /// Read helpers refresh TTL on the entries they return without a second probe.
@@ -2601,4 +3470,386 @@ fn test_profile_read_budget_smoke() {
     let _ = client.get_user(&user);
     let _ = client.get_user_reputation(&user);
     let _ = client.get_user_metrics(&user);
+}
+
+// ── Issue #940: Anti-Sybil Onboarding & Identity Abuse Tests ─────────────────
+
+#[test]
+fn test_sybil_config_management() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+
+    client.set_sybil_config(&1800u64, &5u32, &43200u64, &true, &None);
+
+    assert_eq!(client.get_rate_limit_window(), 1800);
+    assert_eq!(client.get_max_onboard_attempts(), 5);
+    assert_eq!(client.get_verification_cooldown(), 43200);
+    assert!(client.is_poh_required_for_auto_verify());
+    assert!(client.get_poh_verifier().is_none());
+}
+
+// ── Issue #1084: Onboarding and verification attempt windows ────────────────
+
+#[test]
+fn test_attempt_rate_policy_revision_advances() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+
+    assert_eq!(client.get_attempt_rate_policy().revision, 1);
+    let updated = client.set_attempt_rate_policy(&60u64, &2u32, &10u32, &120u64, &3u32, &20u32);
+    assert_eq!(updated.revision, 2);
+    assert_eq!(client.get_attempt_rate_policy(), updated);
+}
+
+#[test]
+fn test_global_onboarding_limit_resets_after_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+    let (client, _) = setup_test(&env);
+    client.set_attempt_rate_policy(&60u64, &3u32, &1u32, &60u64, &3u32, &10u32);
+
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    client.onboard_user(
+        &first,
+        &String::from_str(&env, "rate_first"),
+        &UserRole::Buyer,
+    );
+
+    let limited = client.try_onboard_user(
+        &second,
+        &String::from_str(&env, "rate_second"),
+        &UserRole::Artisan,
+    );
+    assert!(limited.is_err());
+    assert!(!client.is_onboarded(&second));
+
+    env.ledger().with_mut(|li| li.timestamp = 1_061);
+    let profile = client.onboard_user(
+        &second,
+        &String::from_str(&env, "rate_second"),
+        &UserRole::Artisan,
+    );
+    assert_eq!(profile.address, second);
+}
+
+#[test]
+fn test_verification_limits_do_not_duplicate_queue_records() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 2_000);
+    let (client, _) = setup_test(&env);
+    client.set_sybil_config(&3_600u64, &10u32, &0u64, &false, &None);
+    client.set_attempt_rate_policy(&60u64, &10u32, &10u32, &60u64, &1u32, &1u32);
+
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    client.onboard_user(
+        &first,
+        &String::from_str(&env, "verify_one"),
+        &UserRole::Artisan,
+    );
+    client.onboard_user(
+        &second,
+        &String::from_str(&env, "verify_two"),
+        &UserRole::Artisan,
+    );
+
+    client.request_verification(&first);
+    // A repeated pending request is an idempotent no-op and does not add a slot.
+    client.request_verification(&first);
+    assert_eq!(client.get_verification_queue().len(), 1);
+
+    let limited = client.try_request_verification(&second);
+    assert!(limited.is_err());
+    assert!(!client.is_verification_pending(&second));
+    assert_eq!(client.get_verification_queue().len(), 1);
+
+    env.ledger().with_mut(|li| li.timestamp = 2_061);
+    client.request_verification(&second);
+    assert!(client.is_verification_pending(&second));
+    assert_eq!(client.get_verification_queue().len(), 2);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #27)")]
+fn test_attempt_rate_policy_rejects_zero_active_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    client.set_attempt_rate_policy(&0u64, &1u32, &1u32, &60u64, &1u32, &1u32);
+}
+
+#[test]
+fn test_proof_of_humanity_credential_registration_and_validation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(&user, &String::from_str(&env, "pohuser"), &UserRole::Buyer);
+
+    let provider = soroban_sdk::Symbol::new(&env, "WorldID");
+    let mut cred_buf = [0u8; 32];
+    cred_buf[0] = 0xAA;
+    let cred_hash = soroban_sdk::Bytes::from_slice(&env, &cred_buf);
+    let expires = env.ledger().timestamp() + 10_000;
+
+    let cred = client.register_poh_credential(&user, &provider, &cred_hash, &expires);
+    assert_eq!(cred.provider_id, provider);
+    assert_eq!(cred.credential_hash, cred_hash);
+
+    assert!(client.is_poh_valid(&user));
+
+    let fetched = client
+        .get_poh_credential(&user)
+        .expect("PoH credential present");
+    assert_eq!(fetched.provider_id, provider);
+}
+
+#[test]
+#[should_panic]
+fn test_poh_credential_duplicate_prevention() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    client.onboard_user(&user1, &String::from_str(&env, "userone"), &UserRole::Buyer);
+    client.onboard_user(&user2, &String::from_str(&env, "usertwo"), &UserRole::Buyer);
+
+    let provider = soroban_sdk::Symbol::new(&env, "Gitcoin");
+    let mut cred_buf = [0u8; 32];
+    cred_buf[0] = 0xBB;
+    let cred_hash = soroban_sdk::Bytes::from_slice(&env, &cred_buf);
+    let expires = env.ledger().timestamp() + 10_000;
+
+    // Register for user1
+    client.register_poh_credential(&user1, &provider, &cred_hash, &expires);
+
+    // Registering the exact same credential hash for user2 must panic (DuplicateIdentityCredential)
+    client.register_poh_credential(&user2, &provider, &cred_hash, &expires);
+}
+
+#[test]
+fn test_identity_correlation_onboarding() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    let mut id_buf = [0u8; 32];
+    id_buf[0] = 0xCC;
+    let id_hash = soroban_sdk::Bytes::from_slice(&env, &id_buf);
+
+    let profile = client.onboard_user_with_identity(
+        &user,
+        &String::from_str(&env, "correlated"),
+        &UserRole::Artisan,
+        &id_hash,
+    );
+
+    assert_eq!(profile.address, user);
+    assert_eq!(profile.status, ProfileStatus::Active);
+}
+
+#[test]
+#[should_panic]
+fn test_duplicate_identity_correlation_rejection() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    let mut id_buf = [0u8; 32];
+    id_buf[0] = 0xDD;
+    let id_hash = soroban_sdk::Bytes::from_slice(&env, &id_buf);
+
+    client.onboard_user_with_identity(
+        &user1,
+        &String::from_str(&env, "sybil1"),
+        &UserRole::Artisan,
+        &id_hash,
+    );
+
+    // Attempting to onboard user2 with the same identity hash must panic (DuplicateIdentityCorrelation)
+    client.onboard_user_with_identity(
+        &user2,
+        &String::from_str(&env, "sybil2"),
+        &UserRole::Artisan,
+        &id_hash,
+    );
+}
+
+#[test]
+fn test_suspicious_profile_flagging_and_review_queue_workflow() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin) = setup_test(&env);
+    let user = Address::generate(&env);
+
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "suspect"),
+        &UserRole::Artisan,
+    );
+
+    // Flag profile for review
+    client.flag_suspicious_profile(&user, &101u32, &86400u64);
+
+    let profile = client.get_user(&user);
+    assert_eq!(profile.status, ProfileStatus::UnderReview);
+
+    let flag = client.get_suspicious_flag(&user).expect("Flag present");
+    assert_eq!(flag.reason_code, 101);
+
+    let queue = client.get_review_queue();
+    assert!(queue.contains(&user));
+
+    // Admin approves review -> clears flag and restores Active status
+    client.process_review(&user, &true);
+
+    let restored_profile = client.get_user(&user);
+    assert_eq!(restored_profile.status, ProfileStatus::Active);
+    assert!(client.get_suspicious_flag(&user).is_none());
+}
+
+#[test]
+fn test_revision_bound_sybil_review_restricts_then_restores_access() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 1_000);
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let reviewer = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "review_bound"),
+        &UserRole::Buyer,
+    );
+    client.set_sybil_reviewer(&reviewer, &true);
+    client.flag_suspicious_profile(&user, &701u32, &600u64);
+
+    let review = client.get_sybil_review(&user).expect("review case");
+    assert_eq!(review.status, SybilReviewStatus::ReviewRequired);
+    assert_eq!(
+        review.profile_revision,
+        client.get_user(&user).state_version
+    );
+    assert!(client
+        .try_update_user_role(&user, &UserRole::Artisan)
+        .is_err());
+
+    client.decide_sybil_review(&reviewer, &user, &review.profile_revision, &true);
+    assert_eq!(client.get_user(&user).status, ProfileStatus::Active);
+    assert_eq!(
+        client.get_sybil_review(&user).unwrap().status,
+        SybilReviewStatus::Approved
+    );
+    assert_eq!(
+        client.update_user_role(&user, &UserRole::Artisan).role,
+        UserRole::Artisan
+    );
+}
+
+#[test]
+fn test_sybil_review_rejects_unauthorized_and_stale_decisions() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 2_000);
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let unauthorized = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "review_stale"),
+        &UserRole::Artisan,
+    );
+    client.flag_suspicious_profile(&user, &702u32, &600u64);
+    let review = client.get_sybil_review(&user).unwrap();
+
+    assert!(client
+        .try_decide_sybil_review(&unauthorized, &user, &review.profile_revision, &true,)
+        .is_err());
+    assert!(client.try_process_review(&user, &true).is_ok());
+    assert_eq!(client.get_user(&user).status, ProfileStatus::Active);
+
+    client.flag_suspicious_profile(&user, &703u32, &600u64);
+    let current = client.get_sybil_review(&user).unwrap();
+    assert!(client
+        .try_decide_sybil_review(
+            &client.get_config().platform_admin,
+            &user,
+            &(current.profile_revision - 1),
+            &true,
+        )
+        .is_err());
+    assert_eq!(client.get_user(&user).status, ProfileStatus::UnderReview);
+}
+
+#[test]
+fn test_sybil_rejection_appeal_and_expiry_remain_restricted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|li| li.timestamp = 3_000);
+    let (client, admin) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "review_appeal"),
+        &UserRole::Artisan,
+    );
+    client.flag_suspicious_profile(&user, &704u32, &10u64);
+    let opened = client.get_sybil_review(&user).unwrap();
+    client.decide_sybil_review(&admin, &user, &opened.profile_revision, &false);
+    assert_eq!(client.get_user(&user).status, ProfileStatus::Flagged);
+
+    let rejected_revision = client.get_user(&user).state_version;
+    client.appeal_sybil_review(&user, &rejected_revision);
+    let appealed = client.get_sybil_review(&user).unwrap();
+    assert_eq!(appealed.status, SybilReviewStatus::Appealed);
+    assert_eq!(appealed.appeal_count, 1);
+    assert!(client.try_request_verification(&user).is_err());
+
+    env.ledger()
+        .with_mut(|li| li.timestamp = appealed.expires_at);
+    client.expire_sybil_review(&user, &appealed.profile_revision);
+    assert_eq!(client.get_user(&user).status, ProfileStatus::Flagged);
+    assert_eq!(
+        client.get_sybil_review(&user).unwrap().status,
+        SybilReviewStatus::Expired
+    );
+}
+
+#[test]
+fn test_normal_verified_profile_is_unaffected_by_review_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "normal_verified"),
+        &UserRole::Buyer,
+    );
+    let verified = client.verify_user(&user);
+
+    assert!(verified.is_verified);
+    assert_eq!(verified.status, ProfileStatus::Active);
+    assert!(client.get_sybil_review(&user).is_none());
+    assert_eq!(
+        client.update_user_role(&user, &UserRole::Artisan).role,
+        UserRole::Artisan
+    );
 }

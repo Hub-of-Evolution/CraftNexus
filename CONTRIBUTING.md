@@ -18,7 +18,7 @@
 - **Soroban CLI** – Install with:
   ```bash
   cargo install --locked stellar-cli
-  rustup target add wasm32-unknown-unknown
+  rustup target add wasm32v1-none
   ```
   Or run `./scripts/install-stellar-cli.sh` for the automated setup.
 - **Node.js** (for frontend development) – Version 18+ recommended.
@@ -94,7 +94,16 @@ Both **must** pass with zero errors. The `cargo check --tests` command catches t
 ### WASM Build Verification
 
 ```bash
-cargo build --target wasm32-unknown-unknown --release
+cargo build --target wasm32v1-none --release
+```
+
+### Formal Safety Gate
+
+Release and upgrade PRs must pass the fail-closed contract safety gate (#1148):
+
+```bash
+cd craft-nexus-contract
+./scripts/safety_gate.sh
 ```
 
 ## Code Style & Linting
@@ -138,7 +147,7 @@ The Soroban SDK test framework generates snapshot files under `craft-nexus-contr
 3. **Run the verification checklist** before pushing:
    - [ ] `cargo check --tests` — zero errors
    - [ ] `cargo test --lib` — all suites pass
-   - [ ] `cargo build --target wasm32-unknown-unknown --release` succeeds
+   - [ ] `cargo build --target wasm32v1-none --release` succeeds
    - [ ] Snapshot files unchanged or updated intentionally
    - [ ] PR description references the relevant issue number
 

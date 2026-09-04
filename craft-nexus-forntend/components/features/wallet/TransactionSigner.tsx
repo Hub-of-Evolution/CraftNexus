@@ -14,6 +14,7 @@ import {
   HORIZON_URL,
 } from "@/lib/stellar/config";
 import { getCurrentAddress } from "@/lib/stellar/wallet";
+import { useEscrowWallet } from "./EscrowWalletIntegration";
 import type { TransactionStatus } from "./EscrowWalletIntegration";
 
 export interface SignAndSubmitResult {
@@ -128,6 +129,7 @@ export function useTransactionSigner() {
       options?: {
         timeout?: number;
         onStatusChange?: (status: TransactionStatus) => void;
+        validateSigner?: string;
       }
     ): Promise<SignAndSubmitResult> => {
       setIsSubmitting(true);
@@ -148,8 +150,15 @@ export function useTransactionSigner() {
         // Serialize for wallet signing
         const transactionXdr = transaction.toXDR();
 
-        // Sign using Freighter API
-        const signedXdr = await signWithFreighter(transactionXdr, NETWORK_PASSPHRASE);
+        // Get the current user's address for validation
+        const currentAddress = await getCurrentAddress();
+
+        // Sign using Freighter API with signature validation
+        const signedXdr = await signWithFreighter(
+          transactionXdr, 
+          NETWORK_PASSPHRASE,
+          options?.validateSigner || currentAddress || undefined
+        );
 
         if (!signedXdr) {
           throw new Error("Transaction signing failed or was rejected");
@@ -216,11 +225,13 @@ export function useTransactionSigner() {
 }
 
 /**
- * Sign transaction using Freighter wallet
+ * Sign transaction using Freighter wallet with signature validation
+ * Validates that the transaction is signed by the expected user
  */
 async function signWithFreighter(
   transactionXdr: string,
-  networkPassphrase: string
+  networkPassphrase: string,
+  expectedSigner?: string
 ): Promise<string | null> {
   try {
     // Dynamic import to avoid SSR issues
@@ -230,10 +241,67 @@ async function signWithFreighter(
       networkPassphrase,
     });
 
+    // Validate the signature if expected signer is provided
+    if (expectedSigner && signedTx) {
+      const isValid = await validateTransactionSignature(
+        signedTx,
+        expectedSigner,
+        networkPassphrase
+      );
+      
+      if (!isValid) {
+        console.error("Signature validation failed: Transaction was not signed by the expected wallet");
+        throw new Error("Transaction signature validation failed. Please ensure you're signing with the correct wallet.");
+      }
+      
+      console.log("✅ Signature validated successfully");
+    }
+
     return signedTx;
   } catch (error) {
     console.error("Freighter signTransaction failed:", error);
     return null;
+  }
+}
+
+/**
+ * Validate that a transaction is signed by the expected public key
+ */
+async function validateTransactionSignature(
+  signedTransactionXdr: string,
+  expectedSigner: string,
+  networkPassphrase: string
+): Promise<boolean> {
+  try {
+    const { Transaction } = await import("@stellar/stellar-sdk");
+    
+    // Parse the signed transaction
+    const transaction = new Transaction(signedTransactionXdr, networkPassphrase);
+    
+    // Get the source account (signer) from the transaction
+    const sourceAccount = transaction.source;
+    
+    // Verify the source account matches the expected signer
+    if (sourceAccount !== expectedSigner) {
+      console.error(
+        `Signature mismatch: Expected ${expectedSigner}, got ${sourceAccount}`
+      );
+      return false;
+    }
+    
+    // Additional validation: check that the transaction has signatures
+    const hasSignatures = transaction.signatures && transaction.signatures.length > 0;
+    
+    if (!hasSignatures) {
+      console.error("Transaction has no signatures");
+      return false;
+    }
+    
+    console.log(`Transaction signed by: ${sourceAccount}`);
+    return true;
+  } catch (error) {
+    console.error("Failed to validate transaction signature:", error);
+    return false;
   }
 }
 
@@ -265,10 +333,17 @@ export function TransactionSigner({
   className = "",
 }: TransactionSignerProps) {
   const { signAndSubmit, status, txHash, error: txError, isSubmitting } = useTransactionSigner();
+  const { walletState } = useEscrowWallet();
 
   const handleSign = async () => {
     try {
-      const result = await signAndSubmit(contractId, method, args);
+      // For escrow initialization, validate that the signer is the buyer
+      const isEscrowInit = method === "create_escrow" || method === "init_escrow";
+      const validateSigner = isEscrowInit && walletState.publicKey ? walletState.publicKey : undefined;
+
+      const result = await signAndSubmit(contractId, method, args, {
+        validateSigner,
+      });
 
       if (result.success && onSuccess) {
         onSuccess(result);

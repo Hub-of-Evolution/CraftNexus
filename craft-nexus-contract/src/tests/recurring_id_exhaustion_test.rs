@@ -9,7 +9,7 @@ fn test_recurring_escrow_id_exhaustion() {
     // Force the next recurring escrow ID to be the maximum value.
     env.storage()
         .persistent()
-        .set(&DataKey::NextRecurringEscrowId, &MAX_RECURRING_ESCROW_ID);
+        .set(&DataKey::NextRecurId, &MAX_RECURRING_ESCROW_ID);
 
     let total_amount: i128 = 1000;
     token_admin.mint(&buyer, &total_amount);

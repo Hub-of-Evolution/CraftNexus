@@ -1,6 +1,8 @@
 {
   "struct": "EscrowResolvedEvent",
+  "schema_version": 1,
   "fields": [
+    {"name": "schema_version", "type": "u32"},
     {"name": "escrow_id", "type": "u64"},
     {"name": "buyer", "type": "Address"},
     {"name": "seller", "type": "Address"},
