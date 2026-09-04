@@ -38,6 +38,8 @@ mod min_release_window_test;
 #[cfg(test)]
 mod pagination_boundary_test;
 #[cfg(test)]
+mod diagnostic_scan_test;
+#[cfg(test)]
 mod prop_test;
 #[cfg(test)]
 mod reentrancy_test;
@@ -15004,6 +15006,66 @@ pub struct EscrowStateDiagnostic {
     pub issue: EscrowStateIssue,
 }
 
+/// A single finding produced by `run_diagnostic_scan` (#1135): one canonical
+/// record whose live state failed the same consistency checks used by
+/// `diagnose_escrow_state`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct DiagnosticFinding {
+    /// Canonical order ID of the affected record.
+    pub order_id: u32,
+    /// Accounting category the finding is filed under — the token whose
+    /// locked-fund ledger this record's balance is tracked against.
+    /// `EscrowNotFound` findings have no live record to read a token from,
+    /// so they are filed under the contract's own address as a sentinel.
+    pub category: Address,
+    /// The specific consistency issue detected.
+    pub issue: EscrowStateIssue,
+}
+
+/// Result of a bounded, resumable pass over the canonical escrow index
+/// (Issue #1135).
+///
+/// A scan starts at `cursor == 0` and is advanced by repeated calls to
+/// `run_diagnostic_scan`, each passing the previous call's `next_cursor`,
+/// until `complete` is `true`. Progress and findings accumulate in
+/// contract storage between calls, so a scan survives across ledgers and
+/// always resumes from the same point for the same inputs (deterministic
+/// and resumable, per the acceptance criteria).
+///
+/// `report_digest` binds the finished report to this contract instance and
+/// the ledger it completed on, using the same sha256-over-payload pattern
+/// as `OnboardingAttestation::state_digest` — tamper-evident content
+/// commitment, not a delegated authorization.
+///
+/// # This report grants no authority
+///
+/// A diagnostic report — complete or in-progress — is evidence only. No
+/// contract function accepts a `ContractDiagnosticReport` or its digest as
+/// an argument, and nothing here bypasses the existing
+/// `propose_reconciliation_repair` / `apply_reconciliation_repair`
+/// admin-gated, timelocked flow. Acting on a finding still requires that
+/// separate, explicitly authorized path.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ContractDiagnosticReport {
+    /// Cumulative number of records examined so far in this scan.
+    pub scanned: u32,
+    /// Cumulative number of findings recorded so far in this scan.
+    pub findings_count: u32,
+    /// Index to pass as `cursor` on the next call; equals the total
+    /// record count once the scan is complete.
+    pub next_cursor: u32,
+    /// `true` once the scan has reached the end of the canonical index.
+    pub complete: bool,
+    /// Ledger sequence at which this page of the scan was produced.
+    pub ledger_sequence: u32,
+    /// Content-commitment digest over this report's fields (see struct docs).
+    pub report_digest: BytesN<32>,
+}
+
 /// Choice of resolution for a disputed escrow.
 #[contracttype]
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -21971,6 +22033,212 @@ impl CraftNexusContract {
     /// escrow has lost the timestamp required to enforce challenge/expiry windows.
     pub fn diagnose_escrow_state(env: Env, order_id: u32) -> EscrowStateDiagnostic {
         Self::inspect_escrow_state(&env, order_id)
+    }
+
+    /// Run (or resume) a bounded pass of the contract diagnostic scan over
+    /// the canonical escrow index, flagging malformed, stale, or otherwise
+    /// inconsistent active records (Issue #1135).
+    ///
+    /// Call with `cursor: 0` to start a new scan — this discards any
+    /// findings left over from a previous scan so results are never mixed
+    /// across runs. Pass the returned `next_cursor` back in on subsequent
+    /// calls until `complete` is `true`. Each record is evaluated with the
+    /// same check `diagnose_escrow_state` uses, so the two never disagree.
+    ///
+    /// `limit` is capped at `pagination_validation::MAX_RECONCILE_LIMIT`,
+    /// matching the conservative per-call bound already used by
+    /// `reconcile_token` for this kind of storage-heavy sweep.
+    ///
+    /// Read-only: this only ever writes scan bookkeeping (progress,
+    /// findings, and — once complete — the report itself). It never touches
+    /// escrow or accounting state, and by itself authorizes no repair; see
+    /// [`ContractDiagnosticReport`] for how findings map to the existing
+    /// repair-proposal flow.
+    pub fn run_diagnostic_scan(
+        env: Env,
+        cursor: u32,
+        limit: u32,
+    ) -> Result<ContractDiagnosticReport, Error> {
+        pagination_validation::validate_strict_limit(
+            limit,
+            pagination_validation::MAX_RECONCILE_LIMIT,
+        )?;
+        let total = Self::get_persistent_u32(&env, &DataKey::EscrowCount);
+        let end = cursor.saturating_add(limit).min(total);
+
+        // Starting over: drop any findings and progress carried over from a
+        // previous scan so a fresh pass can never inherit stale results.
+        if cursor == 0 {
+            let stale_count: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::DiagnosticFindingCount)
+                .unwrap_or(0);
+            for i in 0..stale_count {
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::DiagnosticFindingIndexed(i));
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::DiagnosticFindingCount, &0u32);
+            env.storage()
+                .persistent()
+                .set(&DataKey::DiagnosticScannedProgress, &0u32);
+        }
+
+        let mut findings_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DiagnosticFindingCount)
+            .unwrap_or(0);
+        let mut scanned: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DiagnosticScannedProgress)
+            .unwrap_or(0);
+
+        for index in cursor..end {
+            let Some(order_id) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, u32>(&DataKey::GlobalEscrowIdIndexed(index))
+            else {
+                continue;
+            };
+            let diagnostic = Self::inspect_escrow_state(&env, order_id);
+            scanned = scanned.saturating_add(1);
+            if !diagnostic.is_consistent {
+                // Every issue but EscrowNotFound has a live record to read
+                // its token from; EscrowNotFound has none, so it is filed
+                // under the contract address as an explicit sentinel rather
+                // than guessing a token.
+                let category = env
+                    .storage()
+                    .persistent()
+                    .get::<(Symbol, u32), Escrow>(&(ESCROW, order_id))
+                    .map(|escrow| escrow.token)
+                    .unwrap_or_else(|| env.current_contract_address());
+                let finding_key = DataKey::DiagnosticFindingIndexed(findings_count);
+                env.storage().persistent().set(
+                    &finding_key,
+                    &DiagnosticFinding {
+                        order_id,
+                        category,
+                        issue: diagnostic.issue,
+                    },
+                );
+                Self::extend_persistent(&env, &finding_key);
+                findings_count = findings_count.saturating_add(1);
+            }
+        }
+
+        let complete = end >= total;
+        env.storage()
+            .persistent()
+            .set(&DataKey::DiagnosticFindingCount, &findings_count);
+        env.storage()
+            .persistent()
+            .set(&DataKey::DiagnosticScannedProgress, &scanned);
+        Self::extend_persistent(&env, &DataKey::DiagnosticFindingCount);
+        Self::extend_persistent(&env, &DataKey::DiagnosticScannedProgress);
+
+        let ledger_sequence = env.ledger().sequence();
+        let report_digest = Self::diagnostic_report_digest(
+            &env,
+            scanned,
+            findings_count,
+            end,
+            complete,
+            ledger_sequence,
+        );
+        let report = ContractDiagnosticReport {
+            scanned,
+            findings_count,
+            next_cursor: end,
+            complete,
+            ledger_sequence,
+            report_digest,
+        };
+
+        if complete {
+            env.storage()
+                .persistent()
+                .set(&DataKey::DiagnosticReport, &report);
+            Self::extend_persistent(&env, &DataKey::DiagnosticReport);
+        }
+
+        Ok(report)
+    }
+
+    /// Content-commitment digest for a `ContractDiagnosticReport` (#1135).
+    ///
+    /// Mirrors the domain-separated sha256-over-payload construction used by
+    /// `OnboardingAttestation`'s `attestation_digest`: it binds the report to
+    /// this exact contract instance and ledger so a report cannot be replayed
+    /// against a different deployment or silently edited off-chain. It is a
+    /// tamper-evidence commitment, not a delegated authorization — see
+    /// [`ContractDiagnosticReport`] docs.
+    fn diagnostic_report_digest(
+        env: &Env,
+        scanned: u32,
+        findings_count: u32,
+        next_cursor: u32,
+        complete: bool,
+        ledger_sequence: u32,
+    ) -> BytesN<32> {
+        let mut payload = Bytes::from_slice(env, b"CRAFTNEXUS_DIAGNOSTIC_SCAN_V1");
+        let contract_string = env.current_contract_address().to_string();
+        let mut contract_bytes = [0u8; 64];
+        let contract_len = contract_string.len() as usize;
+        payload.extend_from_slice(&(contract_len as u32).to_be_bytes());
+        contract_string.copy_into_slice(&mut contract_bytes[..contract_len]);
+        payload.extend_from_slice(&contract_bytes[..contract_len]);
+        payload.extend_from_slice(&scanned.to_be_bytes());
+        payload.extend_from_slice(&findings_count.to_be_bytes());
+        payload.extend_from_slice(&next_cursor.to_be_bytes());
+        payload.push_back(if complete { 1 } else { 0 });
+        payload.extend_from_slice(&ledger_sequence.to_be_bytes());
+        env.crypto().sha256(&payload).into()
+    }
+
+    /// Read the most recently *completed* contract diagnostic scan report,
+    /// if one exists (#1135).
+    pub fn get_diagnostic_report(env: Env) -> Option<ContractDiagnosticReport> {
+        env.storage().persistent().get(&DataKey::DiagnosticReport)
+    }
+
+    /// Page through findings recorded by the current (or most recently
+    /// completed) contract diagnostic scan (#1135).
+    pub fn get_diagnostic_findings(
+        env: Env,
+        start_index: u32,
+        limit: u32,
+    ) -> Result<Vec<DiagnosticFinding>, Error> {
+        let limit = pagination_validation::validate_limit(
+            limit,
+            pagination_validation::MAX_ADMIN_PAGE_SIZE,
+        )?;
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DiagnosticFindingCount)
+            .unwrap_or(0);
+        if start_index >= count {
+            return Ok(Vec::new(&env));
+        }
+        let end_index = start_index.saturating_add(limit).min(count);
+        let mut findings = Vec::new(&env);
+        for index in start_index..end_index {
+            if let Some(finding) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, DiagnosticFinding>(&DataKey::DiagnosticFindingIndexed(index))
+            {
+                findings.push_back(finding);
+            }
+        }
+        Ok(findings)
     }
 
     /// Read the immutable fund-movement audit history for an account.
