@@ -317,6 +317,10 @@ pub enum DataKey {
     VerificationQueueTail,
     /// Queue index -> address mapping for manual verification requests (#138)
     VerificationQueueIndex(u64),
+    /// Number of pending manual verification requests (#730).
+    /// Incremented on enqueue and saturating-decremented on clear so concurrent
+    /// admin approve/clear races cannot drive the counter below zero.
+    VerificationQueueCount,
     /// DEPRECATED: Legacy Vec-based verification history (#63).
     /// Migrated lazily to indexed compact entries (#519).
     VerificationHistory(Address),
@@ -1604,6 +1608,30 @@ impl OnboardingContract {
         Self::extend_persistent(env, &key);
     }
 
+    fn get_verification_queue_count(env: &Env) -> u32 {
+        Self::read_persistent(env, &DataKey::VerificationQueueCount).unwrap_or(0u32)
+    }
+
+    fn set_verification_queue_count(env: &Env, count: u32) {
+        let key = DataKey::VerificationQueueCount;
+        if count == 0 {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &count);
+            Self::extend_persistent(env, &key);
+        }
+    }
+
+    /// Decrement the pending verification request count without going negative.
+    ///
+    /// Issue #730: concurrent admin approve/clear of the same request must not
+    /// underflow this counter. Saturating subtraction keeps storage consistent
+    /// even if a caller clears after the pending marker is already gone.
+    fn decrement_verification_queue_count(env: &Env) {
+        let count = Self::get_verification_queue_count(env);
+        Self::set_verification_queue_count(env, count.saturating_sub(1));
+    }
+
     fn is_verification_pending_internal(env: &Env, user: &Address) -> bool {
         let key = DataKey::VerificationRequest(user.clone());
         // Issue #702: pending markers live in temporary storage. Do not call
@@ -1627,6 +1655,8 @@ impl OnboardingContract {
             .set(&pending_key, &env.ledger().timestamp());
 
         Self::set_queue_pointer(env, DataKey::VerificationQueueTail, tail + 1);
+        let count = Self::get_verification_queue_count(env);
+        Self::set_verification_queue_count(env, count.saturating_add(1));
     }
 
     fn advance_verification_head(env: &Env) {
@@ -1654,12 +1684,23 @@ impl OnboardingContract {
         Self::set_queue_pointer(env, DataKey::VerificationQueueHead, head);
     }
 
-    fn clear_verification_request(env: &Env, user: &Address) {
+    /// Clear a pending verification request and compact the queue head.
+    ///
+    /// Returns `true` when a pending marker existed and was removed. Concurrent
+    /// admin clears of the same user are idempotent: the second call finds no
+    /// pending marker, skips the count decrement, and returns `false` (#730).
+    fn clear_verification_request(env: &Env, user: &Address) -> bool {
         let pending_key = DataKey::VerificationRequest(user.clone());
+        if !Self::is_verification_pending_internal(env, user) {
+            return false;
+        }
+
         env.storage().temporary().remove(&pending_key);
         // Drop any legacy persistent marker left by pre-#702 deployments.
         env.storage().persistent().remove(&pending_key);
+        Self::decrement_verification_queue_count(env);
         Self::advance_verification_head(env);
+        true
     }
 
     fn get_attempt_rate_policy_internal(env: &Env) -> AttemptRatePolicy {
@@ -4714,6 +4755,9 @@ impl OnboardingContract {
     ///   updating only `is_verified` to match `approve`. Profile version
     ///   (`CURRENT_USER_PROFILE_VERSION`) and all other fields are preserved.
     /// - Removes `DataKey::VerificationRequest(user)` and compacts the queue.
+    /// - Saturating-decrements `DataKey::VerificationQueueCount` when a pending
+    ///   request existed (#730); a second concurrent clear is a no-op for the
+    ///   counter so it cannot go negative.
     /// - Appends a compact history entry with action `"approved"` or
     ///   `"rejected"` and `by = Some(platform_admin)`.
     ///
@@ -4807,6 +4851,8 @@ impl OnboardingContract {
     /// - Reads and extends TTL on `DataKey::Config`.
     /// - Removes `DataKey::VerificationRequest(user)` (if present) and compacts
     ///   the queue by advancing `DataKey::VerificationQueueHead`.
+    /// - Saturating-decrements `DataKey::VerificationQueueCount` only when a
+    ///   pending request was actually removed (#730).
     /// - No `UserProfile` shape is touched, so no profile-version upgrade is
     ///   required (`CURRENT_USER_PROFILE_VERSION` unaffected).
     ///
@@ -4832,9 +4878,9 @@ impl OnboardingContract {
         // unauthorized caller triggers a full transaction rollback (#41).
         config.platform_admin.require_auth();
 
-        let was_pending = Self::is_verification_pending_internal(&env, &user);
-        Self::clear_verification_request(&env, &user);
-        was_pending
+        // clear_verification_request is idempotent: only the first clear of a
+        // pending request decrements VerificationQueueCount (#730).
+        Self::clear_verification_request(&env, &user)
     }
 
     /// Get the full verification history for a user.
