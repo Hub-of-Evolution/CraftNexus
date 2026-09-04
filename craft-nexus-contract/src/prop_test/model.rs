@@ -709,3 +709,225 @@ pub enum ModelError {
     HasActiveContracts,
     AlreadyActive,
 }
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        CreateEscrow { buyer: usize, seller: usize, token: usize, amount: i128, order_id: u32, release_window: u64, now: u64 },
+        ReleaseEscrow { order_id: u32, caller: usize, now: u64 },
+        RefundEscrow { order_id: u32, caller: usize, admin: usize, now: u64 },
+        DisputeEscrow { order_id: u32, caller: usize, now: u64 },
+        ResolveDispute { order_id: u32, caller: usize, arbitrator: usize, release_to_seller: bool, now: u64 },
+        ResolveExpiredDispute { order_id: u32, now: u64 },
+        Stake { artisan: usize, token: usize, amount: i128, now: u64 },
+        Unstake { artisan: usize, token: usize, amount: i128, now: u64 },
+        ProposeUpgrade { now: u64 },
+        CancelUpgrade { now: u64 },
+        ExecuteUpgrade { now: u64 },
+        SetPaused { paused: bool },
+        OnboardUser { address: usize, role: ModelUserRole },
+        VerifyUser { address: usize },
+        DeactivateProfile { address: usize },
+        ReactivateProfile { address: usize },
+    }
+
+    fn actor(i: usize) -> String {
+        alloc::format!("actor-{}", i % 4)
+    }
+
+    fn token_name(i: usize) -> String {
+        alloc::format!("token-{}", i % 3)
+    }
+
+    struct FuzzRng {
+        state: u64,
+    }
+
+    impl FuzzRng {
+        fn new(seed: &[u8]) -> Self {
+            let mut state = 0x9E3779B97F4A7C15u64;
+            for &b in seed {
+                state ^= u64::from(b);
+                state = state.wrapping_mul(0x100000001B3u64).rotate_left(23);
+            }
+            FuzzRng { state }
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut z = self.state.wrapping_add(0x9E3779B97F4A7C15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            z ^= z >> 31;
+            self.state = self.state.wrapping_add(0x9E3779B97F4A7C15);
+            z
+        }
+
+        fn next_below(&mut self, n: u64) -> u64 {
+            self.next_u64() % n
+        }
+
+        fn next_i128_below(&mut self, n: i128) -> i128 {
+            (self.next_u64() as i128) % n
+        }
+
+        fn next_bool(&mut self) -> bool {
+            self.next_u64() & 1 == 1
+        }
+    }
+
+    fn generate_ops(seed: &[u8]) -> Vec<Op> {
+        let mut rng = FuzzRng::new(seed);
+        let count = (rng.next_u64() % 32) as usize;
+        let mut ops = Vec::with_capacity(count);
+        for _ in 0..count {
+            let kind = rng.next_below(16);
+            let op = match kind {
+                0 => Op::CreateEscrow {
+                    buyer: rng.next_below(4) as usize,
+                    seller: rng.next_below(4) as usize,
+                    token: rng.next_below(3) as usize,
+                    amount: rng.next_i128_below(2001) - 1000,
+                    order_id: rng.next_below(1 << 32) as u32,
+                    release_window: rng.next_below(10000),
+                    now: rng.next_below(10000),
+                },
+                1 => Op::ReleaseEscrow {
+                    order_id: rng.next_below(1 << 32) as u32,
+                    caller: rng.next_below(4) as usize,
+                    now: rng.next_below(10000),
+                },
+                2 => Op::RefundEscrow {
+                    order_id: rng.next_below(1 << 32) as u32,
+                    caller: rng.next_below(4) as usize,
+                    admin: rng.next_below(4) as usize,
+                    now: rng.next_below(10000),
+                },
+                3 => Op::DisputeEscrow {
+                    order_id: rng.next_below(1 << 32) as u32,
+                    caller: rng.next_below(4) as usize,
+                    now: rng.next_below(10000),
+                },
+                4 => Op::ResolveDispute {
+                    order_id: rng.next_below(1 << 32) as u32,
+                    caller: rng.next_below(4) as usize,
+                    arbitrator: rng.next_below(4) as usize,
+                    release_to_seller: rng.next_bool(),
+                    now: rng.next_below(10000),
+                },
+                5 => Op::ResolveExpiredDispute {
+                    order_id: rng.next_below(1 << 32) as u32,
+                    now: rng.next_below(10000),
+                },
+                6 => Op::Stake {
+                    artisan: rng.next_below(4) as usize,
+                    token: rng.next_below(3) as usize,
+                    amount: rng.next_i128_below(2001) - 1000,
+                    now: rng.next_below(10000),
+                },
+                7 => Op::Unstake {
+                    artisan: rng.next_below(4) as usize,
+                    token: rng.next_below(3) as usize,
+                    amount: rng.next_i128_below(2001) - 1000,
+                    now: rng.next_below(10000),
+                },
+                8 => Op::ProposeUpgrade { now: rng.next_below(10000) },
+                9 => Op::CancelUpgrade { now: rng.next_below(10000) },
+                10 => Op::ExecuteUpgrade { now: rng.next_below(10000) },
+                11 => Op::SetPaused { paused: rng.next_bool() },
+                12 => Op::OnboardUser {
+                    address: rng.next_below(4) as usize,
+                    role: match rng.next_below(5) {
+                        0 => ModelUserRole::Buyer,
+                        1 => ModelUserRole::Artisan,
+                        2 => ModelUserRole::Admin,
+                        3 => ModelUserRole::Arbitrator,
+                        _ => ModelUserRole::Moderator,
+                    },
+                },
+                13 => Op::VerifyUser { address: rng.next_below(4) as usize },
+                14 => Op::DeactivateProfile { address: rng.next_below(4) as usize },
+                _ => Op::ReactivateProfile { address: rng.next_below(4) as usize },
+            };
+            ops.push(op);
+        }
+        ops
+    }
+
+    fn run_op(model: &mut ModelState, op: Op) -> Result<(), ModelError> {
+        match op {
+            Op::CreateEscrow { buyer, seller, token, amount, order_id, release_window, now } => {
+                model.create_escrow(actor(buyer), actor(seller), token_name(token), amount, order_id, release_window, now)
+            }
+            Op::ReleaseEscrow { order_id, caller, now } => {
+                model.release_escrow(order_id, &actor(caller), now)
+            }
+            Op::RefundEscrow { order_id, caller, admin, now } => {
+                model.refund_escrow(order_id, &actor(caller), &actor(admin), now)
+            }
+            Op::DisputeEscrow { order_id, caller, now } => {
+                model.dispute_escrow(order_id, &actor(caller), now)
+            }
+            Op::ResolveDispute { order_id, caller, arbitrator, release_to_seller, now } => {
+                model.resolve_dispute(order_id, &actor(caller), &actor(arbitrator), release_to_seller, now)
+            }
+            Op::ResolveExpiredDispute { order_id, now } => {
+                model.resolve_expired_dispute(order_id, now)
+            }
+            Op::Stake { artisan, token, amount, now } => {
+                model.stake(actor(artisan), token_name(token), amount, now)
+            }
+            Op::Unstake { artisan, token, amount, now } => {
+                model.unstake(&actor(artisan), &token_name(token), amount, now).map(|_| ())
+            }
+            Op::ProposeUpgrade { now } => model.propose_upgrade(now),
+            Op::CancelUpgrade { now } => model.cancel_upgrade(now),
+            Op::ExecuteUpgrade { now } => model.execute_upgrade(now),
+            Op::SetPaused { paused } => {
+                model.set_paused(paused);
+                Ok(())
+            }
+            Op::OnboardUser { address, role } => model.onboard_user(actor(address), role),
+            Op::VerifyUser { address } => model.verify_user(&actor(address)),
+            Op::DeactivateProfile { address } => model.deactivate_profile(&actor(address)),
+            Op::ReactivateProfile { address } => model.reactivate_profile(&actor(address)),
+        }
+    }
+
+    fn check_invariants(model: &ModelState) -> Result<(), String> {
+        if !model.check_locked_non_negative() {
+            return Err(alloc::format!("locked amount became negative"));
+        }
+        model.check_fund_conservation()?;
+        model.check_no_terminal_re_entry()?;
+        model.check_stake_queue_consistency()?;
+        Ok(())
+    }
+
+    proptest! {
+        #[test]
+        fn random_sequences_preserve_invariants(seed in prop::collection::vec(any::<u8>(), 0..64)) {
+            let ops = generate_ops(&seed);
+            let mut model = ModelState::new();
+            for op in &ops {
+                let before = model.clone();
+                let result = run_op(&mut model, op.clone());
+
+                if result.is_err() {
+                    prop_assert_eq!(
+                        format!("{:?}", model),
+                        format!("{:?}", before),
+                        "failed op {:?} mutated model",
+                        op
+                    );
+                }
+
+                if let Err(msg) = check_invariants(&model) {
+                    prop_assert!(false, "invariant broken after {:?}: {}", op, msg);
+                }
+            }
+        }
+    }
+}

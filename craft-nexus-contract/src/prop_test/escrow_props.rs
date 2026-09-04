@@ -600,6 +600,64 @@ fn prop_partial_refund_conservation() {
         }
     }
 }
+// ── Property 13: Invalid predecessor states fail atomically ─────────────────
+
+#[test]
+fn prop_invalid_predecessor_states_fail_atomically() {
+    let mut rng = Lcg64::new(seed_from_env() ^ 0x9999);
+
+    for _ in 0..DEFAULT_CASE_COUNT {
+        let case_seed = rng.next_u64();
+        let mut crng = Lcg64::new(case_seed);
+
+        let (env, contract_id, admin, arbitrator, buyer, seller, token_id, platform_wallet, _) =
+            fresh_env();
+        let client = CraftNexusContractClient::new(&env, &contract_id);
+        let token_client = token::Client::new(&env, &token_id);
+
+        let order_ids: alloc::vec::Vec<u32> = (1u32..=5).collect();
+        let ops = generate_escrow_sequence(&mut crng, &order_ids);
+
+        for op in &ops {
+            let snapshot = || {
+                (
+                    client.get_fund_allocation(&token_id).total_locked,
+                    token_client.balance(&client.address),
+                    token_client.balance(&buyer),
+                    token_client.balance(&seller),
+                    token_client.balance(&platform_wallet),
+                    order_ids.iter().map(|id| match client.try_get_escrow(id) {
+                        Ok(Ok(e)) => Some(alloc::format!("{:?}", e.status)),
+                        _ => None,
+                    }).collect::<alloc::vec::Vec<_>>(),
+                )
+            };
+
+            let before = snapshot();
+
+            let succeeded = run_op(&env, &client, op, &buyer, &seller, &admin, &arbitrator, &token_id);
+
+            if !succeeded {
+                let after = snapshot();
+                if before != after {
+                    panic!(
+                        "[prop_invalid_predecessor_states_fail_atomically] failed op mutated state (seed=0x{:016X})",
+                        case_seed
+                    );
+                }
+            }
+
+            let allocation = client.get_fund_allocation(&token_id);
+            let balance = token_client.balance(&client.address);
+            if allocation.total_locked > balance {
+                panic!(
+                    "[prop_invalid_predecessor_states_fail_atomically] locked({}) > balance({}) after op (seed=0x{:016X})",
+                    allocation.total_locked, balance, case_seed
+                );
+            }
+        }
+    }
+}
 
 // ── Op executor ──────────────────────────────────────────────────────────────
 
@@ -612,7 +670,7 @@ fn run_op(
     admin: &Address,
     arbitrator: &Address,
     token_id: &Address,
-) {
+) -> bool {
     match op {
         EscrowOp::CreateEscrow {
             order_id,
@@ -621,6 +679,7 @@ fn run_op(
             same_party,
         } => {
             let s = if *same_party { buyer } else { seller };
+            matches!(client.try_create_escrow(buyer, s, token_id, amount, order_id, &Some(*release_window)), Ok(Ok(_)))
             let _ = client.try_create_escrow(
                 buyer,
                 s,
@@ -632,13 +691,14 @@ fn run_op(
         }
         EscrowOp::FundEscrow { .. } => {
             // Escrows are funded at creation in the test environment.
+            true
         }
         EscrowOp::ReleaseEscrow { order_id, .. } => {
-            let _ = client.try_release_funds(order_id);
+            matches!(client.try_release_funds(order_id), Ok(Ok(())))
         }
         EscrowOp::RefundEscrow { order_id, .. } => {
             let eid = *order_id as u64;
-            let _ = client.try_refund(&eid);
+            matches!(client.try_refund(&eid), Ok(Ok(())))
         }
         EscrowOp::DisputeEscrow {
             order_id,
@@ -649,6 +709,7 @@ fn run_op(
                 1 => seller,
                 _ => admin,
             };
+            matches!(client.try_dispute_escrow(order_id, &Symbol::new(env, "Reason"), caller), Ok(Ok(())))
             let _ = client.try_dispute_escrow(order_id, &Symbol::new(env, "Reason"), caller);
         }
         EscrowOp::ResolveDispute {
@@ -660,19 +721,20 @@ fn run_op(
             } else {
                 Resolution::RefundToBuyer
             };
-            let _ = client.try_resolve_dispute(order_id, &resolution, arbitrator);
+            matches!(client.try_resolve_dispute(order_id, &resolution, arbitrator), Ok(Ok(())))
         }
         EscrowOp::ResolveExpiredDispute { order_id } => {
-            let _ = client.try_resolve_expired_dispute(order_id);
+            matches!(client.try_resolve_expired_dispute(order_id), Ok(Ok(())))
         }
         EscrowOp::AutoRelease { order_id } => {
-            let _ = client.try_auto_release(order_id);
+            matches!(client.try_auto_release(order_id), Ok(Ok(())))
         }
         EscrowOp::AdvanceTime { seconds } => {
             advance_ledger_time(env, *seconds);
+            true
         }
         EscrowOp::OperateOnMissingEscrow => {
-            let _ = client.try_release_funds(&999_999u32);
+            matches!(client.try_release_funds(&999_999u32), Ok(Ok(())))
         }
     }
 }

@@ -47,6 +47,27 @@ fn make_upgrade_env() -> (Env, Address, Address, BytesN<32>) {
 
     let contract_id = env.register_contract(None, crate::CraftNexusContract);
     let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    let signer2 = Address::generate(&env);
+    let signers = sdk_vec![&env, admin.clone(), signer2.clone()];
+    client.set_upgrade_signers(&signers);
+    client.set_upgrade_threshold(&2);
+
+    // Submit one approval from admin — not yet committed under 2-of-2
+    client.propose_upgrade_wasm(&admin, &hash);
+
+    // Change threshold to 1 mid-round
+    client.set_upgrade_threshold(&1);
+
+    // The pending proposal must be unaffected by the threshold change,
+    // so it should still be uncommitted (needs the second approval).
+    let proposal = client.get_upgrade_proposal();
+    if proposal.is_some() {
+        panic!(
+            "[prop_threshold_change_mid_round_no_effect] threshold change affected an already-pending proposal"
+        );
+    }
+}ctClient::new(&env, &contract_id);
     client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None);
     client.set_min_release_window(&1);
     client.set_evidence_challenge_window(&0);
