@@ -15,7 +15,10 @@
 #![cfg(test)]
 extern crate alloc;
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String as SorobanString};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env, String as SorobanString,
+};
 
 use super::{
     generators::{generate_onboarding_sequence, OnboardingOp},
@@ -302,8 +305,7 @@ fn prop_onboarding_model_agreement() {
         let mut model = ModelState::new();
         let ops = generate_onboarding_sequence(&mut crng);
 
-        let users: alloc::vec::Vec<Address> =
-            (0..5).map(|_| Address::generate(&env)).collect();
+        let users: alloc::vec::Vec<Address> = (0..5).map(|_| Address::generate(&env)).collect();
         let mut user_idx = 0usize;
 
         for op in &ops {
@@ -342,6 +344,8 @@ fn prop_onboarding_model_agreement() {
                                 case_seed
                             );
                         }
+                        let _ =
+                            client.try_onboard_user(&users[0], &ss(&env, "dup"), &UserRole::Buyer);
                     }
                 }
                 OnboardingOp::VerifyUser => {

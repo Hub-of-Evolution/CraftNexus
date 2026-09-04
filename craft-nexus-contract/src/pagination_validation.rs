@@ -162,7 +162,10 @@ mod tests {
 
     #[test]
     fn limit_zero_returns_error() {
-        assert_eq!(validate_limit(0, MAX_PAGE_SIZE), Err(Error::PaginationLimitZero));
+        assert_eq!(
+            validate_limit(0, MAX_PAGE_SIZE),
+            Err(Error::PaginationLimitZero)
+        );
     }
 
     #[test]
@@ -196,7 +199,10 @@ mod tests {
     #[test]
     fn cursor_beyond_total_is_invalid() {
         assert_eq!(validate_cursor(11, 10), Err(Error::PaginationCursorInvalid));
-        assert_eq!(validate_cursor(u32::MAX, 10), Err(Error::PaginationCursorInvalid));
+        assert_eq!(
+            validate_cursor(u32::MAX, 10),
+            Err(Error::PaginationCursorInvalid)
+        );
     }
 
     #[test]

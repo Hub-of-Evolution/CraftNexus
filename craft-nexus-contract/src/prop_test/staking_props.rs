@@ -14,7 +14,10 @@
 #![cfg(test)]
 extern crate alloc;
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, token, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    token, Address, Env,
+};
 
 use super::{
     generators::{generate_staking_sequence, StakingOp},
@@ -293,19 +296,22 @@ fn prop_model_stake_queue_consistency() {
 
         for op in &ops {
             match op {
-                StakingOp::Stake { amount, wrong_token } => {
+                StakingOp::Stake {
+                    amount,
+                    wrong_token,
+                } => {
                     if *wrong_token {
                         continue; // token-mismatch tested separately
                     }
-                    let _ = model.stake(
-                        artisan_str.clone(),
-                        token_str.clone(),
-                        *amount,
-                        ledger_time,
-                    );
+                    let _ =
+                        model.stake(artisan_str.clone(), token_str.clone(), *amount, ledger_time);
                     let _ = client.try_stake_tokens(&artisan, &token_id, amount);
                 }
-                StakingOp::Unstake { before_cooldown, wrong_token, .. } => {
+                StakingOp::Unstake {
+                    before_cooldown,
+                    wrong_token,
+                    ..
+                } => {
                     if *wrong_token {
                         continue;
                     }

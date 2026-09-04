@@ -90,13 +90,11 @@ fn test_onboarding_attestation_rejects_forgery_and_replay() {
     client.onboard_user(&user, &String::from_str(&env, "attested"), &UserRole::Buyer);
     let operation_id = Bytes::from_slice(&env, b"operation-1");
 
-    let attestation = client.get_onboarding_attestation(
-        &user,
-        &operation_id,
-        &escrow_contract,
-    );
+    let attestation = client.get_onboarding_attestation(&user, &operation_id, &escrow_contract);
     assert!(client.validate_onboarding_attestation(&attestation));
-    assert!(client.try_validate_onboarding_attestation(&attestation).is_err());
+    assert!(client
+        .try_validate_onboarding_attestation(&attestation)
+        .is_err());
 
     let mut forged = attestation.clone();
     forged.role = UserRole::Artisan;
@@ -114,14 +112,12 @@ fn test_onboarding_attestation_becomes_stale_after_role_change() {
     let user = Address::generate(&env);
     client.onboard_user(&user, &String::from_str(&env, "revision"), &UserRole::Buyer);
     let operation_id = Bytes::from_slice(&env, b"operation-2");
-    let attestation = client.get_onboarding_attestation(
-        &user,
-        &operation_id,
-        &escrow_contract,
-    );
+    let attestation = client.get_onboarding_attestation(&user, &operation_id, &escrow_contract);
 
     client.update_user_role(&user, &UserRole::Artisan);
-    assert!(client.try_validate_onboarding_attestation(&attestation).is_err());
+    assert!(client
+        .try_validate_onboarding_attestation(&attestation)
+        .is_err());
 }
 
 // ===== Onboarding =====
@@ -259,7 +255,7 @@ fn test_idempotent_retry_repairs_missing_secondary_state() {
             .remove(&DataKey::Username(normalized.clone()));
         env.storage()
             .persistent()
-            .remove(&DataKey::UserStateVersion(user.clone()));
+            .remove(&DataKey::UserStateRevision(user.clone()));
     });
 
     let recovered = client.onboard_user(&user, &username, &UserRole::Buyer);
@@ -1574,6 +1570,192 @@ fn test_set_reputation_policy_rejects_invalid_decay_bps() {
     client.set_reputation_policy(&1_000u64, &10_001u32, &0u64, &0u64, &5u32);
 }
 
+// ============================================================
+// Issue #1082 – Deterministic Reputation Decay Policy
+// ============================================================
+
+/// Advance the ledger clock for deterministic decay assertions.
+fn set_ledger_time(env: &Env, ts: u64) {
+    env.ledger().with_mut(|li| {
+        li.timestamp = ts;
+    });
+}
+
+/// Decay applies exactly one bucket per `decay_interval_secs` of elapsed time,
+/// with floor integer arithmetic and no decay inside a partial bucket (#1082).
+#[test]
+fn test_decay_at_bucket_boundaries_is_deterministic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+
+    let user = Address::generate(&env);
+    let interval = DEFAULT_REPUTATION_DECAY_INTERVAL_SECS; // 30 days
+                                                           // retain_bps = 10_000 - 500 = 9500
+
+    // Seed at t0 with trust_score = 100.
+    set_ledger_time(&env, 1_000_000);
+    client.onboard_user(&user, &String::from_str(&env, "decayb"), &UserRole::Artisan);
+    client.update_reputation(&user, &100u32, &0u32);
+    assert_eq!(client.get_trust_score(&user), 100);
+
+    // t0 + 1 bucket: 100 * 9500 / 10000 = 95
+    set_ledger_time(&env, 1_000_000 + interval);
+    assert_eq!(client.get_trust_score(&user), 95);
+
+    // t0 + 2 buckets: 95 * 9500 / 10000 = 90 (floor of 90.25)
+    set_ledger_time(&env, 1_000_000 + 2 * interval);
+    assert_eq!(client.get_trust_score(&user), 90);
+
+    // t0 + 3 buckets: 90 * 9500 / 10000 = 85 (floor of 85.5)
+    set_ledger_time(&env, 1_000_000 + 3 * interval);
+    assert_eq!(client.get_trust_score(&user), 85);
+
+    // Inside the next bucket (one second before the boundary) → no further decay.
+    set_ledger_time(&env, 1_000_000 + 4 * interval - 1);
+    assert_eq!(client.get_trust_score(&user), 85);
+
+    // Exactly at the boundary → one more decay: 85 * 9500 / 10000 = 80 (80.75)
+    set_ledger_time(&env, 1_000_000 + 4 * interval);
+    assert_eq!(client.get_trust_score(&user), 80);
+}
+
+/// Repeated reads at the same ledger time always return the same score, and
+/// replaying the same history reproduces the same score (#1082 determinism).
+#[test]
+fn test_decay_is_deterministic_and_reproducible() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+
+    let user = Address::generate(&env);
+    let interval = DEFAULT_REPUTATION_DECAY_INTERVAL_SECS;
+
+    set_ledger_time(&env, 5_000_000);
+    client.onboard_user(&user, &String::from_str(&env, "decayr"), &UserRole::Artisan);
+    client.update_reputation(&user, &200u32, &0u32);
+
+    // Jump forward 7 buckets.
+    set_ledger_time(&env, 5_000_000 + 7 * interval);
+
+    let a = client.get_trust_score(&user);
+    let b = client.get_trust_score(&user); // same ledger time, second read
+    let c = client.get_trust_score(&user); // third read
+    assert_eq!(a, b);
+    assert_eq!(b, c);
+    assert!(a < 200, "decay must reduce the score");
+    assert!(a > 0, "decay must not underflow to nothing here");
+
+    // Replay the identical history on a fresh user → identical final score.
+    let user2 = Address::generate(&env);
+    set_ledger_time(&env, 5_000_000);
+    client.onboard_user(
+        &user2,
+        &String::from_str(&env, "decayr2"),
+        &UserRole::Artisan,
+    );
+    client.update_reputation(&user2, &200u32, &0u32);
+    set_ledger_time(&env, 5_000_000 + 7 * interval);
+    assert_eq!(client.get_trust_score(&user2), a);
+}
+
+/// Decay can never underflow below zero nor create score from nothing (#1082).
+#[test]
+fn test_decay_never_underflows_or_inflates() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+
+    let user = Address::generate(&env);
+    let interval = DEFAULT_REPUTATION_DECAY_INTERVAL_SECS;
+
+    set_ledger_time(&env, 3_000_000);
+    client.onboard_user(&user, &String::from_str(&env, "decayu"), &UserRole::Artisan);
+    client.update_reputation(&user, &1u32, &0u32); // smallest possible score
+
+    // One bucket: 1 * 9500 / 10000 = 0 → score collapses, never negative.
+    set_ledger_time(&env, 3_000_000 + interval);
+    assert_eq!(client.get_trust_score(&user), 0);
+
+    // Even after enormous idle time it stays at 0 (no underflow, no inflation).
+    set_ledger_time(&env, 3_000_000 + 1000 * interval);
+    assert_eq!(client.get_trust_score(&user), 0);
+
+    // Disputes can only reduce further or hold at 0; they never mint trust.
+    client.update_reputation(&user, &0u32, &5u32);
+    assert_eq!(client.get_trust_score(&user), 0);
+}
+
+/// The scheduled application (`apply_reputation_decay_now`) produces the same
+/// decayed score as the lazy read path at the same ledger time (#1082).
+#[test]
+fn test_scheduled_decay_matches_lazy_decay() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+
+    let user = Address::generate(&env);
+    let interval = DEFAULT_REPUTATION_DECAY_INTERVAL_SECS;
+
+    set_ledger_time(&env, 9_000_000);
+    client.onboard_user(&user, &String::from_str(&env, "decays"), &UserRole::Artisan);
+    client.update_reputation(&user, &50u32, &0u32);
+
+    set_ledger_time(&env, 9_000_000 + 5 * interval);
+
+    // Scheduled evaluation applies and persists the same decayed value.
+    let scheduled = client.apply_reputation_decay_now(&user);
+    // Lazy read at the identical ledger time must agree (no further elapsed time).
+    let lazy = client.get_trust_score(&user);
+    assert_eq!(scheduled, lazy);
+    // 50 * 9500 / 10000 = 475000 / 10000 = 47 (floor).
+    assert_eq!(lazy, 47);
+}
+
+/// A single evaluation is CPU-bounded by [`MAX_DECAY_INTERVALS_PER_CALL`]; any
+/// remaining elapsed buckets are carried forward on the next evaluation, so the
+/// decay is applied in full over time yet never oversteps the per-call budget.
+#[test]
+fn test_decay_cap_is_carried_forward() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    set_permissive_reputation_policy(&client);
+
+    let user = Address::generate(&env);
+    let interval = DEFAULT_REPUTATION_DECAY_INTERVAL_SECS;
+
+    set_ledger_time(&env, 2_000_000);
+    client.onboard_user(&user, &String::from_str(&env, "decayc"), &UserRole::Artisan);
+    client.update_reputation(&user, &100u32, &0u32);
+
+    // Jump far beyond the per-call cap (64 buckets).
+    let elapsed = (MAX_DECAY_INTERVALS_PER_CALL + 10) * interval;
+    set_ledger_time(&env, 2_000_000 + elapsed);
+
+    let first = client.get_trust_score(&user);
+    assert!(first > 0, "capped decay still leaves residual trust");
+    assert!(first < 100, "decay must have reduced the score");
+
+    // A second read at the SAME ledger time carries the remaining 10 buckets
+    // forward; the score keeps decreasing deterministically.
+    let second = client.get_trust_score(&user);
+    assert!(second < first);
+
+    // A third read at the same time: nothing left to apply → stable.
+    let third = client.get_trust_score(&user);
+    assert_eq!(second, third);
+}
+
 #[test]
 fn test_get_user_migrates_legacy_profile() {
     let env = Env::default();
@@ -1834,6 +2016,33 @@ fn test_change_username_fee_requires_token_configuration() {
     client.set_username_change_fee(&1_000_000);
 
     client.change_username(&user, &String::from_str(&env, "still_needs_fee"));
+}
+
+#[test]
+#[should_panic]
+fn test_change_username_fee_transfer_failure_leaves_state_unchanged() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_test(&env);
+    let user = Address::generate(&env);
+    let fee_wallet = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+
+    // User has 0 balance, so fee transfer will fail
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "fee_user_no_bal"),
+        &UserRole::Buyer,
+    );
+    client.set_username_change_fee(&1_000_000);
+    client.set_username_fee_token(&token_contract.address());
+    client.set_username_fee_wallet(&fee_wallet);
+
+    // This should panic with TokenTransferFailed
+    client.change_username(&user, &String::from_str(&env, "new_username_attempt"));
 }
 
 #[test]
@@ -3290,9 +3499,7 @@ fn test_attempt_rate_policy_revision_advances() {
     let (client, _) = setup_test(&env);
 
     assert_eq!(client.get_attempt_rate_policy().revision, 1);
-    let updated = client.set_attempt_rate_policy(
-        &60u64, &2u32, &10u32, &120u64, &3u32, &20u32,
-    );
+    let updated = client.set_attempt_rate_policy(&60u64, &2u32, &10u32, &120u64, &3u32, &20u32);
     assert_eq!(updated.revision, 2);
     assert_eq!(client.get_attempt_rate_policy(), updated);
 }
@@ -3573,16 +3780,9 @@ fn test_sybil_review_rejects_unauthorized_and_stale_decisions() {
     let review = client.get_sybil_review(&user).unwrap();
 
     assert!(client
-        .try_decide_sybil_review(
-            &unauthorized,
-            &user,
-            &review.profile_revision,
-            &true,
-        )
+        .try_decide_sybil_review(&unauthorized, &user, &review.profile_revision, &true,)
         .is_err());
-    assert!(client
-        .try_process_review(&user, &true)
-        .is_ok());
+    assert!(client.try_process_review(&user, &true).is_ok());
     assert_eq!(client.get_user(&user).status, ProfileStatus::Active);
 
     client.flag_suspicious_profile(&user, &703u32, &600u64);
@@ -3622,7 +3822,8 @@ fn test_sybil_rejection_appeal_and_expiry_remain_restricted() {
     assert_eq!(appealed.appeal_count, 1);
     assert!(client.try_request_verification(&user).is_err());
 
-    env.ledger().with_mut(|li| li.timestamp = appealed.expires_at);
+    env.ledger()
+        .with_mut(|li| li.timestamp = appealed.expires_at);
     client.expire_sybil_review(&user, &appealed.profile_revision);
     assert_eq!(client.get_user(&user).status, ProfileStatus::Flagged);
     assert_eq!(
