@@ -532,11 +532,8 @@ fn test_expired_dispute_cannot_be_resolved_through_another_path() {
         li.timestamp += DEFAULT_MAX_DISPUTE_DURATION as u64;
     });
 
-    let resolve = client.try_resolve_dispute(
-        &order_id,
-        &crate::Resolution::RefundToBuyer,
-        &arbitrator,
-    );
+    let resolve =
+        client.try_resolve_dispute(&order_id, &crate::Resolution::RefundToBuyer, &arbitrator);
     assert!(resolve.is_err());
     assert!(client.try_accept_partial_refund(&order_id).is_err());
 

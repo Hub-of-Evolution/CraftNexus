@@ -1,6 +1,8 @@
 {
   "struct": "ArtisanFeeTierUpdatedEvent",
+  "schema_version": 1,
   "fields": [
+    {"name": "schema_version", "type": "u32"},
     {"name": "artisan", "type": "Address"},
     {"name": "fee_bps", "type": "u32"}
   ]

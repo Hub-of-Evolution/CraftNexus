@@ -54,7 +54,7 @@ fn setup_enhanced_test(
     let token_admin_client = token::StellarAssetClient::new(env, &token_contract.address());
 
     // Onboard users
-    onboarding_client.onboard_user(&buyer, &String::from_str($env, "buyer"), &UserRole::Buyer);
+    onboarding_client.onboard_user(&buyer, &String::from_str(env, "buyer"), &UserRole::Buyer);
     onboarding_client.onboard_user(
         &artisan,
         &String::from_str(env, "artisan"),
@@ -91,7 +91,7 @@ fn test_recurring_escrow_lifecycle() {
     assert!(escrow.has_active_escrows(&artisan));
 
     // 2. Release 1st Cycle (after frequency)
-    env.ledger().with_mut(|li | li.timestamp = 3601);
+    env.ledger().with_mut(|li| li.timestamp = 3601);
     escrow.release_next_cycle(&rec_escrow.id);
 
     let token_client = token::Client::new(&env, &token_id);
@@ -105,7 +105,7 @@ fn test_recurring_escrow_lifecycle() {
     assert!(updated.is_active);
 
     // 3. Release 2nd Cycle
-    env.ledger().with_mut(|li | li.timestamp = 7202);
+    env.ledger().with_mut(|li| li.timestamp = 7202);
     escrow.release_next_cycle(&rec_escrow.id);
 
     assert_eq!(token_client.balance(&artisan), 950);
@@ -206,7 +206,7 @@ fn test_reactivate_profile_success() {
     let (_, onboarding, buyer, _, _, _, _, _) = setup_enhanced_test(&env);
 
     onboarding.deactivate_profile(&buyer);
-    assert_eq)(
+    assert_eq!(
         onboarding.get_user(&buyer).status,
         ProfileStatus::Deactivated
     );
@@ -296,7 +296,8 @@ fn test_cross_token_escrow_refund_rejected() {
 #[should_panic(expected = "Token mismatch")]
 fn test_cross_token_platform_withdrawal_rejected() {
     let env = Env::default();
-    let (escrow, _, buyer, artisan, token_id, token_admin, platform_wallet, _) = setup_enhanced_test(&env);
+    let (escrow, _, buyer, artisan, token_id, token_admin, platform_wallet, _) =
+        setup_enhanced_test(&env);
     token_admin.mint(&buyer, &1000);
 
     let other_token_admin = Address::generate(&env);

@@ -1,0 +1,12 @@
+{
+  "struct": "AttemptRateLimitedEvent",
+  "schema_version": 1,
+  "fields": [
+    {"name": "schema_version", "type": "u32"},
+    {"name": "user", "type": "Address"},
+    {"name": "operation", "type": "Symbol"},
+    {"name": "scope", "type": "Symbol"},
+    {"name": "policy_revision", "type": "u32"},
+    {"name": "retry_after", "type": "u64"}
+  ]
+}

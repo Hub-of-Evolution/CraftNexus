@@ -1,10 +1,10 @@
 {
-  "struct": "UserOnboardedEvent",
+  "struct": "AutoVerifiedEvent",
   "schema_version": 1,
   "fields": [
     {"name": "schema_version", "type": "u32"},
     {"name": "user", "type": "Address"},
-    {"name": "username", "type": "String"},
-    {"name": "role", "type": "UserRole"}
+    {"name": "escrow_count", "type": "u32"},
+    {"name": "volume", "type": "u64"}
   ]
 }

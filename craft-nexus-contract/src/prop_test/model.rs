@@ -34,9 +34,7 @@ impl ModelEscrowStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            ModelEscrowStatus::Released
-                | ModelEscrowStatus::Refunded
-                | ModelEscrowStatus::Resolved
+            ModelEscrowStatus::Released | ModelEscrowStatus::Refunded | ModelEscrowStatus::Resolved
         )
     }
 }
@@ -119,7 +117,9 @@ impl ModelArtisanStake {
 
     /// True if at least one deposit can be unstaked at `now`.
     pub fn has_matured(&self, now: u64) -> bool {
-        self.queue.iter().any(|d| crate::time_policy::is_deadline_reached(now, d.cooldown_end))
+        self.queue
+            .iter()
+            .any(|d| crate::time_policy::is_deadline_reached(now, d.cooldown_end))
     }
 
     /// Sum of matured amounts at `now`.
@@ -386,11 +386,7 @@ impl ModelState {
     }
 
     /// Force-resolve an expired dispute (anyone, after deadline).
-    pub fn resolve_expired_dispute(
-        &mut self,
-        order_id: u32,
-        now: u64,
-    ) -> Result<(), ModelError> {
+    pub fn resolve_expired_dispute(&mut self, order_id: u32, now: u64) -> Result<(), ModelError> {
         let escrow = self
             .escrows
             .get_mut(&order_id)
@@ -506,7 +502,11 @@ impl ModelState {
         }
         // Cancel-repropose cooldown check
         if let Some(cancelled_at) = self.last_cancel_at {
-            if crate::time_policy::is_window_active(now, cancelled_at, crate::time_policy::CANCEL_REPROPOSE_COOLDOWN) {
+            if crate::time_policy::is_window_active(
+                now,
+                cancelled_at,
+                crate::time_policy::CANCEL_REPROPOSE_COOLDOWN,
+            ) {
                 return Err(ModelError::UpgradeCooldownActive);
             }
         }
@@ -552,11 +552,7 @@ impl ModelState {
 
     // ── Onboarding transitions ────────────────────────────────────────────────
 
-    pub fn onboard_user(
-        &mut self,
-        address: String,
-        role: ModelUserRole,
-    ) -> Result<(), ModelError> {
+    pub fn onboard_user(&mut self, address: String, role: ModelUserRole) -> Result<(), ModelError> {
         if self.is_paused {
             return Err(ModelError::ContractPaused);
         }

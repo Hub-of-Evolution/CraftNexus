@@ -185,7 +185,12 @@ impl PropHarness {
                      Failure   : {}\n\
                      \n\
                      Reproduce with: PROP_SEED=0x{:016X} cargo test --features testutils prop_",
-                    i + 1, self.seed, case_seed, i, msg, case_seed
+                    i + 1,
+                    self.seed,
+                    case_seed,
+                    i,
+                    msg,
+                    case_seed
                 );
             }
         }
@@ -233,11 +238,8 @@ impl PropHarness {
 
     /// Run `case_count` cases with model-based shrinking that reports the first
     /// violated invariant and state transition details.
-    pub fn run_model_sequence<Op, Gen, Exec>(
-        &self,
-        mut generate: Gen,
-        mut execute: Exec,
-    ) where
+    pub fn run_model_sequence<Op, Gen, Exec>(&self, mut generate: Gen, mut execute: Exec)
+    where
         Op: Clone + core::fmt::Debug,
         Gen: FnMut(&mut Lcg64) -> alloc::vec::Vec<super::generators::ShrinkableOp<Op>>,
         Exec: FnMut(&[super::generators::ShrinkableOp<Op>]) -> Result<InvariantReport, String>,
@@ -249,16 +251,18 @@ impl PropHarness {
             let ops = generate(&mut case_rng);
             match execute(&ops) {
                 Err(msg) => {
-                    let minimized = super::generators::shrink_model_based(ops.clone(), |c| {
-                        execute(c).is_err()
-                    });
+                    let minimized =
+                        super::generators::shrink_model_based(ops.clone(), |c| execute(c).is_err());
                     let steps: String = minimized
                         .iter()
                         .enumerate()
                         .map(|(j, sop)| {
                             alloc::format!(
                                 "  {}: actor={}, time={}, op={:?}\n",
-                                j, sop.actor_id, sop.timestamp, sop.op
+                                j,
+                                sop.actor_id,
+                                sop.timestamp,
+                                sop.op
                             )
                         })
                         .collect();
@@ -284,16 +288,20 @@ impl PropHarness {
                     );
                 }
                 Ok(report) if report.has_violation() => {
-                    let minimized = super::generators::shrink_model_based(ops.clone(), |c| {
-                        matches!(execute(c), Ok(r) if r.has_violation())
-                    });
+                    let minimized = super::generators::shrink_model_based(
+                        ops.clone(),
+                        |c| matches!(execute(c), Ok(r) if r.has_violation()),
+                    );
                     let steps: String = minimized
                         .iter()
                         .enumerate()
                         .map(|(j, sop)| {
                             alloc::format!(
                                 "  {}: actor={}, time={}, op={:?}\n",
-                                j, sop.actor_id, sop.timestamp, sop.op
+                                j,
+                                sop.actor_id,
+                                sop.timestamp,
+                                sop.op
                             )
                         })
                         .collect();

@@ -256,28 +256,28 @@ mod tests {
     fn window_elapsed_basic() {
         // Window: start=100, duration=50 → deadline=150
         assert!(!is_window_elapsed(149, 100, 50)); // 1 second before deadline
-        assert!(is_window_elapsed(150, 100, 50));  // exactly at deadline (inclusive)
-        assert!(is_window_elapsed(151, 100, 50));  // 1 second after deadline
+        assert!(is_window_elapsed(150, 100, 50)); // exactly at deadline (inclusive)
+        assert!(is_window_elapsed(151, 100, 50)); // 1 second after deadline
         assert!(!is_window_elapsed(100, 100, 50)); // at start (duration not elapsed)
     }
 
     #[test]
     fn window_active_basic() {
-        assert!(is_window_active(149, 100, 50));  // still active 1s before deadline
+        assert!(is_window_active(149, 100, 50)); // still active 1s before deadline
         assert!(!is_window_active(150, 100, 50)); // closed at deadline
         assert!(!is_window_active(151, 100, 50)); // closed after deadline
-        assert!(is_window_active(100, 100, 50));  // open at start
-        assert!(is_window_active(99, 100, 50));   // before start but still < deadline → not yet elapsed
+        assert!(is_window_active(100, 100, 50)); // open at start
+        assert!(is_window_active(99, 100, 50)); // before start but still < deadline → not yet elapsed
     }
 
     #[test]
     fn within_window_boundary() {
         // start=100, duration=50 → valid for [100, 150)
-        assert!(!is_within_window(99, 100, 50));   // before start
-        assert!(is_within_window(100, 100, 50));    // at start (inclusive)
-        assert!(is_within_window(125, 100, 50));    // in the middle
-        assert!(is_within_window(149, 100, 50));    // at deadline-1 → still in window
-        assert!(!is_within_window(150, 100, 50));   // at deadline (closed)
+        assert!(!is_within_window(99, 100, 50)); // before start
+        assert!(is_within_window(100, 100, 50)); // at start (inclusive)
+        assert!(is_within_window(125, 100, 50)); // in the middle
+        assert!(is_within_window(149, 100, 50)); // at deadline-1 → still in window
+        assert!(!is_within_window(150, 100, 50)); // at deadline (closed)
     }
 
     #[test]

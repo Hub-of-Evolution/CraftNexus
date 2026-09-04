@@ -16,7 +16,10 @@
 #![cfg(test)]
 extern crate alloc;
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, vec as sdk_vec, Address, BytesN, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    vec as sdk_vec, Address, BytesN, Env,
+};
 
 use super::{
     generators::{generate_upgrade_sequence, UpgradeOp},
@@ -184,7 +187,9 @@ fn prop_duplicate_proposal_rejected() {
     let hash2: BytesN<32> = BytesN::from_array(&env, &[5u8; 32]);
     let r = client.try_propose_upgrade_wasm(&admin, &hash2);
     if r.is_ok() && r.unwrap().is_ok() {
-        panic!("[prop_duplicate_proposal_rejected] second proposal accepted while first is pending");
+        panic!(
+            "[prop_duplicate_proposal_rejected] second proposal accepted while first is pending"
+        );
     }
 }
 
@@ -291,18 +296,14 @@ fn prop_multisig_threshold_enforced() {
     client.propose_upgrade_wasm(&admin, &hash);
     let proposal = client.get_upgrade_proposal();
     if proposal.is_some() {
-        panic!(
-            "[prop_multisig_threshold_enforced] proposal committed after only 1 of 2 approvals"
-        );
+        panic!("[prop_multisig_threshold_enforced] proposal committed after only 1 of 2 approvals");
     }
 
     // Even after cooldown, execute should fail since proposal was never committed
     advance_ledger_time(&env, WASM_COOLDOWN + 1);
     let r = client.try_execute_upgrade(&hash);
     if r.is_ok() && r.unwrap().is_ok() {
-        panic!(
-            "[prop_multisig_threshold_enforced] execute succeeded with only 1 of 2 approvals"
-        );
+        panic!("[prop_multisig_threshold_enforced] execute succeeded with only 1 of 2 approvals");
     }
 }
 
@@ -380,10 +381,6 @@ fn prop_upgrade_history_grows() {
         );
     }
 }
-
-
-#![cfg(test)]
-extern crate alloc;
 
 use super::*;
 use soroban_sdk::{
@@ -940,7 +937,10 @@ fn test_escrow_state_diagnostic_flags_pending_orphans() {
 
     let diagnostic = client.diagnose_escrow_state(&1);
     assert!(!diagnostic.is_consistent);
-    assert_eq!(diagnostic.issue, EscrowStateIssue::PendingTransitionUnfinished);
+    assert_eq!(
+        diagnostic.issue,
+        EscrowStateIssue::PendingTransitionUnfinished
+    );
 }
 
 #[test]
@@ -2696,7 +2696,10 @@ fn test_upgrade_requires_compatibility_manifest() {
     });
 
     let result = client.try_execute_upgrade(&wasm_hash);
-    assert!(matches!(result, Err(Ok(Error::UpgradeCompatibilityMissing))));
+    assert!(matches!(
+        result,
+        Err(Ok(Error::UpgradeCompatibilityMissing))
+    ));
 }
 
 #[test]
@@ -2725,9 +2728,7 @@ fn test_upgrade_manifest_is_recorded_and_consumed() {
     client.propose_upgrade_wasm(&admin, &wasm_hash);
     client.submit_compat_manifest(&wasm_hash, &manifest);
     assert_eq!(
-        client
-            .get_upgrade_compat_manifest(&wasm_hash)
-            .unwrap(),
+        client.get_upgrade_compat_manifest(&wasm_hash).unwrap(),
         manifest
     );
 
@@ -2736,16 +2737,11 @@ fn test_upgrade_manifest_is_recorded_and_consumed() {
     });
     client.execute_upgrade(&wasm_hash);
 
-    let record = client
-        .get_upgrade_compat_history()
-        .last()
-        .unwrap();
+    let record = client.get_upgrade_compat_history().last().unwrap();
     assert_eq!(record.from_version, 1);
     assert_eq!(record.to_version, 2);
     assert_eq!(record.state_commitment, commitment);
-    assert!(client
-        .get_upgrade_compat_manifest(&wasm_hash)
-        .is_none());
+    assert!(client.get_upgrade_compat_manifest(&wasm_hash).is_none());
 }
 
 #[test]
@@ -7246,7 +7242,10 @@ mod onboarding_state_consistency {
             &1u32,
             &Some(3600u32),
         );
-        assert!(result.is_ok(), "active users should be allowed to create escrow");
+        assert!(
+            result.is_ok(),
+            "active users should be allowed to create escrow"
+        );
     }
 
     // ── Acceptance criterion 2: deactivated profile blocks escrow creation ─
@@ -7472,8 +7471,14 @@ mod reconciliation_report_tests {
             report.tracked_staked, 0,
             "tracked_staked should be zero on empty state"
         );
-        assert_eq!(report.complete, true, "report should be complete on empty state");
-        assert_eq!(report.unresolved, false, "report should have no discrepancy");
+        assert_eq!(
+            report.complete, true,
+            "report should be complete on empty state"
+        );
+        assert_eq!(
+            report.unresolved, false,
+            "report should have no discrepancy"
+        );
     }
 
     /// Test 2: Distinguishes between locked and staked categories
@@ -7526,7 +7531,7 @@ mod reconciliation_report_tests {
     fn test_extra_funds_no_discrepancy() {
         let env = Env::default();
         let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
-        
+
         // Mint excess funds to contract
         let excess_amount = 10_000_000i128;
         token_admin_client.mint(&client.address, &excess_amount);
@@ -7544,11 +7549,10 @@ mod reconciliation_report_tests {
             &None,
         );
 
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
-        assert_eq!(
-            report.complete, true,
-            "should complete on small dataset"
-        );
+        let report = client
+            .query_reconciliation_report(&token_id, &0, &50)
+            .unwrap();
+        assert_eq!(report.complete, true, "should complete on small dataset");
         // Extra funds are OK, so unresolved should be false
         assert_eq!(
             report.unresolved, false,
@@ -7579,11 +7583,10 @@ mod reconciliation_report_tests {
         // Now artificially drain the contract balance (simulating a loss)
         // We do this by directly manipulating tracked totals in storage for test purposes
         // In production, this would indicate a real discrepancy
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
-        assert_eq!(
-            report.complete, true,
-            "query should complete"
-        );
+        let report = client
+            .query_reconciliation_report(&token_id, &0, &50)
+            .unwrap();
+        assert_eq!(report.complete, true, "query should complete");
         // With sufficient balance (escrow was funded), unresolved should be false
         assert_eq!(
             report.unresolved, false,
@@ -7614,8 +7617,13 @@ mod reconciliation_report_tests {
         }
 
         // First page: 50 escrows
-        let page1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
-        assert_eq!(page1.scanned_escrows, 50, "first page should scan 50 escrows");
+        let page1 = client
+            .query_reconciliation_report(&token_id, &0, &50)
+            .unwrap();
+        assert_eq!(
+            page1.scanned_escrows, 50,
+            "first page should scan 50 escrows"
+        );
         assert_eq!(page1.complete, false, "first page should not be complete");
         assert_eq!(
             page1.next_cursor, 50,
@@ -7626,11 +7634,13 @@ mod reconciliation_report_tests {
         let page2 = client
             .query_reconciliation_report(&token_id, &page1.next_cursor, &50)
             .unwrap();
-        assert_eq!(page2.scanned_escrows, 10, "second page should scan 10 escrows");
+        assert_eq!(
+            page2.scanned_escrows, 10,
+            "second page should scan 10 escrows"
+        );
         assert_eq!(page2.complete, true, "second page should be complete");
         assert_eq!(
-            page2.expected_locked,
-            60_000i128,
+            page2.expected_locked, 60_000i128,
             "total locked across pages should match all escrows"
         );
     }
@@ -7657,12 +7667,17 @@ mod reconciliation_report_tests {
         }
 
         // Request page_size=200, should be capped at 100
-        let report = client.query_reconciliation_report(&token_id, &0, &200).unwrap();
+        let report = client
+            .query_reconciliation_report(&token_id, &0, &200)
+            .unwrap();
         assert_eq!(
             report.scanned_escrows, 100,
             "page_size should be capped at MAX_PAGE_SIZE"
         );
-        assert_eq!(report.complete, false, "should not be complete with capped page");
+        assert_eq!(
+            report.complete, false,
+            "should not be complete with capped page"
+        );
     }
 
     /// Test 7: Recurring escrows are included in first page only
@@ -7687,12 +7702,17 @@ mod reconciliation_report_tests {
         );
 
         // Query first page
-        let page1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let page1 = client
+            .query_reconciliation_report(&token_id, &0, &50)
+            .unwrap();
         assert!(
             page1.expected_locked > 0,
             "first page should include recurring escrow"
         );
-        assert_eq!(page1.complete, true, "should complete with one recurring escrow");
+        assert_eq!(
+            page1.complete, true,
+            "should complete with one recurring escrow"
+        );
     }
 
     /// Test 8: Report is read-only (no storage writes)
@@ -7705,18 +7725,16 @@ mod reconciliation_report_tests {
 
         // Create escrow
         client.create_escrow_with_metadata(
-            &buyer,
-            &seller,
-            &token_id,
-            &5_000i128,
-            &1u32,
-            &None,
-            &None,
+            &buyer, &seller, &token_id, &5_000i128, &1u32, &None, &None,
         );
 
         // Query multiple times
-        let report1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
-        let report2 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report1 = client
+            .query_reconciliation_report(&token_id, &0, &50)
+            .unwrap();
+        let report2 = client
+            .query_reconciliation_report(&token_id, &0, &50)
+            .unwrap();
 
         // Both should be identical (no state changed)
         assert_eq!(
@@ -7745,17 +7763,13 @@ mod reconciliation_report_tests {
         let amount = 5_000i128;
         let order_id = 1u32;
         client.create_escrow_with_metadata(
-            &buyer,
-            &seller,
-            &token_id,
-            &amount,
-            &order_id,
-            &None,
-            &None,
+            &buyer, &seller, &token_id, &amount, &order_id, &None, &None,
         );
 
         // Query should include the Active escrow
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report = client
+            .query_reconciliation_report(&token_id, &0, &50)
+            .unwrap();
         assert_eq!(
             report.expected_locked, amount,
             "should include Active escrow"

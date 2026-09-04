@@ -105,7 +105,9 @@ impl FinancialSnapshot {
         if self.contract_balance < obligations {
             return Err(alloc::format!(
                 "Conservation violation: balance {} < locked {} + staked {}",
-                self.contract_balance, self.total_locked, self.total_staked
+                self.contract_balance,
+                self.total_locked,
+                self.total_staked
             ));
         }
         Ok(())
@@ -125,7 +127,8 @@ impl FinancialSnapshot {
         if total_before != total_after {
             return Err(alloc::format!(
                 "Supply changed: before {} → after {}",
-                total_before, total_after
+                total_before,
+                total_after
             ));
         }
         Ok(())
@@ -172,37 +175,43 @@ impl ConservationProof {
         if actual_locked_delta != self.expected.locked_delta {
             return Err(alloc::format!(
                 "Locked delta mismatch: expected {}, got {}",
-                self.expected.locked_delta, actual_locked_delta
+                self.expected.locked_delta,
+                actual_locked_delta
             ));
         }
         if actual_staked_delta != self.expected.staked_delta {
             return Err(alloc::format!(
                 "Staked delta mismatch: expected {}, got {}",
-                self.expected.staked_delta, actual_staked_delta
+                self.expected.staked_delta,
+                actual_staked_delta
             ));
         }
         if actual_fees_delta != self.expected.fees_delta {
             return Err(alloc::format!(
                 "Fees delta mismatch: expected {}, got {}",
-                self.expected.fees_delta, actual_fees_delta
+                self.expected.fees_delta,
+                actual_fees_delta
             ));
         }
         if actual_buyer_delta != self.expected.buyer_delta {
             return Err(alloc::format!(
                 "Buyer delta mismatch: expected {}, got {}",
-                self.expected.buyer_delta, actual_buyer_delta
+                self.expected.buyer_delta,
+                actual_buyer_delta
             ));
         }
         if actual_seller_delta != self.expected.seller_delta {
             return Err(alloc::format!(
                 "Seller delta mismatch: expected {}, got {}",
-                self.expected.seller_delta, actual_seller_delta
+                self.expected.seller_delta,
+                actual_seller_delta
             ));
         }
         if actual_platform_delta != self.expected.platform_delta {
             return Err(alloc::format!(
                 "Platform delta mismatch: expected {}, got {}",
-                self.expected.platform_delta, actual_platform_delta
+                self.expected.platform_delta,
+                actual_platform_delta
             ));
         }
 
@@ -278,11 +287,13 @@ fn conservation_create_and_fund_escrow() {
     let amount = 10_000_000i128;
     let order_id = 100u32;
 
-    let before = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let before =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
 
-    let after = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let after =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     let proof = ConservationProof {
         before,
@@ -308,11 +319,13 @@ fn conservation_release_to_seller() {
 
     client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
 
-    let before = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let before =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     client.release_funds(&order_id);
 
-    let after = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let after =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     // Fee is 5% = 500_000; seller gets 9_500_000
     let fee = amount * 500 / 10_000;
@@ -344,12 +357,14 @@ fn conservation_refund_to_buyer() {
 
     client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
 
-    let before = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let before =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     let eid = order_id as u64;
     client.refund(&eid);
 
-    let after = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let after =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     let proof = ConservationProof {
         before,
@@ -376,11 +391,13 @@ fn conservation_dispute_resolve_to_seller() {
     client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
     client.raise_dispute(&order_id, &buyer);
 
-    let before = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let before =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     client.resolve_dispute(&order_id, &Resolution::ReleaseToSeller, &arbitrator);
 
-    let after = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let after =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     let fee = amount * 500 / 10_000;
     let seller_amount = amount - fee;
@@ -397,7 +414,9 @@ fn conservation_dispute_resolve_to_seller() {
         },
     };
 
-    proof.verify().expect("Dispute resolve to seller conservation");
+    proof
+        .verify()
+        .expect("Dispute resolve to seller conservation");
 }
 
 #[test]
@@ -412,11 +431,13 @@ fn conservation_dispute_resolve_to_buyer() {
     client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
     client.raise_dispute(&order_id, &buyer);
 
-    let before = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let before =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     client.resolve_dispute(&order_id, &Resolution::RefundToBuyer, &arbitrator);
 
-    let after = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let after =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     let proof = ConservationProof {
         before,
@@ -428,7 +449,9 @@ fn conservation_dispute_resolve_to_buyer() {
         },
     };
 
-    proof.verify().expect("Dispute resolve to buyer conservation");
+    proof
+        .verify()
+        .expect("Dispute resolve to buyer conservation");
 }
 
 #[test]
@@ -443,12 +466,14 @@ fn conservation_cancel_unfunded_escrow() {
     // Create but don't fund (needs external mock setup, simplified here)
     // For this test, we simulate a cancel path that doesn't affect balances
 
-    let before = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let before =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     // Cancel would be: client.cancel_unfunded_escrow(&order_id, &admin);
     // Since we can't create unfunded in this simple test, we verify the pattern
 
-    let after = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let after =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     let proof = ConservationProof {
         before,
@@ -469,11 +494,25 @@ fn conservation_stake_tokens() {
 
     let stake_amount = 5_000_000i128;
 
-    let before = FinancialSnapshot::capture(&env, &client, &token_id, &artisan, &seller, &platform_wallet);
+    let before = FinancialSnapshot::capture(
+        &env,
+        &client,
+        &token_id,
+        &artisan,
+        &seller,
+        &platform_wallet,
+    );
 
     client.stake_tokens(&artisan, &token_id, &stake_amount);
 
-    let after = FinancialSnapshot::capture(&env, &client, &token_id, &artisan, &seller, &platform_wallet);
+    let after = FinancialSnapshot::capture(
+        &env,
+        &client,
+        &token_id,
+        &artisan,
+        &seller,
+        &platform_wallet,
+    );
 
     // Note: artisan balance comes from buyer field in snapshot for simplicity
     let proof = ConservationProof {
@@ -507,11 +546,25 @@ fn conservation_unstake_after_cooldown() {
     // Advance past cooldown (7 days default)
     advance_ledger_time(&env, 7 * 86_400 + 1);
 
-    let before = FinancialSnapshot::capture(&env, &client, &token_id, &artisan, &seller, &platform_wallet);
+    let before = FinancialSnapshot::capture(
+        &env,
+        &client,
+        &token_id,
+        &artisan,
+        &seller,
+        &platform_wallet,
+    );
 
     client.unstake_tokens(&artisan, &token_id);
 
-    let after = FinancialSnapshot::capture(&env, &client, &token_id, &artisan, &seller, &platform_wallet);
+    let after = FinancialSnapshot::capture(
+        &env,
+        &client,
+        &token_id,
+        &artisan,
+        &seller,
+        &platform_wallet,
+    );
 
     let proof = ConservationProof {
         before: FinancialSnapshot {
@@ -556,11 +609,13 @@ fn conservation_recurring_escrow_release_cycle() {
     );
 
     // Release first cycle immediately
-    let before = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let before =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     client.release_recurring_cycle(&escrow_id, &0);
 
-    let after = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    let after =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
     let fee = amount_per_cycle * 500 / 10_000;
     let seller_amount = amount_per_cycle - fee;
@@ -577,7 +632,9 @@ fn conservation_recurring_escrow_release_cycle() {
         },
     };
 
-    proof.verify().expect("Recurring escrow release cycle conservation");
+    proof
+        .verify()
+        .expect("Recurring escrow release cycle conservation");
 }
 
 // ── Property-based conservation test ──────────────────────────────────────────
@@ -619,14 +676,8 @@ fn prop_financial_conservation_all_paths() {
                 0 => {
                     // Create escrow
                     let amount = crng.next_i128_range(10_000, 100_000_000);
-                    let _ = client.try_create_escrow(
-                        &buyer,
-                        &seller,
-                        &token_id,
-                        &amount,
-                        &604_800,
-                        &None,
-                    );
+                    let _ = client
+                        .try_create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
                     order_id += 1;
                 }
                 1 => {
@@ -642,7 +693,8 @@ fn prop_financial_conservation_all_paths() {
                     // Dispute and resolve
                     let oid = order_id - 1;
                     let _ = client.try_raise_dispute(&oid, &buyer);
-                    let _ = client.try_resolve_dispute(&oid, &Resolution::ReleaseToSeller, &arbitrator);
+                    let _ =
+                        client.try_resolve_dispute(&oid, &Resolution::ReleaseToSeller, &arbitrator);
                 }
                 4 => {
                     // Advance time

@@ -90,13 +90,11 @@ fn test_onboarding_attestation_rejects_forgery_and_replay() {
     client.onboard_user(&user, &String::from_str(&env, "attested"), &UserRole::Buyer);
     let operation_id = Bytes::from_slice(&env, b"operation-1");
 
-    let attestation = client.get_onboarding_attestation(
-        &user,
-        &operation_id,
-        &escrow_contract,
-    );
+    let attestation = client.get_onboarding_attestation(&user, &operation_id, &escrow_contract);
     assert!(client.validate_onboarding_attestation(&attestation));
-    assert!(client.try_validate_onboarding_attestation(&attestation).is_err());
+    assert!(client
+        .try_validate_onboarding_attestation(&attestation)
+        .is_err());
 
     let mut forged = attestation.clone();
     forged.role = UserRole::Artisan;
@@ -114,14 +112,12 @@ fn test_onboarding_attestation_becomes_stale_after_role_change() {
     let user = Address::generate(&env);
     client.onboard_user(&user, &String::from_str(&env, "revision"), &UserRole::Buyer);
     let operation_id = Bytes::from_slice(&env, b"operation-2");
-    let attestation = client.get_onboarding_attestation(
-        &user,
-        &operation_id,
-        &escrow_contract,
-    );
+    let attestation = client.get_onboarding_attestation(&user, &operation_id, &escrow_contract);
 
     client.update_user_role(&user, &UserRole::Artisan);
-    assert!(client.try_validate_onboarding_attestation(&attestation).is_err());
+    assert!(client
+        .try_validate_onboarding_attestation(&attestation)
+        .is_err());
 }
 
 // ===== Onboarding =====
@@ -1597,7 +1593,7 @@ fn test_decay_at_bucket_boundaries_is_deterministic() {
 
     let user = Address::generate(&env);
     let interval = DEFAULT_REPUTATION_DECAY_INTERVAL_SECS; // 30 days
-    // retain_bps = 10_000 - 500 = 9500
+                                                           // retain_bps = 10_000 - 500 = 9500
 
     // Seed at t0 with trust_score = 100.
     set_ledger_time(&env, 1_000_000);
@@ -1657,7 +1653,11 @@ fn test_decay_is_deterministic_and_reproducible() {
     // Replay the identical history on a fresh user → identical final score.
     let user2 = Address::generate(&env);
     set_ledger_time(&env, 5_000_000);
-    client.onboard_user(&user2, &String::from_str(&env, "decayr2"), &UserRole::Artisan);
+    client.onboard_user(
+        &user2,
+        &String::from_str(&env, "decayr2"),
+        &UserRole::Artisan,
+    );
     client.update_reputation(&user2, &200u32, &0u32);
     set_ledger_time(&env, 5_000_000 + 7 * interval);
     assert_eq!(client.get_trust_score(&user2), a);
@@ -2032,7 +2032,11 @@ fn test_change_username_fee_transfer_failure_leaves_state_unchanged() {
     let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
 
     // User has 0 balance, so fee transfer will fail
-    client.onboard_user(&user, &String::from_str(&env, "fee_user_no_bal"), &UserRole::Buyer);
+    client.onboard_user(
+        &user,
+        &String::from_str(&env, "fee_user_no_bal"),
+        &UserRole::Buyer,
+    );
     client.set_username_change_fee(&1_000_000);
     client.set_username_fee_token(&token_contract.address());
     client.set_username_fee_wallet(&fee_wallet);
@@ -3495,9 +3499,7 @@ fn test_attempt_rate_policy_revision_advances() {
     let (client, _) = setup_test(&env);
 
     assert_eq!(client.get_attempt_rate_policy().revision, 1);
-    let updated = client.set_attempt_rate_policy(
-        &60u64, &2u32, &10u32, &120u64, &3u32, &20u32,
-    );
+    let updated = client.set_attempt_rate_policy(&60u64, &2u32, &10u32, &120u64, &3u32, &20u32);
     assert_eq!(updated.revision, 2);
     assert_eq!(client.get_attempt_rate_policy(), updated);
 }
@@ -3778,16 +3780,9 @@ fn test_sybil_review_rejects_unauthorized_and_stale_decisions() {
     let review = client.get_sybil_review(&user).unwrap();
 
     assert!(client
-        .try_decide_sybil_review(
-            &unauthorized,
-            &user,
-            &review.profile_revision,
-            &true,
-        )
+        .try_decide_sybil_review(&unauthorized, &user, &review.profile_revision, &true,)
         .is_err());
-    assert!(client
-        .try_process_review(&user, &true)
-        .is_ok());
+    assert!(client.try_process_review(&user, &true).is_ok());
     assert_eq!(client.get_user(&user).status, ProfileStatus::Active);
 
     client.flag_suspicious_profile(&user, &703u32, &600u64);
@@ -3827,7 +3822,8 @@ fn test_sybil_rejection_appeal_and_expiry_remain_restricted() {
     assert_eq!(appealed.appeal_count, 1);
     assert!(client.try_request_verification(&user).is_err());
 
-    env.ledger().with_mut(|li| li.timestamp = appealed.expires_at);
+    env.ledger()
+        .with_mut(|li| li.timestamp = appealed.expires_at);
     client.expire_sybil_review(&user, &appealed.profile_revision);
     assert_eq!(client.get_user(&user).status, ProfileStatus::Flagged);
     assert_eq!(
@@ -3857,4 +3853,3 @@ fn test_normal_verified_profile_is_unaffected_by_review_state() {
         UserRole::Artisan
     );
 }
-

@@ -46,13 +46,7 @@ fn setup_test(
     // Open mode (None): the #1157 onboarding-attestation integration requires a
     // *registered* onboarding contract; passing an unregistered address would
     // make every privileged call fail. Unit tests use open mode.
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &500,
-        &None,
-    );
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None);
 
     // Set min amount to 0 for tests to pass with small amounts
     client.set_min_escrow_amount(&token_contract.address(), &0);
@@ -558,7 +552,10 @@ fn test_escrow_state_diagnostic_flags_pending_orphans() {
 
     let diagnostic = client.diagnose_escrow_state(&1);
     assert!(!diagnostic.is_consistent);
-    assert_eq!(diagnostic.issue, EscrowStateIssue::PendingTransitionUnfinished);
+    assert_eq!(
+        diagnostic.issue,
+        EscrowStateIssue::PendingTransitionUnfinished
+    );
 }
 
 #[test]
@@ -1893,9 +1890,18 @@ fn test_fee_allocation_invariant_at_boundaries() {
                     amount,
                     "allocation must consume the escrow pot exactly at amount={amount} fee_bps={fee_bps} kind={kind:?}"
                 );
-                assert!(allocation.platform_fee >= 0, "platform_fee must be non-negative");
-                assert!(allocation.seller_amount >= 0, "seller_amount must be non-negative");
-                assert!(allocation.buyer_amount >= 0, "buyer_amount must be non-negative");
+                assert!(
+                    allocation.platform_fee >= 0,
+                    "platform_fee must be non-negative"
+                );
+                assert!(
+                    allocation.seller_amount >= 0,
+                    "seller_amount must be non-negative"
+                );
+                assert!(
+                    allocation.buyer_amount >= 0,
+                    "buyer_amount must be non-negative"
+                );
             }
 
             // PartialRefund must be fed a gross split that sums to the pot.
@@ -2648,7 +2654,10 @@ fn test_upgrade_requires_compatibility_manifest() {
     });
 
     let result = client.try_execute_upgrade(&wasm_hash);
-    assert!(matches!(result, Err(Ok(Error::UpgradeCompatibilityMissing))));
+    assert!(matches!(
+        result,
+        Err(Ok(Error::UpgradeCompatibilityMissing))
+    ));
 }
 
 #[test]
@@ -2677,9 +2686,7 @@ fn test_upgrade_manifest_is_recorded_and_consumed() {
     client.propose_upgrade_wasm(&admin, &wasm_hash);
     client.submit_compat_manifest(&wasm_hash, &manifest);
     assert_eq!(
-        client
-            .get_upgrade_compat_manifest(&wasm_hash)
-            .unwrap(),
+        client.get_upgrade_compat_manifest(&wasm_hash).unwrap(),
         manifest
     );
 
@@ -2688,16 +2695,11 @@ fn test_upgrade_manifest_is_recorded_and_consumed() {
     });
     client.execute_upgrade(&wasm_hash);
 
-    let record = client
-        .get_upgrade_compat_history()
-        .last()
-        .unwrap();
+    let record = client.get_upgrade_compat_history().last().unwrap();
     assert_eq!(record.from_version, 1);
     assert_eq!(record.to_version, 2);
     assert_eq!(record.state_commitment, commitment);
-    assert!(client
-        .get_upgrade_compat_manifest(&wasm_hash)
-        .is_none());
+    assert!(client.get_upgrade_compat_manifest(&wasm_hash).is_none());
 }
 
 // ===== Issue #1140: Upgrade State Commitment =====
@@ -2735,9 +2737,7 @@ fn test_upgrade_state_commitment_persisted_after_execution() {
     });
 
     // No commitment exists before execution
-    assert!(client
-        .get_upgrade_state_commit(&wasm_hash)
-        .is_none());
+    assert!(client.get_upgrade_state_commit(&wasm_hash).is_none());
 
     client.execute_upgrade(&wasm_hash);
 
@@ -2749,8 +2749,14 @@ fn test_upgrade_state_commitment_persisted_after_execution() {
     assert_eq!(commitment_record.to_version, 2);
     assert_eq!(commitment_record.wasm_hash, wasm_hash);
     assert_eq!(commitment_record.state_digest, commitment);
-    assert!(commitment_record.immutable, "commitment should be immutable after activation");
-    assert_ne!(commitment_record.activated_at, 0, "activated_at should be set");
+    assert!(
+        commitment_record.immutable,
+        "commitment should be immutable after activation"
+    );
+    assert_ne!(
+        commitment_record.activated_at, 0,
+        "activated_at should be set"
+    );
     assert_ne!(
         commitment_record.migration_result_digest,
         BytesN::from_array(&env, &[0u8; 32]),
@@ -2828,7 +2834,10 @@ fn test_upgrade_state_commitment_immutable_prevents_reexecution() {
     let commitment_record = client
         .get_upgrade_state_commit(&wasm_hash)
         .expect("commitment should still exist");
-    assert!(commitment_record.immutable, "commitment should remain immutable");
+    assert!(
+        commitment_record.immutable,
+        "commitment should remain immutable"
+    );
 }
 
 #[test]
@@ -2867,12 +2876,13 @@ fn test_upgrade_execution_fails_without_completed_migration_result() {
 
     // Execution should fail - migration result is incomplete
     let result = client.try_execute_upgrade(&wasm_hash);
-    assert!(result.is_err(), "execution should fail when migration is incomplete");
+    assert!(
+        result.is_err(),
+        "execution should fail when migration is incomplete"
+    );
 
     // No commitment should be persisted since execution failed
-    assert!(client
-        .get_upgrade_state_commit(&wasm_hash)
-        .is_none());
+    assert!(client.get_upgrade_state_commit(&wasm_hash).is_none());
 }
 
 #[test]
@@ -2911,12 +2921,13 @@ fn test_upgrade_state_commitment_shows_manual_records_incomplete() {
 
     // Execution should fail - migration has unhandled manual records
     let result = client.try_execute_upgrade(&wasm_hash);
-    assert!(result.is_err(), "execution should fail with manual records pending");
+    assert!(
+        result.is_err(),
+        "execution should fail with manual records pending"
+    );
 
     // No commitment persisted
-    assert!(client
-        .get_upgrade_state_commit(&wasm_hash)
-        .is_none());
+    assert!(client.get_upgrade_state_commit(&wasm_hash).is_none());
 }
 
 #[test]
@@ -3179,11 +3190,12 @@ fn test_upgrade_approval_event_identifies_revision_and_signer() {
         .iter()
         .rev()
         .find(|event| {
-            event.1 == vec![
-                &env,
-                Symbol::new(&env, "wasm_upgrade").into_val(&env),
-                Symbol::new(&env, "UPG_APPR").into_val(&env),
-            ]
+            event.1
+                == vec![
+                    &env,
+                    Symbol::new(&env, "wasm_upgrade").into_val(&env),
+                    Symbol::new(&env, "UPG_APPR").into_val(&env),
+                ]
         })
         .expect("missing UPG_APPR event");
     let payload: UpgradeApprovalEvent = approval.2.try_into_val(&env).unwrap();
@@ -5028,6 +5040,7 @@ fn test_migrate_fee_token_configs_migrates_twenty_tokens_and_emits_summary() {
     assert_eq!(
         summary,
         FeeTokenConfigsMigratedEvent {
+            schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
             scanned_tokens: 20,
             migrated_configs: 20,
             skipped_existing: 0,
@@ -5130,6 +5143,7 @@ fn test_migrate_fee_token_configs_is_idempotent_and_preserves_existing_configs()
     assert_eq!(
         latest_summary,
         FeeTokenConfigsMigratedEvent {
+            schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
             scanned_tokens: 20,
             migrated_configs: 0,
             skipped_existing: 20,
@@ -5281,13 +5295,7 @@ fn test_is_paused_public_query_tracks_platform_state() {
     let platform_wallet = Address::generate(&env);
     let admin = Address::generate(&env);
     let arbitrator = Address::generate(&env);
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &500,
-        &None,
-    );
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None);
 
     assert!(!client.is_paused());
     client.set_paused(&true);
@@ -7317,19 +7325,28 @@ fn test_recurring_escrow_total_locked_consistency() {
 
     // After creation, tracked locked == total.
     let report = client.reconcile_token(&token_id, &0, &20);
-    assert!(!report.unresolved, "reconciliation must be clean after create");
+    assert!(
+        !report.unresolved,
+        "reconciliation must be clean after create"
+    );
     assert_eq!(report.tracked_locked, total);
 
     env.ledger().with_mut(|li| li.timestamp += 3601);
     client.release_next_cycle(&rec.id);
     let report = client.reconcile_token(&token_id, &0, &20);
-    assert!(!report.unresolved, "reconciliation must be clean after a release");
+    assert!(
+        !report.unresolved,
+        "reconciliation must be clean after a release"
+    );
     assert_eq!(report.tracked_locked, total - 400);
 
     // Cancel the remaining balance (800): tracked locked must drop to zero.
     client.cancel_recurring_escrow(&rec.id);
     let report = client.reconcile_token(&token_id, &0, &20);
-    assert!(!report.unresolved, "reconciliation must be clean after cancel");
+    assert!(
+        !report.unresolved,
+        "reconciliation must be clean after cancel"
+    );
     assert_eq!(report.tracked_locked, 0);
 }
 
@@ -7663,7 +7680,10 @@ mod onboarding_state_consistency {
             &1u32,
             &Some(3600u32),
         );
-        assert!(result.is_ok(), "active users should be allowed to create escrow");
+        assert!(
+            result.is_ok(),
+            "active users should be allowed to create escrow"
+        );
     }
 
     // ── Acceptance criterion 2: deactivated profile blocks escrow creation ─
@@ -7915,8 +7935,14 @@ mod reconciliation_report_tests {
             report.tracked_staked, 0,
             "tracked_staked should be zero on empty state"
         );
-        assert_eq!(report.complete, true, "report should be complete on empty state");
-        assert_eq!(report.unresolved, false, "report should have no discrepancy");
+        assert_eq!(
+            report.complete, true,
+            "report should be complete on empty state"
+        );
+        assert_eq!(
+            report.unresolved, false,
+            "report should have no discrepancy"
+        );
     }
 
     /// Test 2: Distinguishes between locked and staked categories
@@ -7968,7 +7994,7 @@ mod reconciliation_report_tests {
     fn test_extra_funds_no_discrepancy() {
         let env = Env::default();
         let (client, buyer, seller, _, token_admin_client, token_id, _) = setup_test(&env, true);
-        
+
         // Mint excess funds to contract
         let excess_amount = 10_000_000i128;
         token_admin_client.mint(&client.address, &excess_amount);
@@ -7989,10 +8015,7 @@ mod reconciliation_report_tests {
         );
 
         let report = client.query_reconciliation_report(&token_id, &0, &50);
-        assert_eq!(
-            report.complete, true,
-            "should complete on small dataset"
-        );
+        assert_eq!(report.complete, true, "should complete on small dataset");
         // Extra funds are OK, so unresolved should be false
         assert_eq!(
             report.unresolved, false,
@@ -8026,10 +8049,7 @@ mod reconciliation_report_tests {
         // We do this by directly manipulating tracked totals in storage for test purposes
         // In production, this would indicate a real discrepancy
         let report = client.query_reconciliation_report(&token_id, &0, &50);
-        assert_eq!(
-            report.complete, true,
-            "query should complete"
-        );
+        assert_eq!(report.complete, true, "query should complete");
         // With sufficient balance (escrow was funded), unresolved should be false
         assert_eq!(
             report.unresolved, false,
@@ -8063,7 +8083,10 @@ mod reconciliation_report_tests {
 
         // First page: 50 escrows
         let page1 = client.query_reconciliation_report(&token_id, &0, &50);
-        assert_eq!(page1.scanned_escrows, 50, "first page should scan 50 escrows");
+        assert_eq!(
+            page1.scanned_escrows, 50,
+            "first page should scan 50 escrows"
+        );
         assert_eq!(page1.complete, false, "first page should not be complete");
         assert_eq!(
             page1.next_cursor, 50,
@@ -8071,13 +8094,14 @@ mod reconciliation_report_tests {
         );
 
         // Second page: remaining 10 escrows
-        let page2 = client
-            .query_reconciliation_report(&token_id, &page1.next_cursor, &50);
-        assert_eq!(page2.scanned_escrows, 10, "second page should scan 10 escrows");
+        let page2 = client.query_reconciliation_report(&token_id, &page1.next_cursor, &50);
+        assert_eq!(
+            page2.scanned_escrows, 10,
+            "second page should scan 10 escrows"
+        );
         assert_eq!(page2.complete, true, "second page should be complete");
         assert_eq!(
-            page2.expected_locked,
-            60_000i128,
+            page2.expected_locked, 60_000i128,
             "total locked across pages should match all escrows"
         );
     }
@@ -8111,7 +8135,10 @@ mod reconciliation_report_tests {
             report.scanned_escrows, 100,
             "page_size should be capped at MAX_PAGE_SIZE"
         );
-        assert_eq!(report.complete, false, "should not be complete with capped page");
+        assert_eq!(
+            report.complete, false,
+            "should not be complete with capped page"
+        );
     }
 
     /// Test 7: Recurring escrows are included in first page only
@@ -8141,7 +8168,10 @@ mod reconciliation_report_tests {
             page1.expected_locked > 0,
             "first page should include recurring escrow"
         );
-        assert_eq!(page1.complete, true, "should complete with one recurring escrow");
+        assert_eq!(
+            page1.complete, true,
+            "should complete with one recurring escrow"
+        );
     }
 
     /// Test 8: Report is read-only (no storage writes)
@@ -8154,15 +8184,7 @@ mod reconciliation_report_tests {
 
         // Create escrow
         client.create_escrow_with_metadata(
-            &buyer,
-            &seller,
-            &token_id,
-            &5_000i128,
-            &1u32,
-            &None,
-            &None,
-            &None,
-            &None,
+            &buyer, &seller, &token_id, &5_000i128, &1u32, &None, &None, &None, &None,
         );
 
         // Query multiple times
@@ -8196,15 +8218,7 @@ mod reconciliation_report_tests {
         let amount = 5_000i128;
         let order_id = 1u32;
         client.create_escrow_with_metadata(
-            &buyer,
-            &seller,
-            &token_id,
-            &amount,
-            &order_id,
-            &None,
-            &None,
-            &None,
-            &None,
+            &buyer, &seller, &token_id, &amount, &order_id, &None, &None, &None, &None,
         );
 
         // Query should include the Active escrow
@@ -8216,6 +8230,7 @@ mod reconciliation_report_tests {
         assert_eq!(report.complete, true, "should be complete");
         assert_eq!(report.unresolved, false, "should not be unresolved");
     }
+}
 
 // ============================================================
 // Issue #1049 – Prevent Recurring Release After Cancellation
@@ -8259,7 +8274,7 @@ fn test_recurring_escrow_double_cancellation_fails() {
 
     // First cancellation succeeds
     client.cancel_recurring_escrow(&rec.id);
-    
+
     // Second cancellation attempt must fail
     client.cancel_recurring_escrow(&rec.id);
 }
@@ -8273,7 +8288,7 @@ fn test_recurring_escrow_cancellation_refunds_balance() {
 
     token_admin.mint(&buyer, &10_000_000);
     let token_client = token::Client::new(&env, &token_id);
-    
+
     // Verify initial balance
     assert_eq!(token_client.balance(&buyer), 10_000_000);
 

@@ -189,11 +189,11 @@ fn test_arbitrator_rotation_invalidates_active_assignment() {
         .get_dispute_assignment(&1)
         .expect("assignment should be persisted");
     assert_eq!(old_assignment.revision, 1);
-    assert_eq!(client.get_arbitrator_assignment_revision(), 1);
+    assert_eq!(client.get_arbitrator_assign_revision(), 1);
 
     let replacement = Address::generate(&env);
     client.update_arbitrator(&replacement);
-    assert_eq!(client.get_arbitrator_assignment_revision(), 2);
+    assert_eq!(client.get_arbitrator_assign_revision(), 2);
     assert_eq!(client.get_platform_config().arbitrator, replacement);
 
     // Rotation does not alter the escrow's financial context.
@@ -232,7 +232,6 @@ fn test_arbitrator_rotation_invalidates_active_assignment() {
         &buyer,
         &String::from_str(&env, "ipfs://reassigned-evidence"),
     );
-
 }
 
 // ── Dispute Evidence Challenge Period (#942) ───────────────────────────

@@ -78,12 +78,22 @@ pub fn emit_compaction_event(
     policy: &StorageRetentionPolicy,
 ) {
     env.events().publish(
-        (Symbol::new(env, "storage_compaction"), Symbol::new(env, "run")),
-        (report.run_count, report.entries_removed, report.ttl_extended),
+        (
+            Symbol::new(env, "storage_compaction"),
+            Symbol::new(env, "run"),
+        ),
+        (
+            report.run_count,
+            report.entries_removed,
+            report.ttl_extended,
+        ),
     );
     // Keep the policy visible to off-chain dashboards on every run.
     env.events().publish(
-        (Symbol::new(env, "storage_retention_policy"), Symbol::new(env, "applied")),
+        (
+            Symbol::new(env, "storage_retention_policy"),
+            Symbol::new(env, "applied"),
+        ),
         (
             policy.fund_audit_retention,
             policy.stake_history_retention,

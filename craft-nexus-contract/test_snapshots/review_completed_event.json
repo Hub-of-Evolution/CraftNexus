@@ -1,10 +1,10 @@
 {
-  "struct": "MetadataVerifiedEvent",
+  "struct": "ReviewCompletedEvent",
   "schema_version": 1,
   "fields": [
     {"name": "schema_version", "type": "u32"},
-    {"name": "order_id", "type": "u64"},
-    {"name": "verifier", "type": "Address"},
+    {"name": "user", "type": "Address"},
+    {"name": "action", "type": "Symbol"},
     {"name": "timestamp", "type": "u64"}
   ]
 }

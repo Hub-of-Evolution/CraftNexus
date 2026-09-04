@@ -245,12 +245,12 @@ fn test_double_allocation_of_residual_balance_rejected() {
     // Residual unallocated balance is 500_000 - 100_000 = 400_000
     // Plan 1 allocates 300_000
     let plan1 = client
-        .propose_reconciliation_repair_with_details(&token, &300_000i128, &Vec::new(&env))
+        .propose_recon_repair_details(&token, &300_000i128, &Vec::new(&env))
         .unwrap();
     assert_eq!(plan1.allocated_amount, 300_000);
 
     // Plan 2 attempts to allocate 200_000 (total 500_000 > 400_000 available residual balance)
-    let plan2_res = client.try_propose_reconciliation_repair_with_details(
+    let plan2_res = client.try_propose_recon_repair_details(
         &token,
         &200_000i128,
         &Vec::new(&env),

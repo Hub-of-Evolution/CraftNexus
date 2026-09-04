@@ -5,10 +5,7 @@ use crate::{
     onboarding::{self, OnboardingContract, OnboardingContractClient},
     CraftNexusContract, CraftNexusContractClient, DataKey, Error,
 };
-use soroban_sdk::{
-    testutils::Address as _,
-    token, Address, Env,
-};
+use soroban_sdk::{testutils::Address as _, token, Address, Env};
 
 struct TestRig {
     env: Env,
@@ -275,7 +272,10 @@ fn test_onboarding_metrics_and_active_contracts_overflow_underflow() {
 
     // Test active contract count underflow
     let res = ob_client.try_update_active_contracts(&user, &-5);
-    assert_eq!(res.unwrap_err().unwrap(), onboarding::Error::ActiveContractUnderflow.into());
+    assert_eq!(
+        res.unwrap_err().unwrap(),
+        onboarding::Error::ActiveContractUnderflow.into()
+    );
 
     // Test active contract count overflow
     env.as_contract(&ob_id, || {
@@ -284,5 +284,8 @@ fn test_onboarding_metrics_and_active_contracts_overflow_underflow() {
     });
 
     let res_overflow = ob_client.try_update_active_contracts(&user, &1);
-    assert_eq!(res_overflow.unwrap_err().unwrap(), onboarding::Error::ActiveContractOverflow.into());
+    assert_eq!(
+        res_overflow.unwrap_err().unwrap(),
+        onboarding::Error::ActiveContractOverflow.into()
+    );
 }
