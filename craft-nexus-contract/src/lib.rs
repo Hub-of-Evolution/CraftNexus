@@ -13,6 +13,9 @@ extern crate alloc;
 /// Centralised time-boundary policy for the contract.
 pub mod time_policy;
 
+/// Bounded, overflow-safe oracle-price conversion (Issue #1088).
+pub mod conversion;
+
 #[cfg(test)]
 mod arbitration_escalation_test;
 #[cfg(test)]
@@ -25,6 +28,8 @@ mod expired_dispute_fee_test;
 mod min_release_window_test;
 #[cfg(test)]
 mod reentrancy_test;
+#[cfg(test)]
+mod sweep_allowance_test;
 #[cfg(test)]
 mod scalability_test;
 #[cfg(test)]
@@ -94,6 +99,10 @@ pub enum Error {
     RecurringEscrowIdExhausted = 38,
     OnboardingContractNotSet = 39,
     // ── Validation (40+): fix caller input ──
+    /// The configured onboarding contract rejected the participant state proof
+    OnboardingAuthorizationFailed = 56,
+    // â”€â”€ Validation (40+): fix caller input â”€â”€
+    /// Provided metadata hash is invalid
     InvalidMetadataHash = 40,
     InvalidIpfsHash = 41,
     NotAnUpgradeSigner = 42,
@@ -118,6 +127,7 @@ pub enum Error {
     BatchJobCompleted = 61,
     PaginationLimitZero = 80,
     PaginationCursorInvalid = 81,
+    /// Platform wallet cannot be the contract address.
     InvalidPlatformWallet = 62,
     InvalidServiceAgreementHash = 63,
     ChallengeWindowActive = 64,
@@ -137,6 +147,54 @@ pub enum Error {
     OnboardingProfileStale = 78,
     OnboardingVerificationRevoked = 79,
     EscrowAlreadyExists = 80,
+    /// Pagination limit is zero; caller must request at least one item (#1022).
+    PaginationLimitZero = 81,
+    /// Pagination cursor is invalid (past end of dataset or empty dataset) (#1022).
+    PaginationCursorInvalid = 82,
+    /// Requested WASM upgrade cooldown is below `MIN_WASM_UPGRADE_COOLDOWN`,
+    /// which would let the mandatory review window be bypassed (#1062).
+    UpgradeCooldownTooShort = 83,
+    /// An oracle-driven currency conversion produced a negative amount,
+    /// price, or liquidity input (#1088).
+    ConversionNegativeInput = 84,
+    /// An oracle-driven currency conversion used a decimals value outside
+    /// the supported range (#1088).
+    ConversionUnsupportedDecimals = 85,
+    /// An oracle-driven currency conversion overflowed `i128` arithmetic
+    /// (#1088).
+    ConversionOverflow = 86,
+    /// The oracle quote's reported liquidity is below the configured
+    /// minimum; the conversion is rejected rather than settled against a
+    /// thin book (#1088).
+    ConversionInsufficientLiquidity = 87,
+    /// The oracle quote moved further from the trusted reference price than
+    /// the configured maximum movement allows (#1088).
+    ConversionExcessiveMovement = 88,
+    /// A strictly positive conversion input produced a zero output, which
+    /// would silently destroy value; rejected instead of settling for zero
+    /// (#1088).
+    ConversionOutputUnderflow = 89,
+}
+
+/// Maps a [`conversion::ConversionError`] onto the contract's own [`Error`]
+/// enum so settlement paths that call into [`conversion::convert_amount`] or
+/// [`conversion::convert_amount_ceiling`] can propagate a single, ABI-stable
+/// error type to callers.
+impl From<conversion::ConversionError> for Error {
+    fn from(err: conversion::ConversionError) -> Self {
+        match err {
+            conversion::ConversionError::NegativeInput => Error::ConversionNegativeInput,
+            conversion::ConversionError::UnsupportedDecimals => {
+                Error::ConversionUnsupportedDecimals
+            }
+            conversion::ConversionError::Overflow => Error::ConversionOverflow,
+            conversion::ConversionError::InsufficientLiquidity => {
+                Error::ConversionInsufficientLiquidity
+            }
+            conversion::ConversionError::ExcessiveMovement => Error::ConversionExcessiveMovement,
+            conversion::ConversionError::OutputUnderflow => Error::ConversionOutputUnderflow,
+        }
+    }
 }
 
 #[must_use]
@@ -184,26 +242,22 @@ const BASE58_BTC_CHARSET: [bool; 256] = {
         chars[i] = true;
         i += 1;
     }
+//! CraftNexus escrow, staking, and onboarding contracts.
+//!
+//! This crate hosts the main `CraftNexusContract` (escrow) plus the
+//! storage-lifecycle / TTL-management framework introduced in #920.
 
-    i = b'P' as usize;
-    while i <= b'Z' as usize {
-        chars[i] = true;
-        i += 1;
-    }
+#![no_std]
 
-    i = b'a' as usize;
-    while i <= b'k' as usize {
-        chars[i] = true;
-        i += 1;
-    }
+pub mod storage_lifecycle;
 
-    i = b'm' as usize;
-    while i <= b'z' as usize {
-        chars[i] = true;
-        i += 1;
-    }
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
 
-    chars
+/// Storage lifecycle, compaction, and TTL-management framework (#920).
+pub use storage_lifecycle::{
+    CompactionReport, StorageRetentionPolicy, DEFAULT_RETAINED_AUDIT_ENTRIES,
+    DEFAULT_RETAINED_EMERGENCY_HISTORY, DEFAULT_RETAINED_STAKE_HISTORY,
+    DEFAULT_RETAINED_UPGRADE_HISTORY,
 };
 
 const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
