@@ -1104,9 +1104,7 @@ fn test_legacy_artisan_stake_migration_converts_old_format() {
 
     env.as_contract(&client.address, || {
         env.storage().persistent().set(&stake_key, &7_500_000i128);
-        env.storage()
-            .persistent()
-            .set(&token_key, &token);
+        env.storage().persistent().set(&token_key, &token);
     });
 
     // Verify legacy storage exists

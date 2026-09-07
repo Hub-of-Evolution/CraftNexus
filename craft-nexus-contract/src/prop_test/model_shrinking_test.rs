@@ -176,7 +176,11 @@ fn shrink_removes_irrelevant_operations() {
     assert!(matches!(shrunk[1].op, TestOp::RaiseDispute));
     assert!(matches!(shrunk[2].op, TestOp::ResolveDispute { .. }));
 
-    println!("[shrink_test] Original: {} steps → Shrunk: {} steps", long_sequence.len(), shrunk.len());
+    println!(
+        "[shrink_test] Original: {} steps → Shrunk: {} steps",
+        long_sequence.len(),
+        shrunk.len()
+    );
 }
 
 #[test]
@@ -214,9 +218,16 @@ fn shrink_reduces_actor_diversity() {
     assert!(shrunk[1].actor_id < sequence[1].actor_id);
     assert!(shrunk[2].actor_id < sequence[2].actor_id);
 
-    println!("[shrink_test] Actor IDs normalized: {:?} → {:?}",
-        sequence.iter().map(|s| s.actor_id).collect::<alloc::vec::Vec<_>>(),
-        shrunk.iter().map(|s| s.actor_id).collect::<alloc::vec::Vec<_>>()
+    println!(
+        "[shrink_test] Actor IDs normalized: {:?} → {:?}",
+        sequence
+            .iter()
+            .map(|s| s.actor_id)
+            .collect::<alloc::vec::Vec<_>>(),
+        shrunk
+            .iter()
+            .map(|s| s.actor_id)
+            .collect::<alloc::vec::Vec<_>>()
     );
 }
 
@@ -256,7 +267,10 @@ fn shrink_minimizes_timestamp_jumps() {
 
     assert!(shrunk_delta < original_delta);
 
-    println!("[shrink_test] Time delta reduced: {} → {}", original_delta, shrunk_delta);
+    println!(
+        "[shrink_test] Time delta reduced: {} → {}",
+        original_delta, shrunk_delta
+    );
 }
 
 #[test]
@@ -286,9 +300,16 @@ fn shrink_reduces_amounts() {
     assert!(shrunk[0].amount.unwrap() < sequence[0].amount.unwrap());
     assert!(shrunk[1].amount.unwrap() < sequence[1].amount.unwrap());
 
-    println!("[shrink_test] Amounts reduced: {:?} → {:?}",
-        sequence.iter().map(|s| s.amount).collect::<alloc::vec::Vec<_>>(),
-        shrunk.iter().map(|s| s.amount).collect::<alloc::vec::Vec<_>>()
+    println!(
+        "[shrink_test] Amounts reduced: {:?} → {:?}",
+        sequence
+            .iter()
+            .map(|s| s.amount)
+            .collect::<alloc::vec::Vec<_>>(),
+        shrunk
+            .iter()
+            .map(|s| s.amount)
+            .collect::<alloc::vec::Vec<_>>()
     );
 }
 
@@ -319,9 +340,16 @@ fn shrink_normalizes_token_ids() {
     assert!(shrunk[0].token_id.unwrap() < sequence[0].token_id.unwrap());
     assert!(shrunk[1].token_id.unwrap() < sequence[1].token_id.unwrap());
 
-    println!("[shrink_test] Token IDs normalized: {:?} → {:?}",
-        sequence.iter().map(|s| s.token_id).collect::<alloc::vec::Vec<_>>(),
-        shrunk.iter().map(|s| s.token_id).collect::<alloc::vec::Vec<_>>()
+    println!(
+        "[shrink_test] Token IDs normalized: {:?} → {:?}",
+        sequence
+            .iter()
+            .map(|s| s.token_id)
+            .collect::<alloc::vec::Vec<_>>(),
+        shrunk
+            .iter()
+            .map(|s| s.token_id)
+            .collect::<alloc::vec::Vec<_>>()
     );
 }
 
@@ -368,7 +396,8 @@ fn model_harness_reports_first_violation() {
         match &sop.op {
             TestOp::CreateEscrow => {
                 let amount = sop.amount.unwrap_or(10_000_000);
-                let _ = client.try_create_escrow(buyer, seller, &token_id, &amount, &604_800, &None);
+                let _ =
+                    client.try_create_escrow(buyer, seller, &token_id, &amount, &604_800, &None);
                 order_counter += 1;
             }
             TestOp::RaiseDispute => {
@@ -380,7 +409,8 @@ fn model_harness_reports_first_violation() {
                 } else {
                     Resolution::RefundToBuyer
                 };
-                let result = client.try_resolve_dispute(&(order_counter - 1), &resolution, &arbitrator);
+                let result =
+                    client.try_resolve_dispute(&(order_counter - 1), &resolution, &arbitrator);
 
                 // Check invariant: dispute must exist before resolution
                 if result.is_ok() {
@@ -400,7 +430,10 @@ fn model_harness_reports_first_violation() {
     }
 
     // This test verifies the reporting mechanism works
-    assert!(!violation_found, "Expected clean execution for this test sequence");
+    assert!(
+        !violation_found,
+        "Expected clean execution for this test sequence"
+    );
 }
 
 #[test]
@@ -522,20 +555,30 @@ fn full_shrinking_workflow_demonstration() {
     println!("Shrunk sequence: {} steps", shrunk.len());
     println!("\nOriginal:");
     for (i, sop) in original.iter().enumerate() {
-        println!("  {}: actor={}, time={}, amount={:?}, op={:?}",
-            i, sop.actor_id, sop.timestamp, sop.amount, sop.op);
+        println!(
+            "  {}: actor={}, time={}, amount={:?}, op={:?}",
+            i, sop.actor_id, sop.timestamp, sop.amount, sop.op
+        );
     }
     println!("\nShrunk (minimal reproducer):");
     for (i, sop) in shrunk.iter().enumerate() {
-        println!("  {}: actor={}, time={}, amount={:?}, op={:?}",
-            i, sop.actor_id, sop.timestamp, sop.amount, sop.op);
+        println!(
+            "  {}: actor={}, time={}, amount={:?}, op={:?}",
+            i, sop.actor_id, sop.timestamp, sop.amount, sop.op
+        );
     }
 
     // Verify shrinking preserved the failure condition
-    assert!(is_failure(&shrunk), "Shrunk sequence must still trigger failure");
+    assert!(
+        is_failure(&shrunk),
+        "Shrunk sequence must still trigger failure"
+    );
 
     // Verify shrinking reduced complexity
-    assert!(shrunk.len() < original.len(), "Shrunk sequence should be shorter");
+    assert!(
+        shrunk.len() < original.len(),
+        "Shrunk sequence should be shorter"
+    );
     assert!(
         shrunk.iter().map(|s| s.actor_id).max().unwrap()
             < original.iter().map(|s| s.actor_id).max().unwrap(),

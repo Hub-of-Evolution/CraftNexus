@@ -1,6 +1,8 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, testutils::{Address as _, Ledger}, vec, Address, Env, Vec,
+    contract, contractimpl, contracttype,
+    testutils::{Address as _, Ledger},
+    vec, Address, Env, Vec,
 };
 
 // ============================================================================
@@ -33,7 +35,7 @@ impl StakeContract {
     /// Adds a new stake, appending it as an independent entry with its own maturity.
     pub fn stake(env: Env, user: Address, amount: i128) {
         user.require_auth();
-        
+
         let current_time = env.ledger().timestamp();
         let unlock_time = current_time + COOLDOWN_PERIOD;
 
@@ -43,16 +45,21 @@ impl StakeContract {
             .get(&DataKey::UserStakes(user.clone()))
             .unwrap_or_else(|| Vec::new(&env));
 
-        stakes.push_back(StakeEntry { amount, unlock_time });
-        env.storage().persistent().set(&DataKey::UserStakes(user), &stakes);
-        
+        stakes.push_back(StakeEntry {
+            amount,
+            unlock_time,
+        });
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserStakes(user), &stakes);
+
         // (External token transfer logic from user to contract would go here)
     }
 
     /// Evaluates all user stakes and processes withdrawals for those that have matured.
     pub fn withdraw_matured(env: Env, user: Address) -> i128 {
         user.require_auth();
-        
+
         let current_time = env.ledger().timestamp();
         let stakes: Vec<StakeEntry> = env
             .storage()
@@ -72,16 +79,21 @@ impl StakeContract {
         }
 
         // Update state with only the pending, un-matured stakes
-        env.storage().persistent().set(&DataKey::UserStakes(user), &remaining_stakes);
-        
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserStakes(user), &remaining_stakes);
+
         // (External token transfer logic from contract to user would go here)
-        
+
         withdrawable_amount
     }
 
     /// Read-only function to inspect a user's current stake queue
     pub fn get_stakes(env: Env, user: Address) -> Vec<StakeEntry> {
-        env.storage().persistent().get(&DataKey::UserStakes(user)).unwrap_or_else(|| Vec::new(&env))
+        env.storage()
+            .persistent()
+            .get(&DataKey::UserStakes(user))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 }
 
@@ -96,9 +108,9 @@ mod tests {
     fn setup() -> (Env, Address, StakeContractClient) {
         let env = Env::default();
         env.mock_all_auths();
-        
+
         // Initialize ledger time to a known baseline
-        env.ledger().set_timestamp(100_000); 
+        env.ledger().set_timestamp(100_000);
 
         let user = Address::generate(&env);
         let contract_id = env.register_contract(None, StakeContract);
@@ -116,7 +128,8 @@ mod tests {
         let initial_stake_time = env.ledger().timestamp();
 
         // 2. Advance time forward, but not past the 7-day cooldown
-        env.ledger().set_timestamp(initial_stake_time + (COOLDOWN_PERIOD / 2));
+        env.ledger()
+            .set_timestamp(initial_stake_time + (COOLDOWN_PERIOD / 2));
 
         // 3. Second stake added
         client.stake(&user, &500);
@@ -137,18 +150,26 @@ mod tests {
         let initial_stake_time = env.ledger().timestamp();
 
         // Advance time just past the cooldown for the first stake
-        env.ledger().set_timestamp(initial_stake_time + COOLDOWN_PERIOD + 1);
+        env.ledger()
+            .set_timestamp(initial_stake_time + COOLDOWN_PERIOD + 1);
 
         // Add a new stake
         client.stake(&user, &500);
 
         // Withdraw matured stakes. The first 1000 should be ready, the 500 should remain locked.
         let withdrawn = client.withdraw_matured(&user);
-        
-        assert_eq!(withdrawn, 1000, "Matured deposit was blocked by new deposit");
+
+        assert_eq!(
+            withdrawn, 1000,
+            "Matured deposit was blocked by new deposit"
+        );
 
         let remaining_queue = client.get_stakes(&user);
-        assert_eq!(remaining_queue.len(), 1, "Only the new pending deposit should remain");
+        assert_eq!(
+            remaining_queue.len(),
+            1,
+            "Only the new pending deposit should remain"
+        );
         assert_eq!(remaining_queue.get(0).unwrap().amount, 500);
     }
 
@@ -159,27 +180,39 @@ mod tests {
 
         // Stake A: Time T
         client.stake(&user, &1000);
-        
+
         // Stake B: Time T + 3 days
         env.ledger().set_timestamp(base_time + 86400 * 3);
         client.stake(&user, &2000);
 
-        // Advance to Time T + 7.5 days. 
+        // Advance to Time T + 7.5 days.
         // Stake A is past boundary (>7 days). Stake B is before boundary (only 4.5 days old).
-        env.ledger().set_timestamp(base_time + COOLDOWN_PERIOD + 43200);
+        env.ledger()
+            .set_timestamp(base_time + COOLDOWN_PERIOD + 43200);
 
         let withdrawn = client.withdraw_matured(&user);
 
         // Assert exactly Stake A is released
-        assert_eq!(withdrawn, 1000, "Boundary logic failed to separate mature vs pending stakes");
-        
+        assert_eq!(
+            withdrawn, 1000,
+            "Boundary logic failed to separate mature vs pending stakes"
+        );
+
         // Advance remaining time to mature Stake B
-        env.ledger().set_timestamp(base_time + 86400 * 3 + COOLDOWN_PERIOD + 1);
+        env.ledger()
+            .set_timestamp(base_time + 86400 * 3 + COOLDOWN_PERIOD + 1);
         let withdrawn_b = client.withdraw_matured(&user);
-        
-        assert_eq!(withdrawn_b, 2000, "Stake B failed to mature on its independent schedule");
-        
+
+        assert_eq!(
+            withdrawn_b, 2000,
+            "Stake B failed to mature on its independent schedule"
+        );
+
         let empty_queue = client.get_stakes(&user);
-        assert_eq!(empty_queue.len(), 0, "Queue should be empty after all stakes mature");
+        assert_eq!(
+            empty_queue.len(),
+            0,
+            "Queue should be empty after all stakes mature"
+        );
     }
 }

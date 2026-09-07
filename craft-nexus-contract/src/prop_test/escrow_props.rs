@@ -19,7 +19,10 @@
 #![cfg(test)]
 extern crate alloc;
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, token, Address, Env, Symbol};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    token, Address, Env, Symbol,
+};
 
 use super::{
     generators::{generate_escrow_sequence, EscrowOp},
@@ -70,7 +73,17 @@ fn fresh_env() -> (
     token_admin.mint(&admin, &100_000_000i128);
 
     // Return env separately so we can borrow properly in tests
-    (env, contract_id, admin, arbitrator, buyer, seller, token_id, platform_wallet, token_admin)
+    (
+        env,
+        contract_id,
+        admin,
+        arbitrator,
+        buyer,
+        seller,
+        token_id,
+        platform_wallet,
+        token_admin,
+    )
 }
 
 // ── Property 1: Fund conservation ────────────────────────────────────────────
@@ -91,7 +104,16 @@ fn prop_fund_conservation() {
         let ops = generate_escrow_sequence(&mut crng, &order_ids);
 
         for op in &ops {
-            run_op(&env, &client, op, &buyer, &seller, &admin, &arbitrator, &token_id);
+            run_op(
+                &env,
+                &client,
+                op,
+                &buyer,
+                &seller,
+                &admin,
+                &arbitrator,
+                &token_id,
+            );
         }
 
         // Invariant: tracked locked <= actual balance
@@ -255,7 +277,14 @@ fn prop_auto_release_window_boundary() {
         let (env, contract_id, _admin, _arbitrator, buyer, seller, token_id, _, _) = fresh_env();
         let client = CraftNexusContractClient::new(&env, &contract_id);
 
-        client.create_escrow(&buyer, &seller, &token_id, &1_000_000, &7, &Some(window_secs));
+        client.create_escrow(
+            &buyer,
+            &seller,
+            &token_id,
+            &1_000_000,
+            &7,
+            &Some(window_secs),
+        );
 
         // Before window — must fail
         let r = client.try_auto_release(&7);
@@ -362,7 +391,16 @@ fn prop_all_transitions_reachable() {
         let order_ids: alloc::vec::Vec<u32> = (1u32..=3).collect();
         let ops = generate_escrow_sequence(&mut crng, &order_ids);
         for op in &ops {
-            run_op(&env, &client, op, &buyer, &seller, &admin, &arbitrator, &token_id);
+            run_op(
+                &env,
+                &client,
+                op,
+                &buyer,
+                &seller,
+                &admin,
+                &arbitrator,
+                &token_id,
+            );
         }
 
         for id in 1u32..=10 {
@@ -407,7 +445,12 @@ fn prop_model_conservation_invariants() {
 
         for op in &ops {
             match op {
-                EscrowOp::CreateEscrow { order_id, amount, release_window, same_party } => {
+                EscrowOp::CreateEscrow {
+                    order_id,
+                    amount,
+                    release_window,
+                    same_party,
+                } => {
                     let (b, s) = if *same_party {
                         (buyer_str.clone(), buyer_str.clone())
                     } else {
@@ -415,26 +458,67 @@ fn prop_model_conservation_invariants() {
                     };
                     let now = env.ledger().timestamp();
                     let _ = model.create_escrow(
-                        b, s, token_str.clone(), *amount, *order_id,
-                        *release_window as u64, now,
+                        b,
+                        s,
+                        token_str.clone(),
+                        *amount,
+                        *order_id,
+                        *release_window as u64,
+                        now,
                     );
-                    run_op(&env, &client, op, &buyer, &seller, &admin, &arbitrator, &token_id);
+                    run_op(
+                        &env,
+                        &client,
+                        op,
+                        &buyer,
+                        &seller,
+                        &admin,
+                        &arbitrator,
+                        &token_id,
+                    );
                 }
                 EscrowOp::ReleaseEscrow { order_id, .. } => {
                     let now = env.ledger().timestamp();
                     let _ = model.release_escrow(*order_id, &buyer_str, now);
-                    run_op(&env, &client, op, &buyer, &seller, &admin, &arbitrator, &token_id);
+                    run_op(
+                        &env,
+                        &client,
+                        op,
+                        &buyer,
+                        &seller,
+                        &admin,
+                        &arbitrator,
+                        &token_id,
+                    );
                 }
                 EscrowOp::RefundEscrow { order_id, .. } => {
                     let now = env.ledger().timestamp();
                     let _ = model.refund_escrow(*order_id, &admin_str, &admin_str, now);
-                    run_op(&env, &client, op, &buyer, &seller, &admin, &arbitrator, &token_id);
+                    run_op(
+                        &env,
+                        &client,
+                        op,
+                        &buyer,
+                        &seller,
+                        &admin,
+                        &arbitrator,
+                        &token_id,
+                    );
                 }
                 EscrowOp::AdvanceTime { seconds } => {
                     advance_ledger_time(&env, *seconds);
                 }
                 _ => {
-                    run_op(&env, &client, op, &buyer, &seller, &admin, &arbitrator, &token_id);
+                    run_op(
+                        &env,
+                        &client,
+                        op,
+                        &buyer,
+                        &seller,
+                        &admin,
+                        &arbitrator,
+                        &token_id,
+                    );
                 }
             }
         }
@@ -516,6 +600,64 @@ fn prop_partial_refund_conservation() {
         }
     }
 }
+// ── Property 13: Invalid predecessor states fail atomically ─────────────────
+
+#[test]
+fn prop_invalid_predecessor_states_fail_atomically() {
+    let mut rng = Lcg64::new(seed_from_env() ^ 0x9999);
+
+    for _ in 0..DEFAULT_CASE_COUNT {
+        let case_seed = rng.next_u64();
+        let mut crng = Lcg64::new(case_seed);
+
+        let (env, contract_id, admin, arbitrator, buyer, seller, token_id, platform_wallet, _) =
+            fresh_env();
+        let client = CraftNexusContractClient::new(&env, &contract_id);
+        let token_client = token::Client::new(&env, &token_id);
+
+        let order_ids: alloc::vec::Vec<u32> = (1u32..=5).collect();
+        let ops = generate_escrow_sequence(&mut crng, &order_ids);
+
+        for op in &ops {
+            let snapshot = || {
+                (
+                    client.get_fund_allocation(&token_id).total_locked,
+                    token_client.balance(&client.address),
+                    token_client.balance(&buyer),
+                    token_client.balance(&seller),
+                    token_client.balance(&platform_wallet),
+                    order_ids.iter().map(|id| match client.try_get_escrow(id) {
+                        Ok(Ok(e)) => Some(alloc::format!("{:?}", e.status)),
+                        _ => None,
+                    }).collect::<alloc::vec::Vec<_>>(),
+                )
+            };
+
+            let before = snapshot();
+
+            let succeeded = run_op(&env, &client, op, &buyer, &seller, &admin, &arbitrator, &token_id);
+
+            if !succeeded {
+                let after = snapshot();
+                if before != after {
+                    panic!(
+                        "[prop_invalid_predecessor_states_fail_atomically] failed op mutated state (seed=0x{:016X})",
+                        case_seed
+                    );
+                }
+            }
+
+            let allocation = client.get_fund_allocation(&token_id);
+            let balance = token_client.balance(&client.address);
+            if allocation.total_locked > balance {
+                panic!(
+                    "[prop_invalid_predecessor_states_fail_atomically] locked({}) > balance({}) after op (seed=0x{:016X})",
+                    allocation.total_locked, balance, case_seed
+                );
+            }
+        }
+    }
+}
 
 // ── Op executor ──────────────────────────────────────────────────────────────
 
@@ -528,53 +670,71 @@ fn run_op(
     admin: &Address,
     arbitrator: &Address,
     token_id: &Address,
-) {
+) -> bool {
     match op {
-        EscrowOp::CreateEscrow { order_id, amount, release_window, same_party } => {
+        EscrowOp::CreateEscrow {
+            order_id,
+            amount,
+            release_window,
+            same_party,
+        } => {
             let s = if *same_party { buyer } else { seller };
-            let _ = client.try_create_escrow(buyer, s, token_id, amount, order_id, &Some(*release_window));
+            matches!(client.try_create_escrow(buyer, s, token_id, amount, order_id, &Some(*release_window)), Ok(Ok(_)))
+            let _ = client.try_create_escrow(
+                buyer,
+                s,
+                token_id,
+                amount,
+                order_id,
+                &Some(*release_window),
+            );
         }
         EscrowOp::FundEscrow { .. } => {
             // Escrows are funded at creation in the test environment.
+            true
         }
         EscrowOp::ReleaseEscrow { order_id, .. } => {
-            let _ = client.try_release_funds(order_id);
+            matches!(client.try_release_funds(order_id), Ok(Ok(())))
         }
         EscrowOp::RefundEscrow { order_id, .. } => {
             let eid = *order_id as u64;
-            let _ = client.try_refund(&eid);
+            matches!(client.try_refund(&eid), Ok(Ok(())))
         }
-        EscrowOp::DisputeEscrow { order_id, initiator } => {
+        EscrowOp::DisputeEscrow {
+            order_id,
+            initiator,
+        } => {
             let caller = match initiator {
                 0 => buyer,
                 1 => seller,
                 _ => admin,
             };
-            let _ = client.try_dispute_escrow(
-                order_id,
-                &Symbol::new(env, "Reason"),
-                caller,
-            );
+            matches!(client.try_dispute_escrow(order_id, &Symbol::new(env, "Reason"), caller), Ok(Ok(())))
+            let _ = client.try_dispute_escrow(order_id, &Symbol::new(env, "Reason"), caller);
         }
-        EscrowOp::ResolveDispute { order_id, release_to_seller } => {
+        EscrowOp::ResolveDispute {
+            order_id,
+            release_to_seller,
+        } => {
             let resolution = if *release_to_seller {
                 Resolution::ReleaseToSeller
             } else {
                 Resolution::RefundToBuyer
             };
-            let _ = client.try_resolve_dispute(order_id, &resolution, arbitrator);
+            matches!(client.try_resolve_dispute(order_id, &resolution, arbitrator), Ok(Ok(())))
         }
         EscrowOp::ResolveExpiredDispute { order_id } => {
-            let _ = client.try_resolve_expired_dispute(order_id);
+            matches!(client.try_resolve_expired_dispute(order_id), Ok(Ok(())))
         }
         EscrowOp::AutoRelease { order_id } => {
-            let _ = client.try_auto_release(order_id);
+            matches!(client.try_auto_release(order_id), Ok(Ok(())))
         }
         EscrowOp::AdvanceTime { seconds } => {
             advance_ledger_time(env, *seconds);
+            true
         }
         EscrowOp::OperateOnMissingEscrow => {
-            let _ = client.try_release_funds(&999_999u32);
+            matches!(client.try_release_funds(&999_999u32), Ok(Ok(())))
         }
     }
 }
@@ -644,64 +804,89 @@ fn prop_model_shrinking_minimal_reproducers() {
         }
 
         // Execute and check for invariant violations
-        let execute_sequence = |seq: &[ShrinkableOp<EscrowOp>]| -> Result<InvariantReport, alloc::string::String> {
-            let (env, contract_id, admin, arbitrator, buyer, seller, token_id, _, _) = fresh_env();
-            let client = CraftNexusContractClient::new(&env, &contract_id);
+        let execute_sequence =
+            |seq: &[ShrinkableOp<EscrowOp>]| -> Result<InvariantReport, alloc::string::String> {
+                let (env, contract_id, admin, arbitrator, buyer, seller, token_id, _, _) =
+                    fresh_env();
+                let client = CraftNexusContractClient::new(&env, &contract_id);
 
-            let mut order_counter = 100u32;
+                let mut order_counter = 100u32;
 
-            for (step, sop) in seq.iter().enumerate() {
-                match &sop.op {
-                    EscrowOp::CreateEscrow { order_id, amount, release_window, same_party } => {
-                        let s = if *same_party { &buyer } else { &seller };
-                        if client.try_create_escrow(&buyer, s, &token_id, amount, order_id, &Some(*release_window)).is_ok() {
-                            order_counter = order_counter.max(*order_id + 1);
+                for (step, sop) in seq.iter().enumerate() {
+                    match &sop.op {
+                        EscrowOp::CreateEscrow {
+                            order_id,
+                            amount,
+                            release_window,
+                            same_party,
+                        } => {
+                            let s = if *same_party { &buyer } else { &seller };
+                            if client
+                                .try_create_escrow(
+                                    &buyer,
+                                    s,
+                                    &token_id,
+                                    amount,
+                                    order_id,
+                                    &Some(*release_window),
+                                )
+                                .is_ok()
+                            {
+                                order_counter = order_counter.max(*order_id + 1);
+                            }
                         }
+                        EscrowOp::ReleaseEscrow { order_id, .. } => {
+                            let _ = client.try_release_funds(order_id);
+                        }
+                        EscrowOp::RefundEscrow { order_id, .. } => {
+                            let eid = *order_id as u64;
+                            let _ = client.try_refund(&eid);
+                        }
+                        EscrowOp::DisputeEscrow { order_id, .. } => {
+                            let _ = client.try_dispute_escrow(
+                                order_id,
+                                &Symbol::new(&env, "Test"),
+                                &buyer,
+                            );
+                        }
+                        EscrowOp::ResolveDispute {
+                            order_id,
+                            release_to_seller,
+                        } => {
+                            let resolution = if *release_to_seller {
+                                Resolution::ReleaseToSeller
+                            } else {
+                                Resolution::RefundToBuyer
+                            };
+                            let _ = client.try_resolve_dispute(order_id, &resolution, &arbitrator);
+                        }
+                        EscrowOp::AdvanceTime { seconds } => {
+                            advance_ledger_time(&env, *seconds);
+                        }
+                        EscrowOp::AutoRelease { order_id } => {
+                            let _ = client.try_auto_release(order_id);
+                        }
+                        _ => {}
                     }
-                    EscrowOp::ReleaseEscrow { order_id, .. } => {
-                        let _ = client.try_release_funds(order_id);
+
+                    // Check fund conservation invariant after each operation
+                    let allocation = client.get_fund_allocation(&token_id);
+                    let balance = token::Client::new(&env, &token_id).balance(&client.address);
+                    if allocation.total_locked > balance {
+                        return Ok(InvariantReport::violation(
+                            step,
+                            alloc::format!(
+                                "Fund conservation violated: locked({}) > balance({})",
+                                allocation.total_locked,
+                                balance
+                            ),
+                            super::harness::StateTransition::None,
+                        ));
                     }
-                    EscrowOp::RefundEscrow { order_id, .. } => {
-                        let eid = *order_id as u64;
-                        let _ = client.try_refund(&eid);
-                    }
-                    EscrowOp::DisputeEscrow { order_id, .. } => {
-                        let _ = client.try_dispute_escrow(order_id, &Symbol::new(&env, "Test"), &buyer);
-                    }
-                    EscrowOp::ResolveDispute { order_id, release_to_seller } => {
-                        let resolution = if *release_to_seller {
-                            Resolution::ReleaseToSeller
-                        } else {
-                            Resolution::RefundToBuyer
-                        };
-                        let _ = client.try_resolve_dispute(order_id, &resolution, &arbitrator);
-                    }
-                    EscrowOp::AdvanceTime { seconds } => {
-                        advance_ledger_time(&env, *seconds);
-                    }
-                    EscrowOp::AutoRelease { order_id } => {
-                        let _ = client.try_auto_release(order_id);
-                    }
-                    _ => {}
                 }
 
-                // Check fund conservation invariant after each operation
-                let allocation = client.get_fund_allocation(&token_id);
-                let balance = token::Client::new(&env, &token_id).balance(&client.address);
-                if allocation.total_locked > balance {
-                    return Ok(InvariantReport::violation(
-                        step,
-                        alloc::format!(
-                            "Fund conservation violated: locked({}) > balance({})",
-                            allocation.total_locked, balance
-                        ),
-                        super::harness::StateTransition::None,
-                    ));
-                }
-            }
-
-            Ok(InvariantReport::clean())
-        };
+                Ok(InvariantReport::clean())
+            };
 
         // Execute original sequence
         let result = execute_sequence(&sequence);
@@ -710,9 +895,10 @@ fn prop_model_shrinking_minimal_reproducers() {
         if let Ok(report) = result {
             if report.has_violation() {
                 // Shrink the sequence
-                let shrunk = shrink_model_based(sequence.clone(), |seq| {
-                    matches!(execute_sequence(seq), Ok(r) if r.has_violation())
-                });
+                let shrunk = shrink_model_based(
+                    sequence.clone(),
+                    |seq| matches!(execute_sequence(seq), Ok(r) if r.has_violation()),
+                );
 
                 println!(
                     "[prop_model_shrinking_minimal_reproducers] Test iteration {}:\n  \

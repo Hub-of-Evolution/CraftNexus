@@ -14,7 +14,10 @@
 #![cfg(test)]
 extern crate alloc;
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, token, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    token, Address, Env,
+};
 
 use super::{
     generators::{generate_staking_sequence, StakingOp},
@@ -293,19 +296,22 @@ fn prop_model_stake_queue_consistency() {
 
         for op in &ops {
             match op {
-                StakingOp::Stake { amount, wrong_token } => {
+                StakingOp::Stake {
+                    amount,
+                    wrong_token,
+                } => {
                     if *wrong_token {
                         continue; // token-mismatch tested separately
                     }
-                    let _ = model.stake(
-                        artisan_str.clone(),
-                        token_str.clone(),
-                        *amount,
-                        ledger_time,
-                    );
+                    let _ =
+                        model.stake(artisan_str.clone(), token_str.clone(), *amount, ledger_time);
                     let _ = client.try_stake_tokens(&artisan, &token_id, amount);
                 }
-                StakingOp::Unstake { before_cooldown, wrong_token, .. } => {
+                StakingOp::Unstake {
+                    before_cooldown,
+                    wrong_token,
+                    ..
+                } => {
                     if *wrong_token {
                         continue;
                     }
@@ -393,6 +399,172 @@ fn prop_stake_balance_monotone_increasing() {
                 );
             }
             prev_stake = current;
+        }
+    }
+}
+
+// ── Property 10: Randomized invalid sequences match model and preserve atomicity ──
+
+/// Randomized valid and invalid predecessor states are checked against the
+/// reference model. A failed contract call must leave stake and token balances
+/// unchanged, and a successful call must agree with the model. Deterministic
+/// seeds are included in every failure report.
+#[test]
+fn prop_random_sequences_match_model_and_preserve_atomicity() {
+    let mut rng = Lcg64::new(seed_from_env() ^ 0xAACC);
+
+    for _ in 0..DEFAULT_CASE_COUNT {
+        let case_seed = rng.next_u64();
+        let mut crng = Lcg64::new(case_seed);
+
+        let (env, contract_id, _admin, artisan, token_id) = make_staking_env();
+        let client = CraftNexusContractClient::new(&env, &contract_id);
+        let token_client = token::Client::new(&env, &token_id);
+        let token_admin = token::StellarAssetClient::new(&env, &token_id);
+
+        // Second whitelisted token exercises token-outcome mismatches.
+        let token2_admin = Address::generate(&env);
+        let token2_contract = env.register_stellar_asset_contract_v2(token2_admin.clone());
+        let token2_id = token2_contract.address();
+        let token2_admin_client = token::StellarAssetClient::new(&env, &token2_id);
+        let token2_client = token::Client::new(&env, &token2_id);
+        let _ = client.try_whitelist_token(&token2_id);
+
+        // Random actors exercise per-actor lifecycle interactions.
+        let mut actors = alloc::vec![artisan.clone()];
+        for _ in 0..2 {
+            let actor = Address::generate(&env);
+            token_admin.mint(&actor, &10_000_000_000i128);
+            token2_admin_client.mint(&actor, &10_000_000_000i128);
+            actors.push(actor);
+        }
+
+        let mut model = ModelState::new();
+        let token_str = alloc::format!("{:?}", token_id);
+        let token2_str = alloc::format!("{:?}", token2_id);
+        let ops = generate_staking_sequence(&mut crng);
+        let mut ledger_time: u64 = 1_711_368_000;
+
+        for op in &ops {
+            let actor = &actors[crng.next_usize(actors.len())];
+            let actor_str = alloc::format!("{:?}", actor);
+
+            match op {
+                StakingOp::Stake { amount, wrong_token } => {
+                    let stake_token = if *wrong_token { &token2_id } else { &token_id };
+                    let stake_token_str = if *wrong_token { &token2_str } else { &token_str };
+                    let stake_token_client = if *wrong_token { &token2_client } else { &token_client };
+
+                    let stake_before = client.get_stake(actor);
+                    let balance_before = stake_token_client.balance(actor);
+
+                    let model_ok = model
+                        .stake(
+                            actor_str.clone(),
+                            stake_token_str.clone(),
+                            *amount,
+                            ledger_time,
+                        )
+                        .is_ok();
+                    let res = client.try_stake_tokens(actor, stake_token, amount);
+                    let client_ok = res.is_ok() && res.unwrap().is_ok();
+
+                    if model_ok != client_ok {
+                        panic!(
+                            "[prop_random_sequences_match_model_and_preserve_atomicity] stake mismatch \
+                             model_ok={} client_ok={} amount={} actor={} token={} seed=0x{:016X}",
+                            model_ok, client_ok, amount, actor_str, stake_token_str, case_seed
+                        );
+                    }
+
+                    if !client_ok {
+                        let stake_after = client.get_stake(actor);
+                        let balance_after = stake_token_client.balance(actor);
+                        if stake_after != stake_before || balance_after != balance_before {
+                            panic!(
+                                "[prop_random_sequences_match_model_and_preserve_atomicity] failed stake \
+                                 mutated state seed=0x{:016X}",
+                                case_seed
+                            );
+                        }
+                    }
+                }
+                StakingOp::Unstake { wrong_token, .. } => {
+                    let stake_token = if *wrong_token { &token2_id } else { &token_id };
+                    let stake_token_str = if *wrong_token { &token2_str } else { &token_str };
+                    let stake_token_client = if *wrong_token { &token2_client } else { &token_client };
+
+                    let stake_before = client.get_stake(actor);
+                    let balance_before = stake_token_client.balance(actor);
+
+                    let model_ok = model
+                        .unstake(&actor_str, stake_token_str, i128::MAX, ledger_time)
+                        .is_ok();
+                    let res = client.try_unstake_tokens(actor, stake_token);
+                    let client_ok = res.is_ok() && res.unwrap().is_ok();
+
+                    if model_ok != client_ok {
+                        panic!(
+                            "[prop_random_sequences_match_model_and_preserve_atomicity] unstake mismatch \
+                             model_ok={} client_ok={} actor={} token={} seed=0x{:016X}",
+                            model_ok, client_ok, actor_str, stake_token_str, case_seed
+                        );
+                    }
+
+                    if !client_ok {
+                        let stake_after = client.get_stake(actor);
+                        let balance_after = stake_token_client.balance(actor);
+                        if stake_after != stake_before || balance_after != balance_before {
+                            panic!(
+                                "[prop_random_sequences_match_model_and_preserve_atomicity] failed unstake \
+                                 mutated state seed=0x{:016X}",
+                                case_seed
+                            );
+                        }
+                    }
+                }
+                StakingOp::AdvanceTime { seconds } => {
+                    advance_ledger_time(&env, *seconds);
+                    ledger_time = ledger_time.saturating_add(*seconds);
+                }
+                StakingOp::UnstakeEmpty => {
+                    let stake_before = client.get_stake(actor);
+                    let balance_before = token_client.balance(actor);
+
+                    let model_ok = model
+                        .unstake(&actor_str, &token_str, 1, ledger_time)
+                        .is_ok();
+                    let res = client.try_unstake_tokens(actor, &token_id);
+                    let client_ok = res.is_ok() && res.unwrap().is_ok();
+
+                    if model_ok != client_ok {
+                        panic!(
+                            "[prop_random_sequences_match_model_and_preserve_atomicity] empty unstake mismatch \
+                             model_ok={} client_ok={} actor={} seed=0x{:016X}",
+                            model_ok, client_ok, actor_str, case_seed
+                        );
+                    }
+
+                    if !client_ok {
+                        let stake_after = client.get_stake(actor);
+                        let balance_after = token_client.balance(actor);
+                        if stake_after != stake_before || balance_after != balance_before {
+                            panic!(
+                                "[prop_random_sequences_match_model_and_preserve_atomicity] failed empty \
+                                 unstake mutated state seed=0x{:016X}",
+                                case_seed
+                            );
+                        }
+                    }
+                }
+            }
+
+            if let Err(msg) = model.check_stake_queue_consistency() {
+                panic!(
+                    "[prop_random_sequences_match_model_and_preserve_atomicity] {} seed=0x{:016X}",
+                    msg, case_seed
+                );
+            }
         }
     }
 }

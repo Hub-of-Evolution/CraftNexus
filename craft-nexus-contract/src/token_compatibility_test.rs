@@ -71,8 +71,12 @@ struct RecordingToken;
 #[contractimpl]
 impl RecordingToken {
     pub fn initialize(env: Env) {
-        env.storage().instance().set(&Symbol::new(&env, "transfer_calls"), &0u32);
-        env.storage().instance().set(&Symbol::new(&env, "last_amount"), &0i128);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "transfer_calls"), &0u32);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "last_amount"), &0i128);
     }
     pub fn decimals(_env: Env) -> u32 {
         7
@@ -81,15 +85,29 @@ impl RecordingToken {
         5_000_000
     }
     pub fn transfer(env: Env, _from: Address, _to: Address, amount: i128) {
-        let calls: u32 = env.storage().instance().get(&Symbol::new(&env, "transfer_calls")).unwrap_or(0);
-        env.storage().instance().set(&Symbol::new(&env, "transfer_calls"), &(calls + 1));
-        env.storage().instance().set(&Symbol::new(&env, "last_amount"), &amount);
+        let calls: u32 = env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "transfer_calls"))
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "transfer_calls"), &(calls + 1));
+        env.storage()
+            .instance()
+            .set(&Symbol::new(&env, "last_amount"), &amount);
     }
     pub fn get_transfer_calls(env: Env) -> u32 {
-        env.storage().instance().get(&Symbol::new(&env, "transfer_calls")).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "transfer_calls"))
+            .unwrap_or(0)
     }
     pub fn get_last_amount(env: Env) -> i128 {
-        env.storage().instance().get(&Symbol::new(&env, "last_amount")).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "last_amount"))
+            .unwrap_or(0)
     }
 }
 
@@ -203,18 +221,30 @@ fn validate_compatibility_zero_transfer_probe_is_non_mutating() {
     RecordingTokenClient::new(&env, &token_id).initialize();
 
     // Before validation, no transfers recorded
-    assert_eq!(RecordingTokenClient::new(&env, &token_id).get_transfer_calls(), 0);
+    assert_eq!(
+        RecordingTokenClient::new(&env, &token_id).get_transfer_calls(),
+        0
+    );
 
     client.validate_token_compatibility(&token_id).unwrap();
 
     // Transfer must have been probed exactly once with amount 0
-    assert_eq!(RecordingTokenClient::new(&env, &token_id).get_transfer_calls(), 1);
-    assert_eq!(RecordingTokenClient::new(&env, &token_id).get_last_amount(), 0);
+    assert_eq!(
+        RecordingTokenClient::new(&env, &token_id).get_transfer_calls(),
+        1
+    );
+    assert_eq!(
+        RecordingTokenClient::new(&env, &token_id).get_last_amount(),
+        0
+    );
 
     // is_token_supported also probes (should be another call)
     let supported = client.is_token_supported(&token_id);
     assert!(supported);
-    assert_eq!(RecordingTokenClient::new(&env, &token_id).get_transfer_calls(), 2);
+    assert_eq!(
+        RecordingTokenClient::new(&env, &token_id).get_transfer_calls(),
+        2
+    );
 }
 
 #[test]
