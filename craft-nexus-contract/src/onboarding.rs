@@ -60,9 +60,10 @@
 //! - `UserVerified`, `UsernameChanged`, and `PortfolioUpdated` carry only the
 //!   address; fetch the current value via [`OnboardingContract::get_user`] when
 //!   the new field value is needed.
-//! - `UserOnboarded` is emitted exactly once per address — a second
-//!   `onboard_user` call for the same address panics with
-//!   [`Error::AlreadyOnboarded`] and emits nothing.
+//! - `UserOnboarded` is emitted exactly once per address. An identical
+//!   `onboard_user` retry returns the canonical profile and repairs missing
+//!   secondary state without emitting another event. A retry with a different
+//!   username or role panics with [`Error::AlreadyOnboarded`] (#929).
 //!
 //! ## Cross-contract interface
 //!
@@ -87,8 +88,8 @@
 
 use crate::alloc::string::ToString;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes, Env,
-    Map, String, Symbol, TryFromVal, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Bytes,
+    BytesN, Env, Map, String, Symbol, TryFromVal, Val, Vec,
 };
 
 /// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
@@ -97,6 +98,7 @@ const READ_TTL_THRESHOLD: u32 = 1_000;
 /// Standard TTL extension for persistent storage (approx 30 days)
 const TTL_EXTENSION: u32 = 518_400;
 const CURRENT_USER_PROFILE_VERSION: u32 = 5;
+const OBSERVABILITY_METRICS_KEY: Symbol = symbol_short!("OBS_MET");
 
 const BASE58_BTC_CHARSET: [bool; 256] = {
     let mut chars = [false; 256];
@@ -167,8 +169,90 @@ const DEFAULT_MAX_SUCCESSFUL_PER_WINDOW: u32 = 5;
 const DEFAULT_MIN_REPUTATION_SETTLEMENT: i128 = 10_000_000;
 /// Bounded reputation history retained per user for abuse-pattern detection.
 const MAX_REPUTATION_HISTORY: u32 = 20;
+/// Version of the observability metrics schema.
+const OBSERVABILITY_METRICS_VERSION: u32 = 1;
 /// Cap decay intervals applied in one call to bound CPU (≈ 64 periods).
 const MAX_DECAY_INTERVALS_PER_CALL: u64 = 64;
+
+/// Immutable snapshot of user/global state at settlement decision time.
+#[contracttype]
+#[derive(Clone)]
+pub struct SettlementSnapshot {
+    pub revision: u64,
+    pub user: Address,
+    pub role: UserRole,
+    pub metrics: UserMetrics,
+    pub trust_score: u32,
+    pub reputation_policy: ReputationPolicy,
+    pub min_reputation_settlement: i128,
+    pub config: OnboardingConfig,
+    pub timestamp: u64,
+}
+
+#[contractimpl]
+impl OnboardingContract {
+    /// Creates an immutable settlement snapshot for a user and returns its revision.
+    /// Can only be called by the configured escrow contract (or platform_admin fallback).
+    pub fn create_settlement_snapshot(env: Env, user: Address) -> u64 {
+        let config = Self::get_config(env.clone());
+        let caller = config
+            .escrow_contract
+            .clone()
+            .unwrap_or_else(|| config.platform_admin.clone());
+        caller.require_auth();
+
+        let mut counter: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SettlementSnapshotCounter)
+            .unwrap_or(0);
+        counter += 1;
+        let revision = counter;
+
+        let snapshot = SettlementSnapshot {
+            revision,
+            user: user.clone(),
+            role: Self::get_user_role(env.clone(), user.clone()),
+            metrics: Self::get_user_metrics(env.clone(), user.clone()),
+            trust_score: Self::get_trust_score(env.clone(), user.clone()),
+            reputation_policy: Self::get_reputation_policy(env.clone()),
+            min_reputation_settlement: Self::get_min_reputation_settlement(env.clone()),
+            config: Self::get_config(env.clone()),
+            timestamp: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::SettlementSnapshot(revision), &snapshot);
+        env.storage()
+            .persistent()
+            .set(&DataKey::SettlementSnapshotCounter, &revision);
+        revision
+    }
+
+    /// Returns the immutable settlement snapshot for audit by revision.
+    pub fn get_settlement_snapshot(env: Env, revision: u64) -> SettlementSnapshot {
+        env.storage()
+            .persistent()
+            .get(&DataKey::SettlementSnapshot(revision))
+            .expect("settlement snapshot not found")
+    }
+}
+
+/// Shared authorization adapter for privileged entry points.
+///
+/// Every privileged marketplace flow (escrow, dispute, stake, recovery,
+/// governance) MUST call [`AuthorizationAdapter::authorize`] at its own
+/// boundary to reject stale, deactivated, or inconsistent onboarding state.
+/// Implementations MUST read the latest persisted onboarding state and MUST
+/// NOT rely on cached or caller-supplied values.
+pub trait AuthorizationAdapter {
+    /// Rejects the call if `user` is not currently onboarded and active.
+    ///
+    /// Panics with [`Error::Unauthorized`] if the state is missing, deactivated,
+    /// or inconsistent.
+    fn authorize(&self, env: Env, user: Address);
+}
 
 #[cfg(not(target_family = "wasm"))]
 #[path = "decimal_test_token.rs"]
@@ -189,6 +273,19 @@ mod onboarding_test;
 /// accidental expiry of user profiles.
 #[contracttype]
 #[derive(Clone)]
+pub struct ObservabilityMetrics {
+    pub version: u32,
+    pub escrow_volume: i128,
+    pub disputes: u64,
+    pub staking_events: u64,
+    pub failures: u64,
+    pub active_jobs: u64,
+    pub reset_count: u64,
+    pub last_reset_ledger: u32,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub enum DataKey {
     /// Maps a user address to their flat persisted profile record
     UserProfile(Address),
@@ -203,6 +300,14 @@ pub enum DataKey {
     /// Active contract counter per user (Issue #39)
     /// Tracks the number of active escrows/agreements for an address.
     ActiveContractCount(Address),
+    /// Total active user profiles.
+    ActiveUserCount,
+    /// Total successful onboarding operations.
+    GlobalOnboardCount,
+    /// Total username changes.
+    GlobalUsernameChangeCount,
+    /// Total admin profile-management actions.
+    GlobalAdminActionCount,
     /// Pending manual verification request marker keyed by user (#138).
     /// Stored in **temporary** storage (#702): cleared on approve/reject/clear and
     /// must not receive `extend_ttl` (default temporary expiry is sufficient).
@@ -213,6 +318,10 @@ pub enum DataKey {
     VerificationQueueTail,
     /// Queue index -> address mapping for manual verification requests (#138)
     VerificationQueueIndex(u64),
+    /// Number of pending manual verification requests (#730).
+    /// Incremented on enqueue and saturating-decremented on clear so concurrent
+    /// admin approve/clear races cannot drive the counter below zero.
+    VerificationQueueCount,
     /// DEPRECATED: Legacy Vec-based verification history (#63).
     /// Migrated lazily to indexed compact entries (#519).
     VerificationHistory(Address),
@@ -238,6 +347,10 @@ pub enum DataKey {
     ReputationHistoryCount(Address),
     /// Indexed compact reputation history entry (#939)
     ReputationHistoryIndexed(Address, u32),
+    /// Immutable settlement snapshot keyed by revision.
+    SettlementSnapshot(u64),
+    /// Monotonic counter for settlement snapshot revisions.
+    SettlementSnapshotCounter,
     /// Proof-of-Humanity credential record keyed by user address (#940)
     UserPohCredential(Address),
     /// Secondary index mapping proof-of-humanity credential hash to owner address (#940)
@@ -271,25 +384,17 @@ pub enum DataKey {
     /// Anti-Sybil onboarding rate limit window in seconds (#940)
     OnboardingRateLimitWindow,
     /// Maximum onboarding attempts allowed per window (#940)
-    MaxOnboardingAttemptsPerWindow,
+    MaxOnboardAttempts,
     /// Verification request cooldown in seconds (#940)
     VerificationCooldown,
     /// Whether Proof-of-Humanity is required for auto/manual verification (#940)
     PohRequiredForAutoVerify,
     /// Optional Proof-of-Humanity verifier address (#940)
     PohVerifier,
-    /// Count of currently active (non-deactivated) users
-    ActiveUserCount,
-    /// Monotonically increasing state version for a user profile — incremented
-    /// on role changes, verification transitions, deactivation, and reactivation
-    /// so downstream contracts can detect stale onboarding state.
-    UserStateVersion(Address),
-    /// Global onboard event counter
-    GlobalOnboardCount,
-    /// Global username-change event counter
-    GlobalUsernameChangeCount,
-    /// Global admin-action event counter
-    GlobalAdminActionCount,
+    /// Monotonic canonical onboarding state revision per user.
+    UserStateRevision(Address),
+    /// An operation binding already consumed by an escrow contract.
+    UsedAttestation(Address, Bytes),
 }
 
 /// User roles in the CraftNexus platform.
@@ -378,6 +483,23 @@ pub struct UserProfile {
     /// verification transitions, deactivation, and reactivation so downstream
     /// contracts can detect stale onboarding state.
     pub state_version: u32,
+}
+
+/// Coherent onboarding state proof for a single privileged marketplace operation.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct OnboardingAttestation {
+    pub account: Address,
+    pub profile_version: u32,
+    pub role: UserRole,
+    pub is_verified: bool,
+    pub status: ProfileStatus,
+    pub state_revision: u64,
+    pub ledger_sequence: u32,
+    pub operation_id: Bytes,
+    pub contract_instance: Address,
+    pub state_digest: BytesN<32>,
 }
 
 /// Flat persistent representation stored under [`DataKey::UserProfile`].
@@ -479,11 +601,13 @@ pub struct UserMetrics {
 /// Event emitted when a new user successfully onboards via [`OnboardingContract::onboard_user`].
 ///
 /// Topic: `("UserOnboarded",)` — emitted to the contract's event stream.
-/// Data shape: `UserOnboardedEvent { user, username, role }`.
+/// Data shape: `UserOnboardedEvent { schema_version, user, username, role }`.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct UserOnboardedEvent {
+    /// Lifecycle event schema version. Consumers must branch on this before decoding.
+    pub schema_version: u32,
     /// The newly onboarded user's address
     pub user: Address,
     /// Normalized username assigned to the user
@@ -507,6 +631,7 @@ pub struct UserOnboardedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct OnboardCallFailedEvent {
+    pub schema_version: u32,
     /// The address that attempted to onboard
     pub user: Address,
     /// The error discriminant that caused the failure (see [`Error`])
@@ -518,6 +643,7 @@ pub struct OnboardCallFailedEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AutoVerifiedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub escrow_count: u32,
     pub volume: u64,
@@ -800,6 +926,7 @@ pub struct AttemptRatePolicy {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct AttemptRateLimitedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub operation: Symbol,
     pub scope: Symbol,
@@ -811,6 +938,7 @@ pub struct AttemptRateLimitedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct SybilPatternDetectedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub reason: Symbol,
     pub timestamp: u64,
@@ -820,6 +948,7 @@ pub struct SybilPatternDetectedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct PohCredentialRegisteredEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub provider_id: Symbol,
     pub credential_hash: Bytes,
@@ -829,6 +958,7 @@ pub struct PohCredentialRegisteredEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct IdentityCorrelatedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub identity_hash: Bytes,
 }
@@ -837,6 +967,7 @@ pub struct IdentityCorrelatedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct ProfileFlaggedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub reason_code: u32,
     pub timestamp: u64,
@@ -846,6 +977,7 @@ pub struct ProfileFlaggedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct ReviewCompletedEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub action: Symbol,
     pub timestamp: u64,
@@ -855,6 +987,7 @@ pub struct ReviewCompletedEvent {
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub struct SybilReviewDecisionEvent {
+    pub schema_version: u32,
     pub user: Address,
     pub reviewer: Address,
     pub profile_revision: u32,
@@ -869,14 +1002,44 @@ pub struct SybilReviewDecisionEvent {
 /// deployments), readers fall back to the compile-time defaults.
 ///
 /// ## Policy semantics
-/// - Every `decay_interval_secs`, `trust_score` is multiplied by
-///   `(10_000 - decay_bps) / 10_000` (lazy, on read/write).
-/// - Successful increments are rejected while
-///   `now < last_success_update_at + update_cooldown_secs`.
-/// - Inside each `farming_window_secs` window, at most
-///   `max_successful_per_window` successful increments are credited.
-/// - Disputed increments are never delayed or capped — adverse outcomes always
-///   apply so bad actors cannot hide behind cooldown.
+/// Decay is modelled as **deterministic time buckets** (#1082). Time is divided
+/// into consecutive buckets of `decay_interval_secs` seconds. Each time the
+/// score is (re)computed at ledger time `now`, the whole number of buckets that
+/// have elapsed since `last_decay_at` is `buckets = (now - last_decay_at) /
+/// decay_interval_secs`. The score is then multiplied by
+/// `(10_000 - decay_bps) / 10_000` exactly `buckets` times, using floor
+/// (truncating) integer arithmetic so the result is identical for the same
+/// inputs and can never exceed the pre-decay value.
+///
+/// ### Determinism & safety guarantees
+/// - **Same history → same score.** The decayed score is a pure function of the
+///   stored `trust_score`, `last_decay_at`, the policy, and the ledger time.
+///   Repeated reads at the same ledger time always return the same value.
+/// - **No underflow / no inflation.** Decay only ever multiplies by a factor
+///   `<= 1`, saturating at `0`. It can never produce a negative score or create
+///   trust that was not earned.
+/// - **Bounded CPU.** At most [`MAX_DECAY_INTERVALS_PER_CALL`] buckets are
+///   applied in a single evaluation; any remaining elapsed time is carried
+///   forward and applied on the next lazy or scheduled evaluation, keeping every
+///   call within the contract budget even after years of inactivity.
+///
+/// ### Lazy vs scheduled application
+/// - **Lazy:** decay is applied automatically inside every read
+///   ([`OnboardingContract::get_trust_score`],
+///   [`OnboardingContract::get_reputation_state`]) and write
+///   ([`OnboardingContract::update_reputation`],
+///   [`OnboardingContract::update_reputation_for_settlement`]). Callers always
+///   observe a current score without any background job.
+/// - **Scheduled:** off-chain indexers / cron jobs can force an evaluation and
+///   persist the result via
+///   [`OnboardingContract::apply_reputation_decay_now`], keeping scores current
+///   independently of user activity.
+///
+/// Successful increments are rejected while
+/// `now < last_success_update_at + update_cooldown_secs`. Inside each
+/// `farming_window_secs` window, at most `max_successful_per_window` successful
+/// increments are credited. Disputed increments are never delayed or capped —
+/// adverse outcomes always apply so bad actors cannot hide behind cooldown.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -1019,18 +1182,32 @@ pub enum Error {
     PohCredentialExpired = 24,
     /// Cooldown period for manual verification request is still active (#940)
     VerificationCooldownActive = 25,
+    /// The onboarding state revision cannot be incremented further.
+    StateRevisionExhausted = 26,
+    /// An onboarding attestation is absent, stale, malformed, or inconsistent.
+    InvalidAttestation = 27,
+    /// An operation binding has already been consumed.
+    AttestationReplay = 28,
     /// Volume accumulator overflowed
-    VolumeOverflow = 26,
+    VolumeOverflow = 29,
+    /// Escrow count accumulator overflowed (#1028)
+    EscrowCountOverflow = 30,
+    /// Active contracts accumulator overflowed (#1028)
+    ActiveContractOverflow = 31,
+    /// Profile schema version is not supported by this contract (#1056)
+    UnsupportedProfileVersion = 32,
     /// Attempt rate policy contains an unusable limit configuration (#1084)
-    InvalidRateLimitPolicy = 27,
+    InvalidRateLimitPolicy = 33,
     /// Review decision does not match the current profile revision (#1086)
-    ReviewRevisionMismatch = 28,
+    ReviewRevisionMismatch = 34,
     /// Review window expired before a decision was submitted (#1086)
-    ReviewExpired = 29,
+    ReviewExpired = 35,
     /// Requested review transition is not valid from the current state (#1086)
-    InvalidReviewTransition = 30,
+    InvalidReviewTransition = 36,
     /// Caller is not an authorized Sybil reviewer (#1086)
-    UnauthorizedReviewer = 31,
+    UnauthorizedReviewer = 37,
+    /// Token transfer failed while collecting a fee.
+    TokenTransferFailed = 38,
 }
 
 /// Cross-contract interface the onboarding contract uses to query the escrow
@@ -1432,6 +1609,30 @@ impl OnboardingContract {
         Self::extend_persistent(env, &key);
     }
 
+    fn get_verification_queue_count(env: &Env) -> u32 {
+        Self::read_persistent(env, &DataKey::VerificationQueueCount).unwrap_or(0u32)
+    }
+
+    fn set_verification_queue_count(env: &Env, count: u32) {
+        let key = DataKey::VerificationQueueCount;
+        if count == 0 {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &count);
+            Self::extend_persistent(env, &key);
+        }
+    }
+
+    /// Decrement the pending verification request count without going negative.
+    ///
+    /// Issue #730: concurrent admin approve/clear of the same request must not
+    /// underflow this counter. Saturating subtraction keeps storage consistent
+    /// even if a caller clears after the pending marker is already gone.
+    fn decrement_verification_queue_count(env: &Env) {
+        let count = Self::get_verification_queue_count(env);
+        Self::set_verification_queue_count(env, count.saturating_sub(1));
+    }
+
     fn is_verification_pending_internal(env: &Env, user: &Address) -> bool {
         let key = DataKey::VerificationRequest(user.clone());
         // Issue #702: pending markers live in temporary storage. Do not call
@@ -1455,6 +1656,8 @@ impl OnboardingContract {
             .set(&pending_key, &env.ledger().timestamp());
 
         Self::set_queue_pointer(env, DataKey::VerificationQueueTail, tail + 1);
+        let count = Self::get_verification_queue_count(env);
+        Self::set_verification_queue_count(env, count.saturating_add(1));
     }
 
     fn advance_verification_head(env: &Env) {
@@ -1482,12 +1685,23 @@ impl OnboardingContract {
         Self::set_queue_pointer(env, DataKey::VerificationQueueHead, head);
     }
 
-    fn clear_verification_request(env: &Env, user: &Address) {
+    /// Clear a pending verification request and compact the queue head.
+    ///
+    /// Returns `true` when a pending marker existed and was removed. Concurrent
+    /// admin clears of the same user are idempotent: the second call finds no
+    /// pending marker, skips the count decrement, and returns `false` (#730).
+    fn clear_verification_request(env: &Env, user: &Address) -> bool {
         let pending_key = DataKey::VerificationRequest(user.clone());
+        if !Self::is_verification_pending_internal(env, user) {
+            return false;
+        }
+
         env.storage().temporary().remove(&pending_key);
         // Drop any legacy persistent marker left by pre-#702 deployments.
         env.storage().persistent().remove(&pending_key);
+        Self::decrement_verification_queue_count(env);
         Self::advance_verification_head(env);
+        true
     }
 
     fn get_attempt_rate_policy_internal(env: &Env) -> AttemptRatePolicy {
@@ -1501,7 +1715,7 @@ impl OnboardingContract {
                 .unwrap_or(3_600),
                 max_onboarding_per_account: Self::read_persistent(
                     env,
-                    &DataKey::MaxOnboardingAttemptsPerWindow,
+                    &DataKey::MaxOnboardAttempts,
                 )
                 .unwrap_or(3),
                 max_onboarding_global: 100,
@@ -1525,26 +1739,26 @@ impl OnboardingContract {
     fn consume_attempt_capacity(env: &Env, user: &Address, verification: bool) {
         let policy = Self::get_attempt_rate_policy_internal(env);
         let now = env.ledger().timestamp();
-        let (account_key, global_key, window, account_max, global_max, operation) =
-            if verification {
-                (
-                    DataKey::VerificationRateLimitTracker(user.clone()),
-                    DataKey::GlobalVerificationRateLimit,
-                    policy.verification_window_secs,
-                    policy.max_verification_per_account,
-                    policy.max_verification_global,
-                    Symbol::new(env, "verification"),
-                )
-            } else {
-                (
-                    DataKey::RateLimitTracker(user.clone()),
-                    DataKey::GlobalOnboardingRateLimit,
-                    policy.onboarding_window_secs,
-                    policy.max_onboarding_per_account,
-                    policy.max_onboarding_global,
-                    Symbol::new(env, "onboarding"),
-                )
-            };
+        let (account_key, global_key, window, account_max, global_max, operation) = if verification
+        {
+            (
+                DataKey::VerificationRateLimitTracker(user.clone()),
+                DataKey::GlobalVerificationRateLimit,
+                policy.verification_window_secs,
+                policy.max_verification_per_account,
+                policy.max_verification_global,
+                Symbol::new(env, "verification"),
+            )
+        } else {
+            (
+                DataKey::RateLimitTracker(user.clone()),
+                DataKey::GlobalOnboardingRateLimit,
+                policy.onboarding_window_secs,
+                policy.max_onboarding_per_account,
+                policy.max_onboarding_global,
+                Symbol::new(env, "onboarding"),
+            )
+        };
 
         let account = Self::roll_attempt_window(
             now,
@@ -1577,6 +1791,7 @@ impl OnboardingContract {
             env.events().publish(
                 (Symbol::new(env, "AttemptRateLimited"), operation.clone()),
                 AttemptRateLimitedEvent {
+                    schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                     user: user.clone(),
                     operation,
                     scope,
@@ -1947,10 +2162,42 @@ impl OnboardingContract {
         Self::extend_persistent(env, &key);
     }
 
-    /// Lazily apply time-based trust-score decay per policy (#939).
+    /// Pure deterministic decay arithmetic (#1082).
     ///
-    /// Returns `true` when `trust_score` changed. Interval count is capped at
-    /// [`MAX_DECAY_INTERVALS_PER_CALL`] to bound CPU on long idle periods.
+    /// Applies `steps` decay buckets to `score`, each multiplying by
+    /// `retain_bps / 10_000` with **floor** integer division. The computation is
+    /// a pure function of its arguments: identical inputs always yield the same
+    /// output, it is monotone non-increasing (`retain_bps <= 10_000`), saturates
+    /// at `0`, and can never inflate the score.
+    fn decay_score(score: u32, retain_bps: u32, steps: u64) -> u32 {
+        if steps == 0 || score == 0 {
+            return score;
+        }
+        let denom = REPUTATION_BPS_DENOMINATOR as u128;
+        let retain = retain_bps as u128;
+        let mut value = score as u128;
+        let mut applied = 0u64;
+        while applied < steps && value > 0 {
+            let next = value.saturating_mul(retain) / denom;
+            // Guard against any arithmetic anomaly creating score from nothing:
+            // decay must never increase the score.
+            if next >= value {
+                break;
+            }
+            value = next;
+            applied += 1;
+        }
+        value as u32
+    }
+
+    /// Lazily apply time-based trust-score decay per policy (#939 / #1082).
+    ///
+    /// Decay is bucketised: the number of full `decay_interval_secs` buckets
+    /// elapsed since `last_decay_at` is applied via [`Self::decay_score`].
+    /// Returns `true` when `trust_score` changed. At most
+    /// [`MAX_DECAY_INTERVALS_PER_CALL`] buckets are applied in one call; leftover
+    /// elapsed time is carried forward on the next lazy or scheduled evaluation
+    /// so the result is deterministic and CPU-bounded even after long idleness.
     fn apply_reputation_decay(
         env: &Env,
         state: &mut ReputationState,
@@ -1961,6 +2208,7 @@ impl OnboardingContract {
         }
 
         let now = env.ledger().timestamp();
+        // Initialise the decay reference on first observation; no decay yet.
         if state.last_decay_at == 0 {
             state.last_decay_at = now;
             return false;
@@ -1969,28 +2217,27 @@ impl OnboardingContract {
             return false;
         }
 
+        // Time buckets: whole buckets elapsed since the last application.
         let elapsed = now - state.last_decay_at;
-        let mut intervals = elapsed / policy.decay_interval_secs;
-        if intervals == 0 {
+        let mut buckets = elapsed / policy.decay_interval_secs;
+        if buckets == 0 {
             return false;
         }
-        if intervals > MAX_DECAY_INTERVALS_PER_CALL {
-            intervals = MAX_DECAY_INTERVALS_PER_CALL;
+        if buckets > MAX_DECAY_INTERVALS_PER_CALL {
+            buckets = MAX_DECAY_INTERVALS_PER_CALL;
         }
 
         let retain_bps = REPUTATION_BPS_DENOMINATOR.saturating_sub(policy.decay_bps);
-        let mut score = state.trust_score as u128;
-        let mut applied = 0u64;
-        while applied < intervals && score > 0 {
-            score = score.saturating_mul(retain_bps as u128) / (REPUTATION_BPS_DENOMINATOR as u128);
-            applied += 1;
-        }
+        let decayed = Self::decay_score(state.trust_score, retain_bps, buckets);
+        let changed = decayed != state.trust_score;
+        state.trust_score = decayed;
 
-        state.trust_score = score as u32;
+        // Advance the reference by exactly the buckets we applied, keeping the
+        // decay grid aligned so subsequent evaluations stay deterministic.
         state.last_decay_at = state
             .last_decay_at
-            .saturating_add(applied.saturating_mul(policy.decay_interval_secs));
-        true
+            .saturating_add(buckets.saturating_mul(policy.decay_interval_secs));
+        changed
     }
 
     /// Compute how many successful increments may be credited under cooldown
@@ -2157,7 +2404,10 @@ impl OnboardingContract {
         let fee_wallet = Self::read_username_fee_wallet(env, config);
 
         let token_client = token::Client::new(env, &fee_token);
-        token_client.transfer(user, &fee_wallet, &fee_amount);
+        match token_client.try_transfer(user, &fee_wallet, &fee_amount) {
+            Ok(Ok(())) => {}
+            _ => env.panic_with_error(Error::TokenTransferFailed),
+        }
     }
 
     fn string_to_bytes(env: &Env, s: &String) -> Bytes {
@@ -2169,9 +2419,14 @@ impl OnboardingContract {
         cid_bytes
     }
 
-    fn stored_to_public(env: &Env, stored: StoredUserProfile, portfolio_cid: Option<Bytes>) -> UserProfile {
-        let state_version = Self::read_persistent(env, &DataKey::UserStateVersion(stored.address.clone()))
-            .unwrap_or(1);
+    fn stored_to_public(
+        env: &Env,
+        stored: StoredUserProfile,
+        portfolio_cid: Option<Bytes>,
+    ) -> UserProfile {
+        let state_version =
+            Self::read_persistent(env, &DataKey::UserStateRevision(stored.address.clone()))
+                .unwrap_or(1);
         UserProfile {
             version: stored.version,
             address: stored.address,
@@ -2226,6 +2481,72 @@ impl OnboardingContract {
     fn persist_public_user_profile(env: &Env, user: &Address, profile: &UserProfile) {
         Self::persist_stored_user_profile(env, user, &Self::public_to_stored(profile));
         Self::write_portfolio_cid(env, user, profile.portfolio_cid.clone());
+        Self::bump_state_revision(env, user);
+    }
+
+    fn ensure_state_revision(env: &Env, user: &Address) {
+        let key = DataKey::UserStateRevision(user.clone());
+        if !env.storage().persistent().has(&key) {
+            env.storage().persistent().set(&key, &1u32);
+            Self::extend_persistent(env, &key);
+        }
+    }
+
+    fn bump_state_revision(env: &Env, user: &Address) {
+        let key = DataKey::UserStateRevision(user.clone());
+        let revision = env.storage().persistent().get::<_, u32>(&key).unwrap_or(0);
+        let next = revision
+            .checked_add(1)
+            .unwrap_or_else(|| env.panic_with_error(Error::StateRevisionExhausted));
+        env.storage().persistent().set(&key, &next);
+        Self::extend_persistent(env, &key);
+    }
+
+    fn state_revision(env: &Env, user: &Address) -> u64 {
+        let key = DataKey::UserStateRevision(user.clone());
+        let revision = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&key)
+            .unwrap_or(1u32);
+        Self::extend_persistent_if_present(env, &key);
+        revision as u64
+    }
+
+    fn attestation_digest(
+        env: &Env,
+        account: &Address,
+        profile_version: u32,
+        role: UserRole,
+        is_verified: bool,
+        status: ProfileStatus,
+        state_revision: u64,
+        ledger_sequence: u32,
+        operation_id: &Bytes,
+        contract_instance: &Address,
+    ) -> BytesN<32> {
+        let mut payload = Bytes::from_slice(env, b"CRAFTNEXUS_ONBOARDING_ATTESTATION_V1");
+        let account_string = account.to_string();
+        let mut account_bytes = [0u8; 64];
+        let account_len = account_string.len() as usize;
+        payload.extend_from_slice(&(account_len as u32).to_be_bytes());
+        account_string.copy_into_slice(&mut account_bytes[..account_len]);
+        payload.extend_from_slice(&account_bytes[..account_len]);
+        payload.extend_from_slice(&profile_version.to_be_bytes());
+        payload.push_back(role as u8);
+        payload.push_back(if is_verified { 1 } else { 0 });
+        payload.push_back(status as u8);
+        payload.extend_from_slice(&state_revision.to_be_bytes());
+        payload.extend_from_slice(&ledger_sequence.to_be_bytes());
+        payload.extend_from_slice(&(operation_id.len() as u32).to_be_bytes());
+        payload.append(operation_id);
+        let contract_string = contract_instance.to_string();
+        let mut contract_bytes = [0u8; 64];
+        let contract_len = contract_string.len() as usize;
+        payload.extend_from_slice(&(contract_len as u32).to_be_bytes());
+        contract_string.copy_into_slice(&mut contract_bytes[..contract_len]);
+        payload.extend_from_slice(&contract_bytes[..contract_len]);
+        env.crypto().sha256(&payload).into()
     }
 
     /// Ensure the reverse username index points at the canonical account.
@@ -2246,7 +2567,7 @@ impl OnboardingContract {
     /// Repair secondary state for an existing account-keyed canonical profile.
     fn repair_onboarding_state(env: &Env, normalized: &String, user: &Address) {
         Self::ensure_username_claim(env, normalized, user);
-        let version_key = DataKey::UserStateVersion(user.clone());
+        let version_key = DataKey::UserStateRevision(user.clone());
         if !env.storage().persistent().has(&version_key) {
             env.storage().persistent().set(&version_key, &1u32);
         }
@@ -2274,8 +2595,10 @@ impl OnboardingContract {
             status: profile.status,
         };
         Self::persist_stored_user_profile(env, user, &stored);
-        env.storage().persistent().set(&DataKey::UserStateVersion(user.clone()), &1u32);
-        Self::extend_persistent(env, &DataKey::UserStateVersion(user.clone()));
+        env.storage()
+            .persistent()
+            .set(&DataKey::UserStateRevision(user.clone()), &1u32);
+        Self::extend_persistent(env, &DataKey::UserStateRevision(user.clone()));
         (stored, true)
     }
 
@@ -2300,8 +2623,7 @@ impl OnboardingContract {
             status: ProfileStatus::Active,
         };
         Self::persist_stored_user_profile(env, user, &stored);
-        env.storage().persistent().set(&DataKey::UserStateVersion(user.clone()), &1u32);
-        Self::extend_persistent(env, &DataKey::UserStateVersion(user.clone()));
+        Self::ensure_state_revision(env, user);
         stored
     }
 
@@ -2328,6 +2650,10 @@ impl OnboardingContract {
 
         let mut profile =
             StoredUserProfile::try_from_val(env, &stored).expect("User profile storage corrupted");
+
+        // Validate profile version is supported (#1056)
+        Self::assert_profile_version_supported(env, profile.version);
+
         let mut changed = false;
         if profile.version < CURRENT_USER_PROFILE_VERSION {
             profile.version = CURRENT_USER_PROFILE_VERSION;
@@ -2339,6 +2665,7 @@ impl OnboardingContract {
         } else {
             Self::extend_persistent(env, &key);
         }
+        Self::ensure_state_revision(env, &user);
 
         Some((profile, changed))
     }
@@ -2354,8 +2681,26 @@ impl OnboardingContract {
             .unwrap_or_else(|| env.panic_with_error(Error::UserNotFound))
     }
 
+    /// Validate that a profile schema version is supported by this contract.
+    ///
+    /// Rejects versions > CURRENT_USER_PROFILE_VERSION (unsupported future versions,
+    /// likely indicating corrupted data or a version mismatch). This prevents
+    /// silently misinterpreting unknown-version profiles using the latest
+    /// interpretation logic, which is the core bug Issue #1056 aims to fix.
+    ///
+    /// # Arguments
+    /// - `version`: The profile schema version to validate
+    ///
+    /// # Panics
+    /// With `Error::UnsupportedProfileVersion` if version > CURRENT_USER_PROFILE_VERSION
+    fn assert_profile_version_supported(env: &Env, version: u32) {
+        if version > CURRENT_USER_PROFILE_VERSION {
+            env.panic_with_error(Error::UnsupportedProfileVersion);
+        }
+    }
+
     fn bump_state_version(env: &Env, user: &Address) -> u32 {
-        let key = DataKey::UserStateVersion(user.clone());
+        let key = DataKey::UserStateRevision(user.clone());
         let current: u32 = Self::read_persistent(env, &key).unwrap_or(1u32);
         let next: u32 = current.saturating_add(1);
         env.storage().persistent().set(&key, &next);
@@ -2621,8 +2966,8 @@ impl OnboardingContract {
 
         env.storage()
             .persistent()
-            .set(&DataKey::MaxOnboardingAttemptsPerWindow, &3u32);
-        Self::extend_persistent(&env, &DataKey::MaxOnboardingAttemptsPerWindow);
+            .set(&DataKey::MaxOnboardAttempts, &3u32);
+        Self::extend_persistent(&env, &DataKey::MaxOnboardAttempts);
 
         env.storage()
             .persistent()
@@ -2742,6 +3087,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(env, "OnboardCallFailed"),),
             OnboardCallFailedEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
                 reason: reason as u32,
                 timestamp: env.ledger().timestamp(),
@@ -2765,7 +3111,8 @@ impl OnboardingContract {
     /// # Errors (panic)
     /// * [`Error::NotInitialized`] — `initialize` has not been called.
     /// * [`Error::InvalidRole`] — `role` is not `Buyer` or `Artisan`.
-    /// * [`Error::AlreadyOnboarded`] — the address already has a profile.
+    /// * [`Error::AlreadyOnboarded`] — the address already has a profile with a
+    ///   different username or role.
     /// * [`Error::UsernameTaken`] — the normalized username is in use.
     /// * [`Error::UsernameTooShort`] / [`Error::UsernameTooLong`].
     pub fn onboard_user(env: Env, user: Address, username: String, role: UserRole) -> UserProfile {
@@ -2828,11 +3175,7 @@ impl OnboardingContract {
                 Self::emit_onboard_failed_and_panic(&env, &user, Error::AlreadyOnboarded);
             }
             Self::repair_onboarding_state(&env, &normalized, &user);
-            return Self::stored_to_public(
-                &env,
-                existing,
-                Self::read_portfolio_cid(&env, &user),
-            );
+            return Self::stored_to_public(&env, existing, Self::read_portfolio_cid(&env, &user));
         }
 
         // Check per-account and global capacity only after an idempotent retry
@@ -2848,6 +3191,7 @@ impl OnboardingContract {
                     env.events().publish(
                         (Symbol::new(&env, "SybilPatternDetected"),),
                         SybilPatternDetectedEvent {
+                            schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                             user: user.clone(),
                             reason: Symbol::new(&env, "DuplicateCorrelation"),
                             timestamp: now,
@@ -2856,6 +3200,7 @@ impl OnboardingContract {
                     env.events().publish(
                         (Symbol::new(&env, "IdentityCorrelated"),),
                         IdentityCorrelatedEvent {
+                            schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                             user: user.clone(),
                             identity_hash: identity_hash.clone(),
                         },
@@ -2872,6 +3217,7 @@ impl OnboardingContract {
                 env.events().publish(
                     (Symbol::new(&env, "IdentityCorrelated"),),
                     IdentityCorrelatedEvent {
+                        schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                         user: user.clone(),
                         identity_hash: identity_hash.clone(),
                     },
@@ -2879,10 +3225,9 @@ impl OnboardingContract {
             }
         }
 
-        if let Some(owner) = Self::read_persistent::<_, Address>(
-            &env,
-            &DataKey::Username(normalized.clone()),
-        ) {
+        if let Some(owner) =
+            Self::read_persistent::<_, Address>(&env, &DataKey::Username(normalized.clone()))
+        {
             // A same-account reservation with no profile is a recoverable
             // interrupted write; another owner remains a hard conflict.
             if owner != user {
@@ -2927,6 +3272,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(&env, "UserOnboarded"),),
             UserOnboardedEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
                 username: normalized,
                 role,
@@ -2995,8 +3341,162 @@ impl OnboardingContract {
     /// # Returns
     /// `UserProfile` if a profile exists, otherwise panics with
     /// `Error::UserNotFound`.
+    pub fn get_observability_metrics(env: Env) -> ObservabilityMetrics {
+        let metrics: Option<ObservabilityMetrics> =
+            env.storage().persistent().get(&OBSERVABILITY_METRICS_KEY);
+        metrics.unwrap_or(ObservabilityMetrics {
+            version: OBSERVABILITY_METRICS_VERSION,
+            escrow_volume: 0,
+            disputes: 0,
+            staking_events: 0,
+            failures: 0,
+            active_jobs: 0,
+            reset_count: 0,
+            last_reset_ledger: 0,
+        })
+    }
+
+    pub fn reset_observability_metrics(env: Env) {
+        let config: OnboardingConfig = env.storage().persistent().get(&DataKey::Config).unwrap();
+        config.platform_admin.require_auth();
+        let mut metrics = env
+            .storage()
+            .persistent()
+            .get(&OBSERVABILITY_METRICS_KEY)
+            .unwrap_or(ObservabilityMetrics {
+                version: OBSERVABILITY_METRICS_VERSION,
+                escrow_volume: 0,
+                disputes: 0,
+                staking_events: 0,
+                failures: 0,
+                active_jobs: 0,
+                reset_count: 0,
+                last_reset_ledger: 0,
+            });
+        metrics.version = OBSERVABILITY_METRICS_VERSION;
+        metrics.escrow_volume = 0;
+        metrics.disputes = 0;
+        metrics.staking_events = 0;
+        metrics.failures = 0;
+        metrics.active_jobs = 0;
+        metrics.reset_count += 1;
+        metrics.last_reset_ledger = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&OBSERVABILITY_METRICS_KEY, &metrics);
+        Self::extend_persistent(&env, &OBSERVABILITY_METRICS_KEY);
+    }
+
     pub fn get_user(env: Env, user: Address) -> UserProfile {
         Self::get_user_profile(&env, user)
+    }
+
+    /// Return the monotonic revision of a user's canonical onboarding state.
+    pub fn get_state_revision(env: Env, user: Address) -> u64 {
+        if Self::try_get_user_profile(&env, user.clone()).is_none() {
+            env.panic_with_error(Error::UserNotFound);
+        }
+        Self::state_revision(&env, &user)
+    }
+
+    /// Issue a state-bound proof for one configured escrow operation.
+    pub fn get_onboarding_attestation(
+        env: Env,
+        user: Address,
+        operation_id: Bytes,
+        contract_instance: Address,
+    ) -> OnboardingAttestation {
+        if operation_id.is_empty() {
+            env.panic_with_error(Error::InvalidAttestation);
+        }
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        if config.escrow_contract != Some(contract_instance.clone()) {
+            env.panic_with_error(Error::InvalidAttestation);
+        }
+        let profile = Self::assert_user_onboarded_and_active(&env, user.clone());
+        let state_revision = Self::state_revision(&env, &user);
+        let ledger_sequence = env.ledger().sequence();
+        let state_digest = Self::attestation_digest(
+            &env,
+            &user,
+            profile.version,
+            profile.role,
+            profile.is_verified,
+            profile.status,
+            state_revision,
+            ledger_sequence,
+            &operation_id,
+            &contract_instance,
+        );
+        OnboardingAttestation {
+            account: user,
+            profile_version: profile.version,
+            role: profile.role,
+            is_verified: profile.is_verified,
+            status: profile.status,
+            state_revision,
+            ledger_sequence,
+            operation_id,
+            contract_instance,
+            state_digest,
+        }
+    }
+
+    /// Validate and consume a state proof. The escrow contract is the only
+    /// configured caller allowed to establish this authorization boundary.
+    pub fn validate_onboarding_attestation(env: Env, attestation: OnboardingAttestation) -> bool {
+        if attestation.operation_id.is_empty() {
+            env.panic_with_error(Error::InvalidAttestation);
+        }
+        let config: OnboardingConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config)
+            .unwrap_or_else(|| env.panic_with_error(Error::NotInitialized));
+        if config.escrow_contract != Some(attestation.contract_instance.clone()) {
+            env.panic_with_error(Error::InvalidAttestation);
+        }
+        Self::require_ttl_bump_auth(&config);
+        let used_key = DataKey::UsedAttestation(
+            attestation.account.clone(),
+            attestation.operation_id.clone(),
+        );
+        if env.storage().persistent().has(&used_key) {
+            env.panic_with_error(Error::AttestationReplay);
+        }
+        let profile = Self::assert_user_onboarded_and_active(&env, attestation.account.clone());
+        let current_revision = Self::state_revision(&env, &attestation.account);
+        if attestation.ledger_sequence != env.ledger().sequence()
+            || attestation.state_revision != current_revision
+            || attestation.profile_version != profile.version
+            || attestation.role != profile.role
+            || attestation.is_verified != profile.is_verified
+            || attestation.status != profile.status
+        {
+            env.panic_with_error(Error::InvalidAttestation);
+        }
+        let expected = Self::attestation_digest(
+            &env,
+            &attestation.account,
+            profile.version,
+            profile.role,
+            profile.is_verified,
+            profile.status,
+            current_revision,
+            attestation.ledger_sequence,
+            &attestation.operation_id,
+            &attestation.contract_instance,
+        );
+        if expected != attestation.state_digest {
+            env.panic_with_error(Error::InvalidAttestation);
+        }
+        env.storage().persistent().set(&used_key, &true);
+        Self::extend_persistent(&env, &used_key);
+        true
     }
 
     /// Migrate one user profile to the latest flat storage schema (admin only).
@@ -3262,7 +3762,7 @@ impl OnboardingContract {
 
     /// Return the monotonically increasing state version for a user's profile.
     ///
-    /// Returns `0` if the user has no profile. Missing `UserStateVersion`
+    /// Returns `0` if the user has no profile. Missing `UserStateRevision`
     /// keys default to `1` on read.
     pub fn get_user_state_version(env: Env, user: Address) -> u32 {
         if let Some(profile) = Self::try_get_user_profile(&env, user) {
@@ -3916,10 +4416,25 @@ impl OnboardingContract {
 
         metrics.total_escrow_count = metrics
             .total_escrow_count
-            .saturating_add(escrow_count_delta);
+            .checked_add(escrow_count_delta)
+            .unwrap_or_else(|| env.panic_with_error(Error::EscrowCountOverflow));
 
         // Normalize volume to 7 decimals (base decimal for auto-verification thresholds)
-        let normalized_delta = Self::normalize_token_amount(&env, volume_delta, &token_address);
+        let token_client = token::Client::new(&env, &token_address);
+        let token_decimals = token_client.decimals();
+        let base_decimals = 7u32;
+
+        let normalized_delta = if token_decimals < base_decimals {
+            let diff = base_decimals - token_decimals;
+            volume_delta
+                .checked_mul(10i128.pow(diff))
+                .unwrap_or_else(|| env.panic_with_error(Error::VolumeOverflow))
+        } else if token_decimals > base_decimals {
+            let diff = token_decimals - base_decimals;
+            volume_delta / 10i128.pow(diff)
+        } else {
+            volume_delta
+        };
 
         metrics.total_volume = metrics
             .total_volume
@@ -3990,7 +4505,9 @@ impl OnboardingContract {
         let current = stored.unwrap_or(0u32);
 
         let next = if delta > 0 {
-            current.saturating_add(delta as u32)
+            current
+                .checked_add(delta as u32)
+                .unwrap_or_else(|| env.panic_with_error(Error::ActiveContractOverflow))
         } else {
             let subtract = (-delta) as u32;
             if subtract > current {
@@ -4061,6 +4578,7 @@ impl OnboardingContract {
             env.events().publish(
                 (Symbol::new(env, "AutoVerifiedEvent"), address.clone()),
                 AutoVerifiedEvent {
+                    schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                     user: address.clone(),
                     escrow_count: metrics.total_escrow_count,
                     volume: metrics.total_volume as u64,
@@ -4239,6 +4757,9 @@ impl OnboardingContract {
     ///   updating only `is_verified` to match `approve`. Profile version
     ///   (`CURRENT_USER_PROFILE_VERSION`) and all other fields are preserved.
     /// - Removes `DataKey::VerificationRequest(user)` and compacts the queue.
+    /// - Saturating-decrements `DataKey::VerificationQueueCount` when a pending
+    ///   request existed (#730); a second concurrent clear is a no-op for the
+    ///   counter so it cannot go negative.
     /// - Appends a compact history entry with action `"approved"` or
     ///   `"rejected"` and `by = Some(platform_admin)`.
     ///
@@ -4332,6 +4853,8 @@ impl OnboardingContract {
     /// - Reads and extends TTL on `DataKey::Config`.
     /// - Removes `DataKey::VerificationRequest(user)` (if present) and compacts
     ///   the queue by advancing `DataKey::VerificationQueueHead`.
+    /// - Saturating-decrements `DataKey::VerificationQueueCount` only when a
+    ///   pending request was actually removed (#730).
     /// - No `UserProfile` shape is touched, so no profile-version upgrade is
     ///   required (`CURRENT_USER_PROFILE_VERSION` unaffected).
     ///
@@ -4357,9 +4880,9 @@ impl OnboardingContract {
         // unauthorized caller triggers a full transaction rollback (#41).
         config.platform_admin.require_auth();
 
-        let was_pending = Self::is_verification_pending_internal(&env, &user);
-        Self::clear_verification_request(&env, &user);
-        was_pending
+        // clear_verification_request is idempotent: only the first clear of a
+        // pending request decrements VerificationQueueCount (#730).
+        Self::clear_verification_request(&env, &user)
     }
 
     /// Get the full verification history for a user.
@@ -4802,6 +5325,32 @@ impl OnboardingContract {
         Self::extend_persistent(&env, &DataKey::ReputationPolicy);
     }
 
+    /// Scheduled reputation decay application (Issue #1082).
+    ///
+    /// Explicitly applies any pending time-based decay for `address` and persists
+    /// the result, independent of reads and writes. The decay computed here is
+    /// identical to the **lazy** decay applied inside [`get_trust_score`] and
+    /// [`update_reputation`], so off-chain schedulers (cron jobs, indexers) can
+    /// keep scores current without waiting for user activity. Returns `0` for
+    /// unknown addresses.
+    ///
+    /// # Auth
+    /// Requires `address.require_auth()` (the subject must authorize the
+    /// scheduled evaluation of their own reputation state).
+    pub fn apply_reputation_decay_now(env: Env, address: Address) -> u32 {
+        address.require_auth();
+
+        if Self::try_get_user_profile(&env, address.clone()).is_none() {
+            return 0;
+        }
+
+        let policy = Self::get_reputation_policy_internal(&env);
+        let mut state = Self::get_or_init_reputation_state(&env, &address);
+        Self::apply_reputation_decay(&env, &mut state, &policy);
+        Self::persist_reputation_state(&env, &address, &state);
+        state.trust_score
+    }
+
     // -----------------------------------------------------------------------
     // Issue #114 – Username Change Mechanism
     // -----------------------------------------------------------------------
@@ -5021,7 +5570,6 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFee, &fee);
-        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFee);
     }
 
@@ -5065,7 +5613,6 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFeeToken, &token);
-        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFeeToken);
     }
 
@@ -5115,7 +5662,6 @@ impl OnboardingContract {
         env.storage()
             .persistent()
             .set(&DataKey::UsernameChangeFeeWallet, &wallet);
-        Self::increment_persistent_u32(&env, &DataKey::GlobalAdminActionCount);
         Self::extend_persistent(&env, &DataKey::UsernameChangeFeeWallet);
     }
 
@@ -5288,7 +5834,7 @@ impl OnboardingContract {
 
     /// Read maximum onboarding attempts per window (#940).
     pub fn get_max_onboard_attempts(env: Env) -> u32 {
-        Self::read_persistent(&env, &DataKey::MaxOnboardingAttemptsPerWindow).unwrap_or(3)
+        Self::read_persistent(&env, &DataKey::MaxOnboardAttempts).unwrap_or(3)
     }
 
     /// Read verification cooldown period in seconds (#940).
@@ -5377,12 +5923,11 @@ impl OnboardingContract {
             .set(&DataKey::OnboardingRateLimitWindow, &rate_limit_window);
         Self::extend_persistent(&env, &DataKey::OnboardingRateLimitWindow);
 
-        env.storage().persistent().set(
-            &DataKey::MaxOnboardingAttemptsPerWindow,
-            &max_onboard_attempts,
-        );
-        Self::extend_persistent(&env, &DataKey::MaxOnboardingAttemptsPerWindow);
-        Self::extend_persistent(&env, &DataKey::MaxOnboardingAttemptsPerWindow);
+        env.storage()
+            .persistent()
+            .set(&DataKey::MaxOnboardAttempts, &max_onboard_attempts);
+        Self::extend_persistent(&env, &DataKey::MaxOnboardAttempts);
+        Self::extend_persistent(&env, &DataKey::MaxOnboardAttempts);
 
         env.storage()
             .persistent()
@@ -5463,6 +6008,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(&env, "PohCredentialRegistered"),),
             PohCredentialRegisteredEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
                 provider_id,
                 credential_hash,
@@ -5556,6 +6102,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(env, "SybilReviewDecision"),),
             SybilReviewDecisionEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
                 reviewer: reviewer.clone(),
                 profile_revision: expected_profile_revision,
@@ -5566,6 +6113,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(env, "ReviewCompleted"),),
             ReviewCompletedEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
                 action: Symbol::new(env, action),
                 timestamp: now,
@@ -5642,6 +6190,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(&env, "ProfileFlagged"),),
             ProfileFlaggedEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: target_user.clone(),
                 reason_code,
                 timestamp: now,
@@ -5650,6 +6199,7 @@ impl OnboardingContract {
         env.events().publish(
             (Symbol::new(&env, "SybilPatternDetected"),),
             SybilPatternDetectedEvent {
+                schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: target_user,
                 reason: Symbol::new(&env, "FlaggedByAdmin"),
                 timestamp: now,

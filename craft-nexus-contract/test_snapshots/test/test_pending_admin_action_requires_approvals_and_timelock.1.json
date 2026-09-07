@@ -613,6 +613,45 @@
             "key": {
               "vec": [
                 {
+                  "symbol": "FallbackAdmin"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "FallbackAdmin"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
                   "symbol": "MinEscrowAmount"
                 },
                 {
@@ -2443,7 +2482,7 @@
             ],
             "data": {
               "error": {
-                "contract": 47
+                "contract": 50
               }
             }
           }
@@ -2464,7 +2503,7 @@
               },
               {
                 "error": {
-                  "contract": 47
+                  "contract": 50
                 }
               }
             ],
@@ -2489,7 +2528,7 @@
               },
               {
                 "error": {
-                  "contract": 47
+                  "contract": 50
                 }
               }
             ],
@@ -2716,7 +2755,7 @@
             ],
             "data": {
               "error": {
-                "contract": 48
+                "contract": 51
               }
             }
           }
@@ -2737,7 +2776,7 @@
               },
               {
                 "error": {
-                  "contract": 48
+                  "contract": 51
                 }
               }
             ],
@@ -2762,7 +2801,7 @@
               },
               {
                 "error": {
-                  "contract": 48
+                  "contract": 51
                 }
               }
             ],

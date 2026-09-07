@@ -1,6 +1,8 @@
 {
   "struct": "RecurringEscrowEvent",
+  "schema_version": 1,
   "fields": [
+    {"name": "schema_version", "type": "u32"},
     {"name": "id", "type": "u64"},
     {"name": "action", "type": "RecurringEscrowAction"},
     {"name": "buyer", "type": "Address"},
