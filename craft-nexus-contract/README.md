@@ -677,23 +677,36 @@ primary emitting function.
 
 ### Onboarding Contract Events
 
+All event topics follow the canonical `snake_case` convention documented in
+[`docs/EventNamingConvention.md`](docs/EventNamingConvention.md). The onboarding
+topics below were renamed from their legacy `PascalCase` form; payloads are
+unchanged. See the migration table in that document for the old → new mapping.
+
 | Topic tuple (filter) | Payload type | Emitted by |
 |----------------------|--------------|------------|
-| `(symbol "UserOnboarded",)` | `UserOnboardedEvent { user: Address, username: String, role: UserRole }` | `onboard_user` |
-| `(symbol "OnboardCallFailed",)` | `OnboardCallFailedEvent { user: Address, reason: u32, timestamp: u64 }` | `emit_onboard_failed_and_panic` |
-| `(symbol "RoleUpdated",)` | tuple `(user: Address, old_role: UserRole, new_role: UserRole)` | `update_user_role` |
-| `(symbol "ProfileDeactivated", Address)` | tuple `(user: Address, role: UserRole)` | `deactivate_profile` |
-| `(symbol "ProfileReactivated", Address)` | tuple `(user: Address, role: UserRole)` | `reactivate_profile` |
-| `(symbol "UserVerified",)` | `Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
-| `(symbol "UsernameChanged",)` | `Address` | `change_username` |
-| `(symbol "UsernameChangedRevoked",)` | audit symbol for revoked username changes | username-change flow |
-| `(symbol "PortfolioUpdated",)` | `Address` | `update_portfolio` |
-| `(symbol "AutoVerifiedEvent", Address)` | `AutoVerifiedEvent { user, escrow_count, volume }` | `try_auto_verify` |
+| `(symbol "user_onboarded",)` | `UserOnboardedEvent { user: Address, username: String, role: UserRole }` | `onboard_user` |
+| `(symbol "onboard_call_failed",)` | `OnboardCallFailedEvent { user: Address, reason: u32, timestamp: u64 }` | `emit_onboard_failed_and_panic` |
+| `(symbol "role_updated",)` | tuple `(user: Address, old_role: UserRole, new_role: UserRole)` | `update_user_role` |
+| `(symbol "profile_deactivated", Address)` | tuple `(user: Address, role: UserRole)` | `deactivate_profile` |
+| `(symbol "profile_reactivated", Address)` | tuple `(user: Address, role: UserRole)` | `reactivate_profile` |
+| `(symbol "user_verified",)` | `Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
+| `(symbol "username_changed",)` | `Address` | `change_username` |
+| `(symbol "username_changed_revoked",)` | audit symbol for revoked username changes | username-change flow |
+| `(symbol "portfolio_updated",)` | `Address` | `update_portfolio` |
+| `(symbol "auto_verified", Address)` | `AutoVerifiedEvent { user, escrow_count, volume }` | `try_auto_verify` |
+| `(symbol "attempt_rate_limited",)` | `AttemptRateLimitedEvent { user, timestamp }` | rate-limit guard |
+| `(symbol "sybil_pattern_detected",)` | `SybilPatternDetectedEvent { user, reason, timestamp }` | sybil detection |
+| `(symbol "identity_correlated",)` | `IdentityCorrelatedEvent { user, identity_hash }` | identity correlation check |
+| `(symbol "poh_credential_registered",)` | `PohCredentialRegisteredEvent { user, provider, timestamp }` | PoH registration |
+| `(symbol "profile_flagged",)` | `ProfileFlaggedEvent { user, reason, timestamp }` | admin flagging |
+| `(symbol "review_completed",)` | `ReviewCompletedEvent { user, approved, timestamp }` | review processing |
+| `(symbol "sybil_review_decision",)` | `SybilReviewDecisionEvent { user, approved, timestamp }` | sybil review decision |
 
 Notes:
 - Topic tuples are the canonical filter keys for indexers. Many events include user or order identifiers in the topic tuple so consumers can cheaply subscribe to a single-user or single-order stream without decoding event payloads.
 - All numeric monetary fields are emitted as raw integers (I128) to preserve precision; formatting should be applied off-chain.
 - This reference is derived directly from the contract source; whenever you change event payloads, update this table to keep indexers in sync.
+- Event topic naming is governed by [`docs/EventNamingConvention.md`](docs/EventNamingConvention.md); indexer migration notes for the onboarding renames live there.
 
 ---
 
