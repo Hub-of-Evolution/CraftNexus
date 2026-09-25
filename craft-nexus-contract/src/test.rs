@@ -70,6 +70,35 @@ fn setup_test(
     )
 }
 
+/// Minimal, structurally valid Wasm module carrying the mandatory
+/// `contractenvmetav0` custom section (interface protocol 21, pre-release 0).
+///
+/// `Env::upload_contract_wasm` refuses modules without that section, so upgrade
+/// tests need this to obtain a real hash. `tag` appends a trivial extra custom
+/// section so callers can derive distinct hashes for multi-upgrade scenarios.
+fn dummy_upgrade_wasm(env: &Env, tag: u8) -> Bytes {
+    let mut wasm = Bytes::from_array(
+        env,
+        &[
+            // magic + wasm version
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // custom section, 30 bytes
+            0x00, 0x1e, // name length: 17
+            0x11, // "contractenvmetav0"
+            0x63, 0x6f, 0x6e, 0x74, 0x72, 0x61, 0x63, 0x74, 0x65, 0x6e, 0x76, 0x6d, 0x65, 0x74,
+            0x61, 0x76, 0x30, // SC_ENV_META_KIND_INTERFACE_VERSION
+            0x00, 0x00, 0x00, 0x00, // interface version = (21 << 32) | 0
+            0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x00,
+        ],
+    );
+    // Trivial filler custom section (name "x", one data byte) to vary the hash.
+    wasm.push_back(0x00);
+    wasm.push_back(0x03);
+    wasm.push_back(0x01);
+    wasm.push_back(b'x');
+    wasm.push_back(tag);
+    wasm
+}
+
 #[test]
 fn test_create_escrow_success() {
     let env = Env::default();
@@ -2612,7 +2641,7 @@ fn test_contract_upgrade_success() {
 
     // To test update_wasm, we need a WASM hash that "exists" in the test environment.
     // We can upload a tiny dummy WASM to get a valid hash.
-    let dummy_wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let dummy_wasm = dummy_upgrade_wasm(&env, 0);
     let new_wasm_hash = env.deployer().upload_contract_wasm(dummy_wasm);
 
     client.execute_upgrade(&new_wasm_hash);
@@ -2639,7 +2668,7 @@ fn test_upgrade_requires_compatibility_manifest() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm = dummy_upgrade_wasm(&env, 0);
     let wasm_hash = env.deployer().upload_contract_wasm(wasm);
 
     client.propose_upgrade_wasm(&admin, &wasm_hash);
@@ -2656,7 +2685,7 @@ fn test_upgrade_manifest_is_recorded_and_consumed() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm = dummy_upgrade_wasm(&env, 0);
     let wasm_hash = env.deployer().upload_contract_wasm(wasm);
     let commitment = client.get_upgrade_state_commitment();
     let nonzero = BytesN::from_array(&env, &[1u8; 32]);
@@ -2708,7 +2737,7 @@ fn test_upgrade_state_commitment_persisted_after_execution() {
     env.mock_all_auths();
     let (client, _, _, _, _, _, admin) = setup_test(&env, true);
 
-    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm = dummy_upgrade_wasm(&env, 0);
     let wasm_hash = env.deployer().upload_contract_wasm(wasm);
 
     let commitment = client.get_upgrade_state_commitment();
@@ -2764,7 +2793,7 @@ fn test_upgrade_state_commitment_immutable_prevents_reexecution() {
     env.mock_all_auths();
     let (client, _, _, _, _, _, admin) = setup_test(&env, true);
 
-    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm = dummy_upgrade_wasm(&env, 0);
     let wasm_hash = env.deployer().upload_contract_wasm(wasm);
 
     let commitment = client.get_upgrade_state_commitment();
@@ -2837,7 +2866,7 @@ fn test_upgrade_execution_fails_without_completed_migration_result() {
     env.mock_all_auths();
     let (client, _, _, _, _, _, admin) = setup_test(&env, true);
 
-    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm = dummy_upgrade_wasm(&env, 0);
     let wasm_hash = env.deployer().upload_contract_wasm(wasm);
 
     let commitment = client.get_upgrade_state_commitment();
@@ -2881,7 +2910,7 @@ fn test_upgrade_state_commitment_shows_manual_records_incomplete() {
     env.mock_all_auths();
     let (client, _, _, _, _, _, admin) = setup_test(&env, true);
 
-    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm = dummy_upgrade_wasm(&env, 0);
     let wasm_hash = env.deployer().upload_contract_wasm(wasm);
 
     let commitment = client.get_upgrade_state_commitment();
@@ -3524,10 +3553,27 @@ fn test_get_upgrade_history_records_each_successful_upgrade() {
     assert_eq!(client.get_upgrade_history().len(), 0);
 
     // First upgrade: version 1 -> 2.
-    let wasm_one = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_one = dummy_upgrade_wasm(&env, 0);
     let hash_one = env.deployer().upload_contract_wasm(wasm_one);
+    let nonzero = BytesN::from_array(&env, &[1u8; 32]);
 
     client.propose_upgrade_wasm(&admin, &hash_one);
+    client.submit_compat_manifest(
+        &hash_one,
+        &UpgradeCompatibilityManifest {
+            source_version: 1,
+            target_version: 2,
+            state_commitment: client.get_upgrade_state_commitment(),
+            interface_commitment: nonzero.clone(),
+            authorization_commitment: nonzero.clone(),
+            preconditions_commitment: nonzero.clone(),
+            postconditions_commitment: nonzero.clone(),
+            rollback_commitment: nonzero.clone(),
+            migration_checkpoint: nonzero.clone(),
+            migration_complete: true,
+            manual_records: 0,
+        },
+    );
     env.ledger().with_mut(|li| {
         li.timestamp += 7 * 24 * 60 * 60 + 1;
     });
@@ -3543,17 +3589,28 @@ fn test_get_upgrade_history_records_each_successful_upgrade() {
     assert_eq!(first_record.admin, admin);
 
     // Second upgrade: version 2 -> 3. A distinct (but still structurally
-    // valid — magic + version + one empty custom section) module so its
-    // hash differs from the first.
-    let wasm_two = Bytes::from_array(
-        &env,
-        &[
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
-        ],
-    );
+    // valid — magic + version + interface metadata) module so its hash differs
+    // from the first.
+    let wasm_two = dummy_upgrade_wasm(&env, 1);
     let hash_two = env.deployer().upload_contract_wasm(wasm_two);
 
     client.propose_upgrade_wasm(&admin, &hash_two);
+    client.submit_compat_manifest(
+        &hash_two,
+        &UpgradeCompatibilityManifest {
+            source_version: 2,
+            target_version: 3,
+            state_commitment: client.get_upgrade_state_commitment(),
+            interface_commitment: nonzero.clone(),
+            authorization_commitment: nonzero.clone(),
+            preconditions_commitment: nonzero.clone(),
+            postconditions_commitment: nonzero.clone(),
+            rollback_commitment: nonzero.clone(),
+            migration_checkpoint: nonzero.clone(),
+            migration_complete: true,
+            manual_records: 0,
+        },
+    );
     env.ledger().with_mut(|li| {
         li.timestamp += 7 * 24 * 60 * 60 + 1;
     });
@@ -4586,23 +4643,29 @@ fn test_get_onboarding_client_uses_configured_address() {
     env.mock_all_auths();
     let (client, _, _, _, _, _, _) = setup_test(&env, true);
 
+    // Register a real onboarding contract so get_onboarding_client can resolve it.
+    use crate::onboarding::{OnboardingContract, OnboardingContractClient};
+    let onboarding_id = env.register_contract(None, OnboardingContract);
+    let onboarding_addr = onboarding_id.clone();
+    client.set_onboarding_contract(&onboarding_addr);
+
     // `get_onboarding_client` reads contract storage, so it has to be invoked
     // inside the contract's storage context rather than from the test frame.
     let initial = env.as_contract(&client.address, || {
         CraftNexusContract::get_onboarding_client(&env)
     });
     let (initial_address, _) = initial.expect("setup registers an onboarding contract");
-    assert_eq!(initial_address, client.get_onboarding_contract());
+    assert_eq!(initial_address, onboarding_addr);
 
     // Re-pointing the registry must be reflected by the helper on the next read.
-    let onboarding = Address::generate(&env);
-    client.set_onboarding_contract(&onboarding);
+    let new_onboarding = Address::generate(&env);
+    client.set_onboarding_contract(&new_onboarding);
 
     let configured = env.as_contract(&client.address, || {
         CraftNexusContract::get_onboarding_client(&env)
     });
     let (address, _client) = configured.expect("configured address should resolve");
-    assert_eq!(address, onboarding);
+    assert_eq!(address, new_onboarding);
 }
 
 /// When no onboarding contract is set, release_funds completes without error.
@@ -5028,6 +5091,7 @@ fn test_migrate_fee_token_configs_migrates_twenty_tokens_and_emits_summary() {
     assert_eq!(
         summary,
         FeeTokenConfigsMigratedEvent {
+            schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
             scanned_tokens: 20,
             migrated_configs: 20,
             skipped_existing: 0,
@@ -5130,6 +5194,7 @@ fn test_migrate_fee_token_configs_is_idempotent_and_preserves_existing_configs()
     assert_eq!(
         latest_summary,
         FeeTokenConfigsMigratedEvent {
+            schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
             scanned_tokens: 20,
             migrated_configs: 0,
             skipped_existing: 20,
@@ -8077,8 +8142,8 @@ mod reconciliation_report_tests {
         assert_eq!(page2.complete, true, "second page should be complete");
         assert_eq!(
             page2.expected_locked,
-            60_000i128,
-            "total locked across pages should match all escrows"
+            10_000i128,
+            "expected_locked should sum only the 10 escrows scanned on this page"
         );
     }
 
@@ -8292,4 +8357,5 @@ fn test_recurring_escrow_cancellation_refunds_balance() {
 
     // Buyer balance after cancellation should be exactly the remaining unreleased funds (5_000_000)
     assert_eq!(token_client.balance(&buyer), 5_000_000);
+}
 }

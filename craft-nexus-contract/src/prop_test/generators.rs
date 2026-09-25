@@ -121,8 +121,7 @@ pub fn generate_escrow_sequence(rng: &mut Lcg64, order_ids: &[u32]) -> Vec<Escro
             6 => EscrowOp::AutoRelease { order_id: id },
             7 => EscrowOp::AdvanceTime {
                 // Mix of short and long advances
-                seconds: [1, 3600, 86400, 604_800, 30 * 86400]
-                    [rng.next_usize(5)],
+                seconds: [1, 3600, 86400, 604_800, 30 * 86400][rng.next_usize(5)],
             },
             8 => EscrowOp::OperateOnMissingEscrow,
             9 => EscrowOp::FundEscrow { order_id: id },
@@ -304,10 +303,7 @@ pub fn generate_upgrade_sequence(rng: &mut Lcg64) -> Vec<UpgradeOp> {
 /// maintaining the failure. Returns the shortest sub-sequence found.
 ///
 /// `is_failure` should return `true` if the sequence still triggers the bug.
-pub fn shrink_sequence<T: Clone>(
-    seq: Vec<T>,
-    mut is_failure: impl FnMut(&[T]) -> bool,
-) -> Vec<T> {
+pub fn shrink_sequence<T: Clone>(seq: Vec<T>, mut is_failure: impl FnMut(&[T]) -> bool) -> Vec<T> {
     let mut current = seq;
 
     // One-deletion pass (repeat until stable)
@@ -466,10 +462,7 @@ where
 }
 
 /// Shrink parameters within a single operation while preserving failure.
-pub fn shrink_operation_params<T, F>(
-    op: &ShrinkableOp<T>,
-    mut is_failure: F,
-) -> ShrinkableOp<T>
+pub fn shrink_operation_params<T, F>(op: &ShrinkableOp<T>, mut is_failure: F) -> ShrinkableOp<T>
 where
     T: Clone,
     F: FnMut(&ShrinkableOp<T>) -> bool,

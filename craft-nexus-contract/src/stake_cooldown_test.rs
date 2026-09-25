@@ -8,7 +8,13 @@ use soroban_sdk::{
     Address, Env,
 };
 
-fn setup_env<'a>() -> (Env, CraftNexusContractClient<'a>, Address, Address, TokenClient<'a>) {
+fn setup_env<'a>() -> (
+    Env,
+    CraftNexusContractClient<'a>,
+    Address,
+    Address,
+    TokenClient<'a>,
+) {
     let env = Env::default();
     env.mock_all_auths();
     // Initialize ledger time to a known baseline
@@ -57,9 +63,16 @@ fn test_new_deposit_does_not_bypass_cooldown() {
 
     // 4. Attempt withdrawal. Neither should be ready, so this should error out.
     let res = client.try_unstake_tokens(&artisan, &token.address);
-    assert!(res.is_err(), "New deposit accidentally bypassed cooldown rules");
-    
-    assert_eq!(client.get_stake(&artisan), 1500, "Full stake should remain locked");
+    assert!(
+        res.is_err(),
+        "New deposit accidentally bypassed cooldown rules"
+    );
+
+    assert_eq!(
+        client.get_stake(&artisan),
+        1500,
+        "Full stake should remain locked"
+    );
 }
 
 #[test]
@@ -76,10 +89,13 @@ fn test_matured_deposits_remain_withdrawable() {
     // 3. Add a new stake
     client.stake_tokens(&artisan, &token.address, &500);
 
-    // 4. Withdraw matured stakes. 
+    // 4. Withdraw matured stakes.
     // The first 1000 is ready, the 500 should remain locked.
     client.unstake_tokens(&artisan, &token.address);
 
     let remaining_stake = client.get_stake(&artisan);
-    assert_eq!(remaining_stake, 500, "Matured deposit was blocked by the new deposit");
+    assert_eq!(
+        remaining_stake, 500,
+        "Matured deposit was blocked by the new deposit"
+    );
 }

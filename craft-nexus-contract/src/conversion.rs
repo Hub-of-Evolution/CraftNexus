@@ -135,9 +135,7 @@ fn check_bounds(
     }
 
     let diff = (quote.price - reference_price).abs();
-    let scaled_diff = diff
-        .checked_mul(10_000)
-        .ok_or(ConversionError::Overflow)?;
+    let scaled_diff = diff.checked_mul(10_000).ok_or(ConversionError::Overflow)?;
     let movement_bps = scaled_diff / reference_price;
 
     if movement_bps > bounds.max_movement_bps as i128 {

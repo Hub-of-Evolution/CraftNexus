@@ -378,7 +378,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "MaxOnboardingAttemptsPerWindow"
+                  "symbol": "MaxOnboardAttempts"
                 }
               ]
             },
@@ -395,7 +395,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "MaxOnboardingAttemptsPerWindow"
+                      "symbol": "MaxOnboardAttempts"
                     }
                   ]
                 },
@@ -910,7 +910,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u64": 1
+                  "u32": 1
                 }
               }
             },
@@ -955,52 +955,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u64": 3
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          518400
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "UserStateVersion"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "UserStateVersion"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "u32": 3
+                  "u32": 5
                 }
               }
             },
@@ -1534,6 +1489,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "user"
                   },
                   "val": {
@@ -1837,7 +1800,7 @@
                     "symbol": "new_digest"
                   },
                   "val": {
-                    "bytes": "ee02ec242a21cd7b6de995927747247f978446212fa6424ef73f8e014a884c29"
+                    "bytes": "8a4f669fcd4998b8811458983bd10737f0a46cfdadf5242c4a746b09e57e424b"
                   }
                 },
                 {
@@ -1853,7 +1816,7 @@
                     "symbol": "revision"
                   },
                   "val": {
-                    "u64": 2
+                    "u64": 3
                   }
                 },
                 {
@@ -2137,7 +2100,7 @@
                     "symbol": "new_digest"
                   },
                   "val": {
-                    "bytes": "bb4848b572dd3536e4c96183b9f20954610a01ac78fe4fd8efab757cd340d7dd"
+                    "bytes": "cb5efa1d2e96e73e2f9f55f728fecb4214a0f3e29e8541e64b135462fabd9dc8"
                   }
                 },
                 {
@@ -2145,7 +2108,7 @@
                     "symbol": "prior_digest"
                   },
                   "val": {
-                    "bytes": "ee02ec242a21cd7b6de995927747247f978446212fa6424ef73f8e014a884c29"
+                    "bytes": "8a4f669fcd4998b8811458983bd10737f0a46cfdadf5242c4a746b09e57e424b"
                   }
                 },
                 {
@@ -2153,7 +2116,7 @@
                     "symbol": "revision"
                   },
                   "val": {
-                    "u64": 3
+                    "u64": 5
                   }
                 },
                 {
@@ -2239,7 +2202,7 @@
                     "symbol": "state_version"
                   },
                   "val": {
-                    "u32": 2
+                    "u32": 3
                   }
                 },
                 {

@@ -1,3 +1,4 @@
+pub fn f(){}
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::{
     bpf_loader_upgradeable,

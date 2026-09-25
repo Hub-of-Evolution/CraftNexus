@@ -93,7 +93,7 @@ impl StakeContract {
 mod tests {
     use super::*;
 
-    fn setup() -> (Env, Address, StakeContractClient) {
+    fn setup() -> (Env, Address, StakeContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
         
