@@ -49,7 +49,7 @@ use alloc::string::{String, ToString};
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, Address, Env,
+    token, Address, Env, Symbol,
 };
 
 use super::{harness::advance_ledger_time, seed_from_env, Lcg64, DEFAULT_CASE_COUNT};
@@ -92,7 +92,7 @@ impl FinancialSnapshot {
             contract_balance: token_client.balance(&client.address),
             total_locked: allocation.total_locked,
             total_staked: allocation.total_staked,
-            total_fees: client.get_total_fees(token_id),
+            total_fees: client.get_total_fees_for_token(token_id),
             buyer_balance: token_client.balance(buyer),
             seller_balance: token_client.balance(seller),
             platform_balance: token_client.balance(platform_wallet),
@@ -374,7 +374,7 @@ fn conservation_dispute_resolve_to_seller() {
     let order_id = 103u32;
 
     client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
-    client.raise_dispute(&order_id, &buyer);
+    client.dispute_escrow(&order_id, &Symbol::new(&env, "Reason"), &buyer);
 
     let before = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
@@ -410,7 +410,7 @@ fn conservation_dispute_resolve_to_buyer() {
     let order_id = 104u32;
 
     client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
-    client.raise_dispute(&order_id, &buyer);
+    client.dispute_escrow(&order_id, &Symbol::new(&env, "Reason"), &buyer);
 
     let before = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
@@ -535,49 +535,61 @@ fn conservation_unstake_after_cooldown() {
 // ── Tests: Recurring escrow ───────────────────────────────────────────────────
 
 #[test]
-fn conservation_recurring_escrow_release_cycle() {
+fn conservation_recurring_escrow_create_then_cancel() {
     let (env, contract_id, _, _, buyer, seller, _, token_id, _) = setup_test_env();
     let client = CraftNexusContractClient::new(&env, &contract_id);
     let platform_wallet = client.get_platform_wallet();
 
-    let amount_per_cycle = 1_000_000i128;
-    let total_cycles = 5u32;
-    let total_amount = amount_per_cycle * (total_cycles as i128);
-    let interval = 30 * 86_400u32; // 30 days
+    let total_amount = 5_000_000i128;
+    let frequency = 30 * 86_400u64; // interval between cycles
+    let duration = 5u32; // number of cycles
 
-    let escrow_id = client.create_recurring_escrow(
+    let before =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+
+    let escrow = client.create_recurring_escrow(
         &buyer,
         &seller,
         &token_id,
-        &amount_per_cycle,
-        &total_cycles,
-        &interval,
-        &None,
+        &total_amount,
+        &frequency,
+        &duration,
     );
 
-    // Release first cycle immediately
-    let before = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+    // The whole budget is locked up-front, before any cycle is released.
+    let after_create =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
-    client.release_recurring_cycle(&escrow_id, &0);
-
-    let after = FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
-
-    let fee = amount_per_cycle * 500 / 10_000;
-    let seller_amount = amount_per_cycle - fee;
-
-    let proof = ConservationProof {
-        before,
-        after,
+    ConservationProof {
+        before: before.clone(),
+        after: after_create.clone(),
         expected: ExpectedDeltas {
-            locked_delta: -amount_per_cycle,
-            fees_delta: fee,
-            seller_delta: seller_amount,
-            platform_delta: fee,
+            locked_delta: total_amount,
+            buyer_delta: -total_amount,
             ..Default::default()
         },
-    };
+    }
+    .verify()
+    .expect("Recurring escrow creation conservation");
 
-    proof.verify().expect("Recurring escrow release cycle conservation");
+    // No cycle has been released, so cancelling refunds the entire budget to
+    // the buyer and clears the tracked obligation.
+    client.cancel_recurring_escrow(&escrow.id);
+
+    let after_cancel =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+
+    ConservationProof {
+        before: after_create,
+        after: after_cancel,
+        expected: ExpectedDeltas {
+            locked_delta: -total_amount,
+            buyer_delta: total_amount,
+            ..Default::default()
+        },
+    }
+    .verify()
+    .expect("Recurring escrow cancellation conservation");
 }
 
 // ── Property-based conservation test ──────────────────────────────────────────
@@ -641,7 +653,8 @@ fn prop_financial_conservation_all_paths() {
                 3 => {
                     // Dispute and resolve
                     let oid = order_id - 1;
-                    let _ = client.try_raise_dispute(&oid, &buyer);
+                    let _ =
+                        client.try_dispute_escrow(&oid, &Symbol::new(&env, "Reason"), &buyer);
                     let _ = client.try_resolve_dispute(&oid, &Resolution::ReleaseToSeller, &arbitrator);
                 }
                 4 => {

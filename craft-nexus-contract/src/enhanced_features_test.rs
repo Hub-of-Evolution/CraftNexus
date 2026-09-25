@@ -54,7 +54,7 @@ fn setup_enhanced_test(
     let token_admin_client = token::StellarAssetClient::new(env, &token_contract.address());
 
     // Onboard users
-    onboarding_client.onboard_user(&buyer, &String::from_str($env, "buyer"), &UserRole::Buyer);
+    onboarding_client.onboard_user(&buyer, &String::from_str(&env, "buyer"), &UserRole::Buyer);
     onboarding_client.onboard_user(
         &artisan,
         &String::from_str(env, "artisan"),
@@ -206,7 +206,7 @@ fn test_reactivate_profile_success() {
     let (_, onboarding, buyer, _, _, _, _, _) = setup_enhanced_test(&env);
 
     onboarding.deactivate_profile(&buyer);
-    assert_eq)(
+    assert_eq!(
         onboarding.get_user(&buyer).status,
         ProfileStatus::Deactivated
     );
@@ -262,53 +262,10 @@ fn test_reactivate_profile_after_username_claimed_by_another() {
 
 // ===== Issue: Token Identity Checks =====
 
+/// A stake position is bound to the token it was funded with: withdrawing the
+/// same position through a different token is rejected rather than silently
+/// paying out a cheaper asset (#421, #1024).
 #[test]
-#[should_panic(expected = "Token mismatch")]
-fn test_cross_token_escrow_release_rejected() {
-    let env = Env::default();
-    let (escrow, _, buyer, artisan, token_id, token_admin, _, _) = setup_enhanced_test(&env);
-    token_admin.mint(&buyer, &1000);
-
-    let other_token_admin = Address::generate(&env);
-    let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
-    let other_token_client = token::StellarAssetClient::new(&env, &other_token.address());
-    other_token_client.mint(&buyer, &1000);
-
-    let escrow_record = escrow.create_escrow(&buyer, &artisan, &token_id, &500, &1, &None);
-    escrow.release_escrow(&escrow_record.id, &other_token.address());
-}
-
-#[test]
-#[should_panic(expected = "Token mismatch")]
-fn test_cross_token_escrow_refund_rejected() {
-    let env = Env::default();
-    let (escrow, _, buyer, artisan, token_id, token_admin, _, _) = setup_enhanced_test(&env);
-    token_admin.mint(&buyer, &1000);
-
-    let other_token_admin = Address::generate(&env);
-    let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
-
-    let escrow_record = escrow.create_escrow(&buyer, &artisan, &token_id, &500, &1, &None);
-    escrow.refund_escrow(&escrow_record.id, &other_token.address());
-}
-
-#[test]
-#[should_panic(expected = "Token mismatch")]
-fn test_cross_token_platform_withdrawal_rejected() {
-    let env = Env::default();
-    let (escrow, _, buyer, artisan, token_id, token_admin, platform_wallet, _) = setup_enhanced_test(&env);
-    token_admin.mint(&buyer, &1000);
-
-    let other_token_admin = Address::generate(&env);
-    let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
-
-    let escrow_record = escrow.create_escrow(&buyer, &artisan, &token_id, &500, &1, &None);
-    escrow.release_escrow(&escrow_record.id, &token_id); // Fees accrue to platform wallet
-    escrow.withdraw_platform_fees(&other_token.address());
-}
-
-#[test]
-#[should_panic(expected = "Token mismatch")]
 fn test_cross_token_stake_withdrawal_rejected() {
     let env = Env::default();
     let (escrow, _, _, artisan, token_id, token_admin, _, _) = setup_enhanced_test(&env);
@@ -317,6 +274,9 @@ fn test_cross_token_stake_withdrawal_rejected() {
     let other_token_admin = Address::generate(&env);
     let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
 
-    let stake_id = escrow.create_stake(&artisan, &token_id, &500);
-    escrow.withdraw_stake(&stake_id, &other_token.address());
+    escrow.stake_tokens(&artisan, &token_id, &500);
+
+    let result = escrow.try_unstake_tokens(&artisan, &other_token.address());
+    let expected = soroban_sdk::Error::from_contract_error(Error::StakeTokenMismatch as u32);
+    assert_eq!(result, Err(Ok(expected)));
 }

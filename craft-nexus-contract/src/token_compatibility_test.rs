@@ -11,87 +11,131 @@ use soroban_sdk::{
 // Test tokens for interface probing
 // ---------------------------------------------------------------------------
 
-#[contract]
-struct FullySupportedToken;
+// Each test token lives in its own module: `#[contractimpl]` emits a module per
+// method name, so multiple tokens with the same interface in one module collide.
+mod fully_supported_token {
+    use soroban_sdk::{contract, contractimpl, Address, Env};
 
-#[contractimpl]
-impl FullySupportedToken {
-    pub fn decimals(_env: Env) -> u32 {
-        7
-    }
-    pub fn balance(_env: Env, _id: Address) -> i128 {
-        1_000_000
-    }
-    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
-}
+    #[contract]
+    pub struct FullySupportedToken;
 
-#[contract]
-struct MissingBalanceToken;
-
-#[contractimpl]
-impl MissingBalanceToken {
-    pub fn decimals(_env: Env) -> u32 {
-        7
-    }
-    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
-}
-
-#[contract]
-struct MissingTransferToken;
-
-#[contractimpl]
-impl MissingTransferToken {
-    pub fn decimals(_env: Env) -> u32 {
-        7
-    }
-    pub fn balance(_env: Env, _id: Address) -> i128 {
-        1_000_000
+    #[contractimpl]
+    impl FullySupportedToken {
+        pub fn decimals(_env: Env) -> u32 {
+            7
+        }
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            1_000_000
+        }
+        pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
     }
 }
+use fully_supported_token::FullySupportedToken;
 
-#[contract]
-struct MalformedDecimalsToken;
+mod missing_balance_token {
+    use soroban_sdk::{contract, contractimpl, Address, Env};
 
-#[contractimpl]
-impl MalformedDecimalsToken {
-    // Returns a value outside the allowed 0..=18 range
-    pub fn decimals(_env: Env) -> u32 {
-        42
+    #[contract]
+    pub struct MissingBalanceToken;
+
+    #[contractimpl]
+    impl MissingBalanceToken {
+        pub fn decimals(_env: Env) -> u32 {
+            7
+        }
+        pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
     }
-    pub fn balance(_env: Env, _id: Address) -> i128 {
-        0
-    }
-    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
 }
+use missing_balance_token::MissingBalanceToken;
+
+mod missing_transfer_token {
+    use soroban_sdk::{contract, contractimpl, Address, Env};
+
+    #[contract]
+    pub struct MissingTransferToken;
+
+    #[contractimpl]
+    impl MissingTransferToken {
+        pub fn decimals(_env: Env) -> u32 {
+            7
+        }
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            1_000_000
+        }
+    }
+}
+use missing_transfer_token::MissingTransferToken;
+
+mod malformed_decimals_token {
+    use soroban_sdk::{contract, contractimpl, Address, Env};
+
+    #[contract]
+    pub struct MalformedDecimalsToken;
+
+    #[contractimpl]
+    impl MalformedDecimalsToken {
+        // Returns a value outside the allowed 0..=18 range
+        pub fn decimals(_env: Env) -> u32 {
+            42
+        }
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            0
+        }
+        pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
+    }
+}
+use malformed_decimals_token::MalformedDecimalsToken;
 
 // Token that records whether transfer was called and with what amount
-#[contract]
-struct RecordingToken;
+mod recording_token {
+    use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
 
-#[contractimpl]
-impl RecordingToken {
-    pub fn initialize(env: Env) {
-        env.storage().instance().set(&Symbol::new(&env, "transfer_calls"), &0u32);
-        env.storage().instance().set(&Symbol::new(&env, "last_amount"), &0i128);
-    }
-    pub fn decimals(_env: Env) -> u32 {
-        7
-    }
-    pub fn balance(_env: Env, _id: Address) -> i128 {
-        5_000_000
-    }
-    pub fn transfer(env: Env, _from: Address, _to: Address, amount: i128) {
-        let calls: u32 = env.storage().instance().get(&Symbol::new(&env, "transfer_calls")).unwrap_or(0);
-        env.storage().instance().set(&Symbol::new(&env, "transfer_calls"), &(calls + 1));
-        env.storage().instance().set(&Symbol::new(&env, "last_amount"), &amount);
-    }
-    pub fn get_transfer_calls(env: Env) -> u32 {
-        env.storage().instance().get(&Symbol::new(&env, "transfer_calls")).unwrap_or(0)
-    }
-    pub fn get_last_amount(env: Env) -> i128 {
-        env.storage().instance().get(&Symbol::new(&env, "last_amount")).unwrap_or(0)
+    #[contract]
+    pub struct RecordingToken;
+
+    #[contractimpl]
+    impl RecordingToken {
+        pub fn initialize(env: Env) {
+            env.storage().instance().set(&Symbol::new(&env, "transfer_calls"), &0u32);
+            env.storage().instance().set(&Symbol::new(&env, "last_amount"), &0i128);
+        }
+        pub fn decimals(_env: Env) -> u32 {
+            7
+        }
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            5_000_000
+        }
+        pub fn transfer(env: Env, _from: Address, _to: Address, amount: i128) {
+            let calls: u32 = env.storage().instance().get(&Symbol::new(&env, "transfer_calls")).unwrap_or(0);
+            env.storage().instance().set(&Symbol::new(&env, "transfer_calls"), &(calls + 1));
+            env.storage().instance().set(&Symbol::new(&env, "last_amount"), &amount);
+        }
+        pub fn get_transfer_calls(env: Env) -> u32 {
+            env.storage().instance().get(&Symbol::new(&env, "transfer_calls")).unwrap_or(0)
+        }
+        pub fn get_last_amount(env: Env) -> i128 {
+            env.storage().instance().get(&Symbol::new(&env, "last_amount")).unwrap_or(0)
+        }
     }
 }
+use recording_token::RecordingToken;
+use recording_token::RecordingTokenClient;
+
+// A token exposing none of the probed interface methods (no `decimals`,
+// `balance`, or `transfer`). Used to assert that unsupported tokens produce a
+// stable contract error rather than a host panic.
+mod empty_token {
+    use soroban_sdk::{contract, contractimpl, Env};
+
+    #[contract]
+    pub struct EmptyToken;
+
+    #[contractimpl]
+    impl EmptyToken {
+        pub fn ping(_env: Env) {}
+    }
+}
+use empty_token::EmptyToken;
 
 fn setup_client(env: &Env) -> (CraftNexusContractClient<'_>, Address) {
     env.mock_all_auths();
@@ -165,24 +209,25 @@ fn validate_compatibility_does_not_mutate_funds() {
     let token_admin = Address::generate(&env);
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
     let token_client = token::StellarAssetClient::new(&env, &token.address());
+    let balance_client = token::Client::new(&env, &token.address());
     let buyer = Address::generate(&env);
     token_client.mint(&buyer, &10_000);
     token_client.mint(&contract_id, &5_000);
 
-    let token_balance_before = token_client.balance(&contract_id);
-    let buyer_balance_before = token_client.balance(&buyer);
+    let token_balance_before = balance_client.balance(&contract_id);
+    let buyer_balance_before = balance_client.balance(&buyer);
 
     // Validation is read-only: should succeed and not move any funds
     let token_addr = token.address();
     assert!(client.is_token_supported(&token_addr));
-    client.validate_token_compatibility(&token_addr).unwrap();
+    client.validate_token_compatibility(&token_addr);
 
     // Call whitelist_token as well – also must not mutate customer funds beyond
     // the zero self-transfer (which is internal to validation)
     client.whitelist_token(&token_addr);
 
-    let token_balance_after = token_client.balance(&contract_id);
-    let buyer_balance_after = token_client.balance(&buyer);
+    let token_balance_after = balance_client.balance(&contract_id);
+    let buyer_balance_after = balance_client.balance(&buyer);
 
     assert_eq!(
         token_balance_before, token_balance_after,
@@ -205,7 +250,7 @@ fn validate_compatibility_zero_transfer_probe_is_non_mutating() {
     // Before validation, no transfers recorded
     assert_eq!(RecordingTokenClient::new(&env, &token_id).get_transfer_calls(), 0);
 
-    client.validate_token_compatibility(&token_id).unwrap();
+    client.validate_token_compatibility(&token_id);
 
     // Transfer must have been probed exactly once with amount 0
     assert_eq!(RecordingTokenClient::new(&env, &token_id).get_transfer_calls(), 1);
@@ -237,7 +282,7 @@ fn stellar_asset_contract_is_supported() {
     let addr = token.address();
     // Real Stellar asset should pass all three probes
     assert!(client.is_token_supported(&addr));
-    client.validate_token_compatibility(&addr).unwrap();
+    client.validate_token_compatibility(&addr);
     // And whitelisting should succeed
     client.whitelist_token(&addr);
     assert!(client.is_token_whitelisted(&addr));
@@ -247,13 +292,6 @@ fn stellar_asset_contract_is_supported() {
 fn missing_methods_are_rejected_with_stable_error_not_panic() {
     let env = Env::default();
     env.mock_all_auths();
-
-    #[contract]
-    struct EmptyToken;
-    #[contractimpl]
-    impl EmptyToken {
-        pub fn ping(_env: Env) {}
-    }
 
     let (client, _) = setup_client(&env);
     let empty = env.register_contract(None, EmptyToken);

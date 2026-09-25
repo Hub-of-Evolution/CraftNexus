@@ -147,7 +147,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "MaxOnboardingAttemptsPerWindow"
+                  "symbol": "MaxOnboardAttempts"
                 }
               ]
             },
@@ -164,7 +164,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "MaxOnboardingAttemptsPerWindow"
+                      "symbol": "MaxOnboardAttempts"
                     }
                   ]
                 },
@@ -491,7 +491,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u64": 1
+                  "u32": 1
                 }
               }
             },
@@ -844,6 +844,14 @@
                   },
                   "val": {
                     "u32": 6
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 },
                 {

@@ -24,7 +24,15 @@ use super::{
     model::ModelState,
     seed_from_env, Lcg64, DEFAULT_CASE_COUNT,
 };
-use crate::CraftNexusContractClient;
+use crate::{
+    AdminActionKind, ArtisanFeeTierUpdatedEvent, ConfigUpdatedEvent, ConfigValue,
+    CraftNexusContract, CraftNexusContractClient, CURRENT_ESCROW_VERSION,
+    CURRENT_STORAGE_LAYOUT_VERSION, DataKey, DEFAULT_STAKE_COOLDOWN, DEFAULT_WASM_UPGRADE_COOLDOWN,
+    Error, ESCROW, Escrow, EscrowAction, EscrowCreateParams, EscrowEvent, EscrowStateIssue,
+    EscrowStatus, ExpiredDisputeFeePolicy, FeeTokenConfigsMigratedEvent, FeeTokenInfo, LegacyEscrow,
+    MAX_BATCH_SIZE, MetadataRevealProof, MetadataVerifiedEvent, PlatformPausedEvent,
+    PlatformUnpausedEvent, Resolution, SettlementPath, UpgradeCompatibilityManifest,
+};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const WASM_COOLDOWN: u64 = 7 * 24 * 60 * 60;
@@ -382,14 +390,8 @@ fn prop_upgrade_history_grows() {
 }
 
 
-#![cfg(test)]
-extern crate alloc;
-
 use super::*;
-use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
-    token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, TryIntoVal,
-};
+use soroban_sdk::{testutils::Events, token, vec, Bytes, IntoVal, String, Symbol, TryIntoVal, Vec};
 
 fn setup_test(
     env: &Env,
@@ -4796,6 +4798,7 @@ fn test_migrate_fee_token_configs_migrates_twenty_tokens_and_emits_summary() {
     assert_eq!(
         summary,
         FeeTokenConfigsMigratedEvent {
+            schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
             scanned_tokens: 20,
             migrated_configs: 20,
             skipped_existing: 0,
@@ -4898,6 +4901,7 @@ fn test_migrate_fee_token_configs_is_idempotent_and_preserves_existing_configs()
     assert_eq!(
         latest_summary,
         FeeTokenConfigsMigratedEvent {
+            schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
             scanned_tokens: 20,
             migrated_configs: 0,
             skipped_existing: 20,
@@ -6134,7 +6138,7 @@ fn create_unfunded(
     buyer: &Address,
     seller: &Address,
     token: &Address,
-) -> super::Escrow {
+) -> Escrow {
     client.create_unfunded_escrow(
         &1u32,
         buyer,
@@ -7451,10 +7455,7 @@ mod reconciliation_report_tests {
         let env = Env::default();
         let (client, _, _, _, _, token_id, _) = setup_test(&env, true);
 
-        let result = client.query_reconciliation_report(&token_id, &0, &50);
-        assert!(result.is_ok(), "query should succeed on empty state");
-
-        let report = result.unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(report.balance, 0, "balance should be zero on empty state");
         assert_eq!(
             report.expected_locked, 0,
@@ -7494,6 +7495,8 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
         // Stake funds
@@ -7501,10 +7504,7 @@ mod reconciliation_report_tests {
         client.stake_tokens(&buyer, &token_id, &stake_amount);
 
         // Query reconciliation
-        let result = client.query_reconciliation_report(&token_id, &0, &50);
-        assert!(result.is_ok());
-
-        let report = result.unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.expected_locked, escrow_amount,
             "should correctly categorize escrow as locked"
@@ -7542,9 +7542,11 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.complete, true,
             "should complete on small dataset"
@@ -7574,12 +7576,14 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
         // Now artificially drain the contract balance (simulating a loss)
         // We do this by directly manipulating tracked totals in storage for test purposes
         // In production, this would indicate a real discrepancy
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.complete, true,
             "query should complete"
@@ -7610,11 +7614,13 @@ mod reconciliation_report_tests {
                 &(i as u32),
                 &None,
                 &None,
+                &None,
+                &None,
             );
         }
 
         // First page: 50 escrows
-        let page1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let page1 = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(page1.scanned_escrows, 50, "first page should scan 50 escrows");
         assert_eq!(page1.complete, false, "first page should not be complete");
         assert_eq!(
@@ -7624,8 +7630,7 @@ mod reconciliation_report_tests {
 
         // Second page: remaining 10 escrows
         let page2 = client
-            .query_reconciliation_report(&token_id, &page1.next_cursor, &50)
-            .unwrap();
+            .query_reconciliation_report(&token_id, &page1.next_cursor, &50);
         assert_eq!(page2.scanned_escrows, 10, "second page should scan 10 escrows");
         assert_eq!(page2.complete, true, "second page should be complete");
         assert_eq!(
@@ -7653,11 +7658,13 @@ mod reconciliation_report_tests {
                 &(i as u32),
                 &None,
                 &None,
+                &None,
+                &None,
             );
         }
 
         // Request page_size=200, should be capped at 100
-        let report = client.query_reconciliation_report(&token_id, &0, &200).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &200);
         assert_eq!(
             report.scanned_escrows, 100,
             "page_size should be capped at MAX_PAGE_SIZE"
@@ -7687,7 +7694,7 @@ mod reconciliation_report_tests {
         );
 
         // Query first page
-        let page1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let page1 = client.query_reconciliation_report(&token_id, &0, &50);
         assert!(
             page1.expected_locked > 0,
             "first page should include recurring escrow"
@@ -7712,11 +7719,13 @@ mod reconciliation_report_tests {
             &1u32,
             &None,
             &None,
+            &None,
+            &None,
         );
 
         // Query multiple times
-        let report1 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
-        let report2 = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report1 = client.query_reconciliation_report(&token_id, &0, &50);
+        let report2 = client.query_reconciliation_report(&token_id, &0, &50);
 
         // Both should be identical (no state changed)
         assert_eq!(
@@ -7752,10 +7761,12 @@ mod reconciliation_report_tests {
             &order_id,
             &None,
             &None,
+            &None,
+            &None,
         );
 
         // Query should include the Active escrow
-        let report = client.query_reconciliation_report(&token_id, &0, &50).unwrap();
+        let report = client.query_reconciliation_report(&token_id, &0, &50);
         assert_eq!(
             report.expected_locked, amount,
             "should include Active escrow"

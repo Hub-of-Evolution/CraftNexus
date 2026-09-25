@@ -147,7 +147,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "MaxOnboardingAttemptsPerWindow"
+                  "symbol": "MaxOnboardAttempts"
                 }
               ]
             },
@@ -164,7 +164,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "MaxOnboardingAttemptsPerWindow"
+                      "symbol": "MaxOnboardAttempts"
                     }
                   ]
                 },
@@ -491,7 +491,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u64": 1
+                  "u32": 1
                 }
               }
             },
@@ -846,7 +846,7 @@
               },
               {
                 "error": {
-                  "contract": 34
+                  "contract": 33
                 }
               }
             ],
@@ -856,7 +856,7 @@
                   "string": "failing with contract error"
                 },
                 {
-                  "u32": 34
+                  "u32": 33
                 }
               ]
             }
@@ -878,7 +878,7 @@
               },
               {
                 "error": {
-                  "contract": 34
+                  "contract": 33
                 }
               }
             ],
@@ -903,7 +903,7 @@
               },
               {
                 "error": {
-                  "contract": 34
+                  "contract": 33
                 }
               }
             ],
@@ -928,7 +928,7 @@
               },
               {
                 "error": {
-                  "contract": 34
+                  "contract": 33
                 }
               }
             ],
@@ -982,7 +982,7 @@
               },
               {
                 "error": {
-                  "contract": 34
+                  "contract": 33
                 }
               }
             ],

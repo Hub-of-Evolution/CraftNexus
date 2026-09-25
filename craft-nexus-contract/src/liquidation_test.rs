@@ -653,8 +653,7 @@ fn test_flag_emits_event() {
     let expected_topic: soroban_sdk::Val =
         Symbol::new(&env, "stake_liquidation_flagged").into_val(&env);
     let flagged = events.iter().any(|(_, topics, _)| {
-        topics.len() >= 1
-            && svec![&env, topics.get_unchecked(0)] == svec![&env, expected_topic]
+        topics.len() >= 1 && svec![&env, topics.get_unchecked(0)] == svec![&env, expected_topic]
     });
     assert!(flagged);
 }
@@ -685,8 +684,7 @@ fn test_cure_emits_event() {
     let expected_topic: soroban_sdk::Val =
         Symbol::new(&env, "stake_liquidation_cured").into_val(&env);
     let cured = events.iter().any(|(_, topics, _)| {
-        topics.len() >= 1
-            && svec![&env, topics.get_unchecked(0)] == svec![&env, expected_topic]
+        topics.len() >= 1 && svec![&env, topics.get_unchecked(0)] == svec![&env, expected_topic]
     });
     assert!(cured);
 }

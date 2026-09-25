@@ -113,7 +113,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "u32": 2
+                  "u32": 3
                 },
                 {
                   "bool": false
@@ -140,7 +140,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "u32": 3
+                  "u32": 5
                 }
               ]
             }
@@ -164,7 +164,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "u32": 4
+                  "u32": 7
                 }
               ]
             }
@@ -440,7 +440,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "MaxOnboardingAttemptsPerWindow"
+                  "symbol": "MaxOnboardAttempts"
                 }
               ]
             },
@@ -457,7 +457,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "MaxOnboardingAttemptsPerWindow"
+                      "symbol": "MaxOnboardAttempts"
                     }
                   ]
                 },
@@ -936,7 +936,7 @@
                         "symbol": "profile_revision"
                       },
                       "val": {
-                        "u32": 4
+                        "u32": 7
                       }
                     },
                     {
@@ -1236,7 +1236,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u64": 1
+                  "u32": 1
                 }
               }
             },
@@ -1281,52 +1281,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u64": 5
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          518400
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "UserStateVersion"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "UserStateVersion"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "u32": 5
+                  "u32": 9
                 }
               }
             },
@@ -1926,6 +1881,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "user"
                   },
                   "val": {
@@ -2219,7 +2182,7 @@
                     "symbol": "new_digest"
                   },
                   "val": {
-                    "bytes": "0572951a5627c1ad4f07d556e35e5c8b281b5d09458cc0b7246ab36a18d0f272"
+                    "bytes": "01a7d3fdf7032334effe96144ba7b013743bf1c9b7543f77404eef87f02d8c18"
                   }
                 },
                 {
@@ -2235,7 +2198,7 @@
                     "symbol": "revision"
                   },
                   "val": {
-                    "u64": 2
+                    "u64": 3
                   }
                 },
                 {
@@ -2273,6 +2236,14 @@
                   },
                   "val": {
                     "u32": 704
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 },
                 {
@@ -2318,6 +2289,14 @@
                   },
                   "val": {
                     "symbol": "FlaggedByAdmin"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 },
                 {
@@ -2450,7 +2429,7 @@
                     "symbol": "profile_revision"
                   },
                   "val": {
-                    "u32": 2
+                    "u32": 3
                   }
                 },
                 {
@@ -2503,7 +2482,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "u32": 2
+                  "u32": 3
                 },
                 {
                   "bool": false
@@ -2561,7 +2540,7 @@
                     "symbol": "new_digest"
                   },
                   "val": {
-                    "bytes": "2b777485ea45de4d19a42b21ddf9e2b2489a910f2b5808ae6cf819989a01f48c"
+                    "bytes": "19b3cae715b66048332bce4f4ce00d4fc646e3fd2d6c75250159a25a7c3d2b19"
                   }
                 },
                 {
@@ -2569,7 +2548,7 @@
                     "symbol": "prior_digest"
                   },
                   "val": {
-                    "bytes": "0572951a5627c1ad4f07d556e35e5c8b281b5d09458cc0b7246ab36a18d0f272"
+                    "bytes": "01a7d3fdf7032334effe96144ba7b013743bf1c9b7543f77404eef87f02d8c18"
                   }
                 },
                 {
@@ -2577,7 +2556,7 @@
                     "symbol": "revision"
                   },
                   "val": {
-                    "u64": 3
+                    "u64": 5
                   }
                 },
                 {
@@ -2622,7 +2601,7 @@
                     "symbol": "profile_revision"
                   },
                   "val": {
-                    "u32": 2
+                    "u32": 3
                   }
                 },
                 {
@@ -2631,6 +2610,14 @@
                   },
                   "val": {
                     "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 },
                 {
@@ -2676,6 +2663,14 @@
                   },
                   "val": {
                     "symbol": "rejected"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 },
                 {
@@ -2816,7 +2811,7 @@
                     "symbol": "state_version"
                   },
                   "val": {
-                    "u32": 3
+                    "u32": 5
                   }
                 },
                 {
@@ -2952,7 +2947,7 @@
                     "symbol": "state_version"
                   },
                   "val": {
-                    "u32": 3
+                    "u32": 5
                   }
                 },
                 {
@@ -3018,7 +3013,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "u32": 3
+                  "u32": 5
                 }
               ]
             }
@@ -3134,7 +3129,7 @@
                     "symbol": "profile_revision"
                   },
                   "val": {
-                    "u32": 4
+                    "u32": 7
                   }
                 },
                 {
@@ -3331,7 +3326,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "u32": 4
+                  "u32": 7
                 }
               ]
             }
@@ -3455,7 +3450,7 @@
                     "symbol": "state_version"
                   },
                   "val": {
-                    "u32": 5
+                    "u32": 9
                   }
                 },
                 {
@@ -3583,7 +3578,7 @@
                     "symbol": "profile_revision"
                   },
                   "val": {
-                    "u32": 4
+                    "u32": 7
                   }
                 },
                 {
