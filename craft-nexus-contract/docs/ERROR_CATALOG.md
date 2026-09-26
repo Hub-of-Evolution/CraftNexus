@@ -15,13 +15,13 @@ This document catalogs all public contract errors, their meanings, triggering co
 | Amount & Fee | 1-5, 8, 23 | Issues with amounts, fees, and validation |
 | Authorization | 6-7, 18, 25, 31, 42, 49-52, 60 | Permission and state issues |
 | Escrow State | 3-4, 12, 19-20 | Escrow lifecycle and status errors |
-| Dispute Resolution | 10-11, 13-14, 53-55 | Dispute flow and evidence errors |
+| Dispute Resolution | 10-11, 13-14, 53-55, 84 | Dispute flow, escalation, and evidence errors |
 | Release & Windows | 15, 21, 23 | Timing and window errors |
 | Configuration | 9, 26, 39, 44 | Platform configuration errors |
 | Storage & Upgrades | 30, 32-38, 43, 45-48 | Upgrade and storage errors |
 | Batch Operations | 27, 29, 57-60 | Batch and job errors |
 | Staking & Tokens | 16-17, 24, 56 | Token and staking errors |
-| Price Oracle & Conversion | 82-85 | Oracle guardrail violations (feeds, conversion bounds) |
+| Price Oracle & Conversion | 111-114 | Oracle guardrail violations (feeds, conversion bounds) |
 
 ---
 
@@ -288,6 +288,21 @@ This document catalogs all public contract errors, their meanings, triggering co
 1. Verify correct order ID
 2. Ensure escrow is in Disputed state
 3. Check dispute initiation timestamp matches
+
+---
+
+#### Error 84: InvalidEscalationPolicy
+**Description**: The proposed dispute-escalation checkpoint schedule is invalid.
+
+**Triggering Conditions**:
+- `set_escalation_checkpoints` called with a zero `party_checkpoint`
+- The three checkpoint offsets are not strictly increasing
+- `admin_checkpoint` is not strictly below `max_dispute_duration`
+
+**Suggested Client Action**:
+1. Read the current final deadline: `get_max_dispute_duration()`
+2. Submit strictly increasing offsets, all below that value
+3. Verify with `get_escalation_checkpoints()`
 
 ---
 
@@ -784,7 +799,7 @@ This document catalogs all public contract errors, their meanings, triggering co
 
 ### Price Oracle & Conversion Errors
 
-#### Error 82: PriceFeedNotFound
+#### Error 111: PriceFeedNotFound
 **Description**: No price feed is configured for the requested token.
 
 **Triggering Conditions**:
@@ -798,7 +813,7 @@ This document catalogs all public contract errors, their meanings, triggering co
 
 ---
 
-#### Error 83: StalePriceData
+#### Error 112: StalePriceData
 **Description**: The price feed is stale (older than `max_staleness`) or carries a future timestamp. **Retryable** — refresh the feed and retry.
 
 **Triggering Conditions**:
@@ -811,7 +826,7 @@ This document catalogs all public contract errors, their meanings, triggering co
 
 ---
 
-#### Error 84: InvalidPriceData
+#### Error 113: InvalidPriceData
 **Description**: The price feed is malformed or an oracle configuration value is invalid.
 
 **Triggering Conditions**:
@@ -825,7 +840,7 @@ This document catalogs all public contract errors, their meanings, triggering co
 
 ---
 
-#### Error 85: ConversionOutOfBounds
+#### Error 114: ConversionOutOfBounds
 **Description**: An oracle-backed conversion or fee quote fell outside the configured deviation band, or its arithmetic overflowed.
 
 **Triggering Conditions**:
@@ -874,13 +889,10 @@ This document catalogs all public contract errors, their meanings, triggering co
 | 28 | AdminRecoveryFailed | 58 | BatchJobCancelled |
 | 29 | BatchLimitExceeded | 59 | BatchJobNotFound |
 | 30 | DeprecatedFunction | 60 | BatchJobUnauthorized |
-| 80 | PaginationLimitZero | 82 | PriceFeedNotFound |
-| 81 | PaginationCursorInvalid | 83 | StalePriceData |
-| 86 | EscrowAlreadyExists | 84 | InvalidPriceData |
-| — | — | 85 | ConversionOutOfBounds |
-
-> **Note**: `EscrowAlreadyExists` was renumbered from `80` to `86` to resolve a
-> duplicate discriminant with `PaginationLimitZero` (Issue #1045).
+| 80 | PaginationLimitZero | 111 | PriceFeedNotFound |
+| 81 | PaginationCursorInvalid | 112 | StalePriceData |
+| 83 | EscrowAlreadyExists | 113 | InvalidPriceData |
+| — | — | 114 | ConversionOutOfBounds |
 
 ---
 
@@ -919,12 +931,39 @@ function parseContractError(error: any): number {
 }
 ```
 
+#### Error 87: StaleAdminRevision
+**Description**: The caller supplied an admin revision that does not match the current monotonic revision. No storage was written.
+
+**Triggering Conditions**:
+- `apply_admin_mutation(expected_revision, …)` where `expected_revision != get_admin_revision()`
+- The supplied revision is neither the current head nor the revision that already applied this exact fingerprint
+
+**Suggested Client Action**:
+1. Call `get_admin_revision()` and retry with the fresh value
+2. Re-read platform config before constructing a different mutation
+
+---
+
+#### Error 88: AdminActionAlreadyApplied
+**Description**: This admin mutation was already applied at the supplied revision. Replaying it cannot repeat its effect.
+
+**Triggering Conditions**:
+- Retry of `set_paused`, `update_platform_fee`, `apply_admin_mutation`, or another gated admin write with the same arguments after a successful apply
+- `apply_admin_mutation` with the revision that already consumed this fingerprint
+
+**Suggested Client Action**:
+1. Treat the call as a successful no-op for idempotent clients
+2. If a different outcome is required, submit a new mutation at `get_admin_revision()`
+
+---
+
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.1 | 2026-08-31 | Added `StaleAdminRevision` (87) and `AdminActionAlreadyApplied` (88) for revision-bound admin mutations (#1071) |
 | 1.0 | 2026-08-25 | Initial catalog creation from error enum |
-| 1.1 | 2026-08-27 | Added price-oracle errors 82–85 (Issue #1044); documented `EscrowAlreadyExists` renumber 80→86 (Issue #1045) |
+| 1.1 | 2026-08-27 | Added price-oracle errors 111–114 (Issue #1044) |
 
 ---
 

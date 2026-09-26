@@ -29,4 +29,12 @@ impl DecimalTestToken {
     pub fn balance(_env: Env, _id: Address) -> i128 {
         0
     }
+
+    /// Minimal SEP-41 transfer probe used by token compatibility validation.
+    ///
+    /// This is a no-op for test purposes — it never mutates balances, but its
+    /// presence allows `whitelist_token` to verify that the contract exposes the
+    /// required `transfer` entrypoint. The validation flow uses a zero-amount
+    /// self-transfer (`contract -> contract, 0`) so no customer funds are moved.
+    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
 }

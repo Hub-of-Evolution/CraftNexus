@@ -22,6 +22,7 @@ import {
   PLATFORM_COMMISSION_WALLET,
 } from "./config";
 import { calculateFee, computeFeeAllocation, previewReleaseFunds } from "./fee-policy";
+import { recordFundMovement } from "./audit";
 
 const USDC_DECIMALS = 7;
 const USDC_FACTOR = 10 ** USDC_DECIMALS;
@@ -97,6 +98,15 @@ export class StellarPaymentService {
 
       // Submit transaction
       const result = await this.server.submitTransaction(builtTx);
+      recordFundMovement({
+        kind: "transfer",
+        actor: senderKeypair.publicKey(),
+        account: senderKeypair.publicKey(),
+        asset: "USDC",
+        amount,
+        reason: orderId ? `Order ${orderId}` : memo || "USDC transfer",
+        transactionHash: result.hash,
+      });
       return result.hash;
     } catch (error) {
       console.error("Payment failed:", error);
@@ -156,6 +166,15 @@ export class StellarPaymentService {
       transaction.sign(buyerKeypair);
 
       const result = await this.server.submitTransaction(transaction);
+      recordFundMovement({
+        kind: "transfer",
+        actor: buyerKeypair.publicKey(),
+        account: buyerKeypair.publicKey(),
+        asset: "USDC",
+        amount,
+        reason: `Order ${orderId} payment`,
+        transactionHash: result.hash,
+      });
       return {
         paymentHash: result.hash,
       };
