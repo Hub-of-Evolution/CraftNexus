@@ -19,6 +19,9 @@ pub mod conversion;
 /// Storage lifecycle, compaction, and TTL-management framework (#920).
 pub mod storage_lifecycle;
 
+/// Price oracle input validation for fee and settlement calculations (#1087).
+pub mod price_oracle;
+
 #[cfg(test)]
 mod admin_idempotency_test;
 #[cfg(test)]
@@ -380,6 +383,12 @@ pub enum Error {
     /// Archival policy parameters are invalid (zero retention, zero batch size,
     /// or batch size above MAX_ARCHIVAL_COMPACTION_BATCH).
     InvalidArchivalPolicy = 111,
+    /// Price oracle update is stale (older than the configured max age or in
+    /// the future).
+    PriceOracleStale = 112,
+    /// Price oracle update is malformed (empty asset pair, excessive precision,
+    /// or confidence outside the configured bounds).
+    PriceOracleInvalid = 113,
 }
 
 /// Maps a [`conversion::ConversionError`] onto the contract's own [`Error`]
