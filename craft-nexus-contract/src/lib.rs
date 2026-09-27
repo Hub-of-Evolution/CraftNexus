@@ -13403,11 +13403,11 @@ impl CraftNexusContract {
             .get(&DataKey::NextRecurringEscrowId)
             .unwrap_or(1);
         if id > MAX_RECURRING_ESCROW_ID {
-            return Err(crate::Error::RecurringEscrowIdExhausted);
+            env.panic_with_error(crate::Error::RecurringEscrowIdExhausted);
         }
         let next_id = id
             .checked_add(1)
-            .ok_or(crate::Error::RecurringEscrowIdExhausted)?;
+            .unwrap_or_else(|| env.panic_with_error(crate::Error::RecurringEscrowIdExhausted));
         env.storage()
             .persistent()
             .set(&DataKey::NextRecurringEscrowId, &next_id);
@@ -13419,7 +13419,7 @@ impl CraftNexusContract {
             .unwrap_or(0);
         let next_recurring_count = recurring_count
             .checked_add(1)
-            .ok_or(crate::Error::CounterOverflow)?;
+            .unwrap_or_else(|| env.panic_with_error(crate::Error::CounterOverflow));
         env.storage()
             .persistent()
             .set(&DataKey::RecurringEscrowCount, &next_recurring_count);
