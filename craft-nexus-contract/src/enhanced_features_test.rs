@@ -3,7 +3,7 @@ extern crate alloc;
 use super::*;
 use crate::onboarding::{OnboardingContract, OnboardingContractClient, ProfileStatus, UserRole};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    testutils::{Address as _, Events, Ledger},
     token, Address, Env, String,
 };
 
@@ -149,6 +149,40 @@ fn test_cancel_recurring_escrow() {
     assert_eq!(token_client.balance(&escrow.address), 0);
 
     assert!(!escrow.has_active_escrows(&buyer));
+}
+
+#[test]
+fn test_cancelled_recurring_escrow_rejects_stale_release_once_refunded() {
+    let env = Env::default();
+    let (escrow, _, buyer, artisan, token_id, token_admin, platform_wallet, _) =
+        setup_enhanced_test(&env);
+
+    let total_amount: i128 = 1000;
+    token_admin.mint(&buyer, &total_amount);
+    let rec_escrow =
+        escrow.create_recurring_escrow(&buyer, &artisan, &token_id, &total_amount, &3600, &2);
+
+    env.ledger().with_mut(|li| li.timestamp = 3601);
+    escrow.release_next_cycle(&rec_escrow.id);
+    escrow.cancel_recurring_escrow(&rec_escrow.id);
+
+    let token_client = token::Client::new(&env, &token_id);
+    assert_eq!(token_client.balance(&buyer), 500);
+    assert_eq!(token_client.balance(&artisan), 475);
+    assert_eq!(token_client.balance(&platform_wallet), 25);
+    assert_eq!(token_client.balance(&escrow.address), 0);
+
+    let events_after_cancel = env.events().all().len();
+    env.ledger().with_mut(|li| li.timestamp = 7202);
+    assert!(escrow.try_release_next_cycle(&rec_escrow.id).is_err());
+    assert!(escrow.try_release_next_cycle(&rec_escrow.id).is_err());
+    assert!(escrow.try_cancel_recurring_escrow(&rec_escrow.id).is_err());
+
+    assert_eq!(token_client.balance(&buyer), 500);
+    assert_eq!(token_client.balance(&artisan), 475);
+    assert_eq!(token_client.balance(&platform_wallet), 25);
+    assert_eq!(token_client.balance(&escrow.address), 0);
+    assert_eq!(env.events().all().len(), events_after_cancel);
 }
 
 #[test]
