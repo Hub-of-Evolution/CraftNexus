@@ -2,7 +2,7 @@ use super::decimal_test_token::{DecimalTestToken, DecimalTestTokenClient};
 use super::*;
 use crate::alloc::string::ToString;
 use soroban_sdk::{
-    testutils::{storage::Persistent as _, Address as _, Ledger},
+    testutils::{storage::Persistent as _, Address as _, Ledger, MockAuth, MockAuthInvoke},
     token, Address, Bytes, Env, String, Symbol,
 };
 
@@ -3100,11 +3100,11 @@ fn test_set_moderator_unknown_user_panics() {
 #[should_panic]
 fn test_get_verification_queue_non_admin_rejected() {
     let env = Env::default();
-    // Do NOT call mock_all_auths — no auth provided.
 
     let contract_id = env.register_contract(None, OnboardingContract);
     let client = OnboardingContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
+    let non_admin = Address::generate(&env);
 
     let config = OnboardingConfig {
         require_username: true,
@@ -3120,9 +3120,19 @@ fn test_get_verification_queue_non_admin_rejected() {
         env.storage().persistent().set(&DataKey::Config, &config);
     });
 
-    // No auth signal — must panic immediately.
-    client.get_verification_queue();
-    let _ = admin;
+    // Supplying a valid authorization for a different address must not satisfy
+    // the configured platform admin's require_auth() check.
+    client
+        .mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "get_verification_queue",
+                args: soroban_sdk::Vec::new(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .get_verification_queue();
 }
 
 /// Issue #474 — admin receives the queue and the auth signal is recorded.
