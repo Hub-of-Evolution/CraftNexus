@@ -380,6 +380,14 @@ pub enum Error {
     /// Archival policy parameters are invalid (zero retention, zero batch size,
     /// or batch size above MAX_ARCHIVAL_COMPACTION_BATCH).
     InvalidArchivalPolicy = 111,
+    /// A pending admin action proposal has passed its maximum allowed age and
+    /// can no longer be executed (#1132). Cancel it and re-propose if the
+    /// action is still required.
+    AdminActionExpired = 112,
+    /// The configured global timelock delay is shorter than the per-action-type
+    /// minimum delay documented in `time_policy`.  Execution is blocked to
+    /// protect the mandatory review window (#1132).
+    AdminActionPolicyViolation = 113,
 }
 
 /// Maps a [`conversion::ConversionError`] onto the contract's own [`Error`]
@@ -621,6 +629,9 @@ const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = time_policy::MIN_ADMIN_RECOVERY_COOLDOW
 const DEFAULT_ADMIN_ACTION_TIMELOCK_DELAY: u64 = time_policy::ADMIN_ACTION_TIMELOCK_DELAY;
 /// Default bounded expiration window for two-step admin transfers (7 days).
 const DEFAULT_ADMIN_TRANSFER_WINDOW: u64 = time_policy::ADMIN_TRANSFER_WINDOW;
+/// Maximum age before a pending admin action proposal expires and can no
+/// longer be executed (30 days) (#1132).
+const ADMIN_ACTION_PROPOSAL_EXPIRY: u64 = time_policy::ADMIN_ACTION_PROPOSAL_EXPIRY;
 
 #[contracttype(export = false)]
 #[derive(Clone, Eq, PartialEq)]
@@ -678,6 +689,14 @@ pub struct AdminActionProposal {
     pub cancelled: bool,
     /// Revision consumed when this action executed. Zero until execution.
     pub applied_revision: u32,
+    /// The per-action-type minimum delay snapshotted from `time_policy` at
+    /// proposal creation time (#1132).  A later call to
+    /// `set_admin_action_timelock_delay` with a smaller value can never
+    /// shorten the effective delay for this in-flight proposal.
+    pub snapshotted_min_delay: u64,
+    /// Absolute timestamp after which this proposal can no longer be executed
+    /// (#1132).  Set to `created_at + ADMIN_ACTION_PROPOSAL_EXPIRY`.
+    pub expiry: u64,
 }
 
 /// Storage keys for the admin action proposal system.
@@ -5177,7 +5196,60 @@ impl CraftNexusContract {
         Ok(())
     }
 
+    /// Returns the documented minimum delay for the given action kind (#1132).
+    ///
+    /// This is purely informational; the enforcement happens in
+    /// `propose_admin_action` which snapshots it into every new proposal.
+    pub fn get_action_type_min_delay(env: Env, action: AdminActionKind) -> u64 {
+        let _ = env; // no storage needed — values are compile-time constants
+        Self::min_delay_for_kind(&action)
+    }
+
+    /// Internal: returns the per-action-type minimum timelock delay (#1132).
+    fn min_delay_for_kind(action: &AdminActionKind) -> u64 {
+        match action {
+            AdminActionKind::PausePlatform(_) => time_policy::MIN_DELAY_PAUSE_PLATFORM,
+            AdminActionKind::SetPlatformFee(_) => time_policy::MIN_DELAY_SET_PLATFORM_FEE,
+            AdminActionKind::SetPlatformWallet(_) => time_policy::MIN_DELAY_SET_PLATFORM_WALLET,
+            AdminActionKind::SetWasmUpgradeCooldown(_) => {
+                time_policy::MIN_DELAY_SET_WASM_UPGRADE_COOLDOWN
+            }
+            AdminActionKind::SetMinStakeRequired(_) => time_policy::MIN_DELAY_SET_MIN_STAKE_REQUIRED,
+            AdminActionKind::SweepUnallocatedFunds(_, _) => {
+                time_policy::MIN_DELAY_SWEEP_UNALLOCATED_FUNDS
+            }
+            AdminActionKind::ExecuteUpgrade(_) => time_policy::MIN_DELAY_EXECUTE_UPGRADE,
+            AdminActionKind::SetMaxDisputeDuration(_) => {
+                time_policy::MIN_DELAY_SET_MAX_DISPUTE_DURATION
+            }
+            AdminActionKind::SetStakeCooldown(_) => time_policy::MIN_DELAY_SET_STAKE_COOLDOWN,
+            AdminActionKind::SetArtisanFeeTier(_, _) => time_policy::MIN_DELAY_SET_ARTISAN_FEE_TIER,
+            AdminActionKind::SetModerator(_) => time_policy::MIN_DELAY_SET_MODERATOR,
+            AdminActionKind::SetMinEscrowAmount(_, _) => time_policy::MIN_DELAY_SET_MIN_ESCROW_AMOUNT,
+            AdminActionKind::SetMaxReleaseWindow(_) => time_policy::MIN_DELAY_SET_MAX_RELEASE_WINDOW,
+            AdminActionKind::SetMinReleaseWindow(_) => time_policy::MIN_DELAY_SET_MIN_RELEASE_WINDOW,
+            AdminActionKind::SetOnboardingContract(_) => {
+                time_policy::MIN_DELAY_SET_ONBOARDING_CONTRACT
+            }
+            AdminActionKind::SetExpiredDisputePolicy(_) => {
+                time_policy::MIN_DELAY_SET_EXPIRED_DISPUTE_POLICY
+            }
+            AdminActionKind::ApplyReconciliationRepair(_) => {
+                time_policy::MIN_DELAY_APPLY_RECONCILIATION_REPAIR
+            }
+        }
+    }
+
     /// Create a new pending admin action that requires multi-sig approvals.
+    ///
+    /// The effective delay is `max(configured_delay, min_delay_for_kind)`.
+    /// The minimum delay is snapshotted into the proposal so that a later
+    /// call to `set_admin_action_timelock_delay` cannot shorten the review
+    /// window for an in-flight proposal (#1132).
+    ///
+    /// The proposal also carries an `expiry` timestamp (`created_at +
+    /// ADMIN_ACTION_PROPOSAL_EXPIRY`); execution is rejected once that
+    /// deadline passes (#1132).
     pub fn propose_admin_action(
         env: Env,
         proposer: Address,
@@ -5191,7 +5263,16 @@ impl CraftNexusContract {
         }
 
         let threshold = Self::get_admin_action_threshold(&env);
-        let delay = Self::get_admin_action_timelock_delay(&env);
+        let configured_delay = Self::get_admin_action_timelock_delay(&env);
+        let min_delay = Self::min_delay_for_kind(&action);
+        // Enforce the per-action-type minimum: the effective delay is
+        // max(configured, minimum).  This is snapshotted so it can never
+        // be retroactively shortened by a later config change (#1132).
+        let effective_delay = if configured_delay >= min_delay {
+            configured_delay
+        } else {
+            min_delay
+        };
         let created_at = env.ledger().timestamp();
         let next_id = Self::get_next_admin_action_id(&env);
 
@@ -5206,10 +5287,12 @@ impl CraftNexusContract {
             threshold,
             signers: signers.clone(),
             created_at,
-            ready_at: created_at + delay,
+            ready_at: created_at.saturating_add(effective_delay),
             executed: false,
             cancelled: false,
             applied_revision: 0,
+            snapshotted_min_delay: min_delay,
+            expiry: created_at.saturating_add(ADMIN_ACTION_PROPOSAL_EXPIRY),
         };
 
         env.storage()
@@ -5273,6 +5356,15 @@ impl CraftNexusContract {
     /// Guarded like every other custody entry point (#1069): `SweepUnallocatedFunds`
     /// reaches `transfer_tokens_and_record_audit`, which fails closed unless a
     /// `ReentryGuardScope` is already active for the current invocation.
+    ///
+    /// Enforcement (#1132):
+    /// - `now >= ready_at` (timelock has elapsed; `ready_at` already encodes the
+    ///   snapshotted effective delay so retroactive shortening is impossible).
+    /// - `now < expiry` (proposal has not aged past `ADMIN_ACTION_PROPOSAL_EXPIRY`).
+    /// - `ready_at` must not violate the snapshotted per-action-type minimum; if
+    ///   the stored proposal somehow has a `ready_at` that is less than
+    ///   `created_at + snapshotted_min_delay` the execution is rejected with
+    ///   `AdminActionPolicyViolation` as a defence-in-depth guard.
     pub fn execute_admin_action(env: Env, action_id: u64) -> Result<(), Error> {
         let _guard = ReentryGuardScope::new(&env);
         let action = Self::get_admin_action(&env, action_id).ok_or(Error::AdminActionTerminal)?;
@@ -5286,8 +5378,24 @@ impl CraftNexusContract {
             return Err(Error::AdminActionNeedsApprovals);
         }
         let now = env.ledger().timestamp();
+
+        // Defence-in-depth: ensure the snapshotted minimum was honoured.
+        // `ready_at` must be >= `created_at + snapshotted_min_delay`.
+        let required_ready_at = action
+            .created_at
+            .saturating_add(action.snapshotted_min_delay);
+        if action.ready_at < required_ready_at {
+            return Err(Error::AdminActionPolicyViolation);
+        }
+
+        // Timelock floor: the review window must have fully elapsed.
         if now < action.ready_at {
             return Err(Error::AdminActionTimelockActive);
+        }
+
+        // Expiry ceiling: proposals cannot be executed after their maximum age.
+        if time_policy::is_deadline_reached(now, action.expiry) {
+            return Err(Error::AdminActionExpired);
         }
 
         let fingerprint = Self::hash_admin_mutation(
@@ -14915,6 +15023,7 @@ const ADMIN_RECOVERY_DELAY: u64 = time_policy::ADMIN_RECOVERY_DELAY;
 const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = time_policy::MIN_ADMIN_RECOVERY_COOLDOWN;
 /// Default timelock delay for pending critical admin actions (24 hours).
 const DEFAULT_ADMIN_ACTION_TIMELOCK_DELAY: u64 = time_policy::ADMIN_ACTION_TIMELOCK_DELAY;
+const ADMIN_ACTION_PROPOSAL_EXPIRY: u64 = time_policy::ADMIN_ACTION_PROPOSAL_EXPIRY;
 
 #[contracttype(export = false)]
 #[derive(Clone, Eq, PartialEq)]
@@ -14970,6 +15079,8 @@ pub struct AdminActionProposal {
     pub ready_at: u64,
     pub executed: bool,
     pub cancelled: bool,
+    pub snapshotted_min_delay: u64,
+    pub expiry: u64,
 }
 
 /// Storage keys for the admin action proposal system.
@@ -15988,48 +16099,6 @@ pub struct UpgradeApprovalState {
     pub approvals: Vec<Address>,
 }
 
-<<<<<<< HEAD
-/// Per-token fee configuration introduced for #239.
-///
-/// The legacy `FeeTokenIndex` storage held only a flat `Vec<Address>` of
-/// fee-receiving tokens, which forced any future multi-token fee model into a
-/// contract upgrade. This struct gives us a per-token slot keyed by
-/// `DataKey::FeeTokenConfig(token)` that can carry forward additional fields
-/// (e.g. custom_bps overrides, token-specific receivers) without touching the
-/// global storage shape — new fields can be appended as `Option<T>` and read
-/// with safe fallbacks.
-///
-/// # Fields
-///
-/// * `active` - Boolean flag indicating whether this token is currently active for
-///   platform fee collection. When false, the admin can disable a token without
-///   losing its accumulated totals, allowing history preservation while stopping
-///   future fee counting.
-///
-/// * `custom_fee_bps` - Optional custom fee basis points specific to this token.
-///   Reserved for a future multi-token fee mode; currently NOT consulted by
-///   `calculate_fee` to keep this change storage-only and avoid behavior changes.
-///   A follow-up issue will wire this into fee calculation once the storage shape
-///   stabilizes in production.
-///
-/// * `accumulated` - Total fees accumulated in this token, measured in stroops.
-///   Monotonically increasing counter that preserves fee history across
-///   activation/deactivation cycles.
-///
-/// # Storage Side-effects
-///
-/// - Stored persistently under `DataKey::FeeTokenConfig(token_address)` with
-///   TTL extension on reads to prevent premature archival.
-/// - Updates to this struct trigger config refresh in affected escrow operations
-///   to ensure correct fee calculations based on token status.
-///
-/// # Integration notes
-///
-/// Off-chain integrators should cache this struct keyed by token address and
-/// refresh on-demand when escrow operations reference new tokens. The `accumulated`
-/// field provides audit trail for fee reconciliation; timestamp context is
-/// available via escrow event logs.
-=======
 const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
 
 const TTL_THRESHOLD: u32 = 10_000;
@@ -16071,6 +16140,7 @@ const STAKE_QUEUE_PRUNE_THRESHOLD: u32 = 40;
 const ADMIN_RECOVERY_DELAY: u64 = time_policy::ADMIN_RECOVERY_DELAY;
 const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = time_policy::MIN_ADMIN_RECOVERY_COOLDOWN;
 const DEFAULT_ADMIN_ACTION_TIMELOCK_DELAY: u64 = time_policy::ADMIN_ACTION_TIMELOCK_DELAY;
+const ADMIN_ACTION_PROPOSAL_EXPIRY: u64 = time_policy::ADMIN_ACTION_PROPOSAL_EXPIRY;
 
 #[contracttype(export = false)]
 #[derive(Clone, Eq, PartialEq)]
@@ -16109,6 +16179,8 @@ pub struct AdminActionProposal {
     pub ready_at: u64,
     pub executed: bool,
     pub cancelled: bool,
+    pub snapshotted_min_delay: u64,
+    pub expiry: u64,
 }
 
 #[contracttype(export = false)]
@@ -16700,7 +16772,6 @@ pub struct UpgradeApprovalState {
     pub approvals: Vec<Address>,
 }
 
->>>>>>> 867344c7525c03c89db6e2269239d86e67ad05f3
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -18866,14 +18937,6 @@ impl CraftNexusContract {
         caller: &Address,
         transition: DisputeTransition,
     ) -> Result<(), Error> {
-<<<<<<< HEAD
-        match transition {
-            DisputeTransition::Initiate
-            | DisputeTransition::SubmitEvidence
-            | DisputeTransition::Escalate
-            | DisputeTransition::ProposeRefund => {
-                if *caller != escrow.buyer && *caller != escrow.seller {
-=======
         if !Self::is_privileged_resolver(config, caller) {
             return Err(Error::Unauthorized);
         }
@@ -22447,7 +22510,6 @@ impl CraftNexusContract {
 
                 // Check authorization (buyer must match)
                 if escrow.buyer != authorized_address {
->>>>>>> 867344c7525c03c89db6e2269239d86e67ad05f3
                     return Err(Error::Unauthorized);
                 }
             }
@@ -22483,9 +22545,6 @@ impl CraftNexusContract {
         }
         Ok(())
     }
-<<<<<<< HEAD
-}
-=======
 
     // â”€â”€ Staking Requirement for Artisans (#99) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -24239,6 +24298,42 @@ impl CraftNexusContract {
         Ok(())
     }
 
+    fn min_delay_for_kind(action: &AdminActionKind) -> u64 {
+        match action {
+            AdminActionKind::PausePlatform(_) => time_policy::MIN_DELAY_PAUSE_PLATFORM,
+            AdminActionKind::SetPlatformFee(_) => time_policy::MIN_DELAY_SET_PLATFORM_FEE,
+            AdminActionKind::SetPlatformWallet(_) => time_policy::MIN_DELAY_SET_PLATFORM_WALLET,
+            AdminActionKind::SetWasmUpgradeCooldown(_) => {
+                time_policy::MIN_DELAY_SET_WASM_UPGRADE_COOLDOWN
+            }
+            AdminActionKind::SetMinStakeRequired(_) => time_policy::MIN_DELAY_SET_MIN_STAKE_REQUIRED,
+            AdminActionKind::SweepUnallocatedFunds(_, _) => {
+                time_policy::MIN_DELAY_SWEEP_UNALLOCATED_FUNDS
+            }
+            AdminActionKind::ExecuteUpgrade(_) => time_policy::MIN_DELAY_EXECUTE_UPGRADE,
+            AdminActionKind::SetMaxDisputeDuration(_) => {
+                time_policy::MIN_DELAY_SET_MAX_DISPUTE_DURATION
+            }
+            AdminActionKind::SetStakeCooldown(_) => time_policy::MIN_DELAY_SET_STAKE_COOLDOWN,
+            AdminActionKind::SetArtisanFeeTier(_, _) => time_policy::MIN_DELAY_SET_ARTISAN_FEE_TIER,
+            AdminActionKind::SetModerator(_) => time_policy::MIN_DELAY_SET_MODERATOR,
+            AdminActionKind::SetMinEscrowAmount(_, _) => {
+                time_policy::MIN_DELAY_SET_MIN_ESCROW_AMOUNT
+            }
+            AdminActionKind::SetMaxReleaseWindow(_) => time_policy::MIN_DELAY_SET_MAX_RELEASE_WINDOW,
+            AdminActionKind::SetMinReleaseWindow(_) => time_policy::MIN_DELAY_SET_MIN_RELEASE_WINDOW,
+            AdminActionKind::SetOnboardingContract(_) => {
+                time_policy::MIN_DELAY_SET_ONBOARDING_CONTRACT
+            }
+            AdminActionKind::SetExpiredDisputePolicy(_) => {
+                time_policy::MIN_DELAY_SET_EXPIRED_DISPUTE_POLICY
+            }
+            AdminActionKind::ApplyReconciliationRepair(_) => {
+                time_policy::MIN_DELAY_APPLY_RECONCILIATION_REPAIR
+            }
+        }
+    }
+
     pub fn propose_admin_action(
         env: Env,
         proposer: Address,
@@ -24252,7 +24347,13 @@ impl CraftNexusContract {
         }
 
         let threshold = Self::get_admin_action_threshold(&env);
-        let delay = Self::get_admin_action_timelock_delay(&env);
+        let configured_delay = Self::get_admin_action_timelock_delay(&env);
+        let min_delay = Self::min_delay_for_kind(&action);
+        let effective_delay = if configured_delay >= min_delay {
+            configured_delay
+        } else {
+            min_delay
+        };
         let created_at = env.ledger().timestamp();
         let next_id = Self::get_next_admin_action_id(&env);
 
@@ -24267,9 +24368,11 @@ impl CraftNexusContract {
             threshold,
             signers: signers.clone(),
             created_at,
-            ready_at: created_at + delay,
+            ready_at: created_at.saturating_add(effective_delay),
             executed: false,
             cancelled: false,
+            snapshotted_min_delay: min_delay,
+            expiry: created_at.saturating_add(ADMIN_ACTION_PROPOSAL_EXPIRY),
         };
 
         env.storage()
@@ -24338,8 +24441,22 @@ impl CraftNexusContract {
             return Err(Error::AdminActionNeedsApprovals);
         }
         let now = env.ledger().timestamp();
+
+        // Defence-in-depth: snapshotted minimum must be honoured.
+        let required_ready_at = action
+            .created_at
+            .saturating_add(action.snapshotted_min_delay);
+        if action.ready_at < required_ready_at {
+            return Err(Error::AdminActionPolicyViolation);
+        }
+
         if now < action.ready_at {
             return Err(Error::AdminActionTimelockActive);
+        }
+
+        // Expiry ceiling (#1132).
+        if time_policy::is_deadline_reached(now, action.expiry) {
+            return Err(Error::AdminActionExpired);
         }
 
         let mut persisted = action.clone();

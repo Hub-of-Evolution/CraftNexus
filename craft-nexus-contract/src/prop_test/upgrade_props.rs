@@ -2877,6 +2877,302 @@ fn test_pending_admin_action_is_cancelable() {
     assert!(matches!(result, Err(Ok(Error::AdminActionTerminal))));
 }
 
+// ===== Policy-driven admin timelock tests (#1132) =====
+
+/// AC1: Policy changes cannot shorten an existing delay.
+///
+/// Even if `set_admin_action_timelock_delay` is called with a value smaller
+/// than the per-action-type minimum *after* a proposal is created, the
+/// `ready_at` stored in the proposal (snapshotted at creation) is not
+/// retroactively shortened.  The defence-in-depth `AdminActionPolicyViolation`
+/// guard catches any proposal whose `ready_at < created_at + snapshotted_min_delay`.
+#[test]
+fn test_policy_change_cannot_shorten_in_flight_delay() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    // SetPlatformFee has a 48-hour minimum delay.
+    client.set_admin_action_threshold(&1);
+    // Configured delay matches the minimum (172_800 s = 48 h).
+    client.set_admin_action_timelock_delay(&172_800);
+
+    let action = client.propose_admin_action(&admin, &AdminActionKind::SetPlatformFee(500));
+
+    // ready_at should be created_at + 172_800 (minimum was honoured).
+    assert_eq!(action.ready_at, action.created_at + 172_800);
+    assert_eq!(action.snapshotted_min_delay, 172_800);
+
+    // Admin tries to shorten the global delay to 60 s *after* proposal is live.
+    client.set_admin_action_timelock_delay(&60);
+
+    // Execution before the original ready_at is still blocked — the stored
+    // ready_at is unchanged.
+    env.ledger().with_mut(|li| li.timestamp += 61);
+    let result = client.try_execute_admin_action(&action.id);
+    assert!(
+        matches!(result, Err(Ok(Error::AdminActionTimelockActive))),
+        "expected TimelockActive, got {result:?}"
+    );
+
+    // Only after the full 48 h does execution succeed.
+    env.ledger().with_mut(|li| li.timestamp += 172_800);
+    client.execute_admin_action(&action.id);
+}
+
+/// AC2: Each action type has a documented minimum delay.
+///
+/// `get_action_type_min_delay` returns the compile-time constants from
+/// `time_policy`.  Spot-check several action kinds.
+#[test]
+fn test_each_action_type_has_a_documented_min_delay() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    // PausePlatform: 0 — emergency pause must be instant.
+    assert_eq!(
+        client.get_action_type_min_delay(&AdminActionKind::PausePlatform(true)),
+        0
+    );
+    // SetPlatformFee: 48 h.
+    assert_eq!(
+        client.get_action_type_min_delay(&AdminActionKind::SetPlatformFee(100)),
+        48 * 60 * 60
+    );
+    // SetPlatformWallet: 48 h.
+    let dummy = Address::generate(&env);
+    assert_eq!(
+        client.get_action_type_min_delay(&AdminActionKind::SetPlatformWallet(dummy.clone())),
+        48 * 60 * 60
+    );
+    // ExecuteUpgrade: 7 days — longest review window.
+    assert_eq!(
+        client.get_action_type_min_delay(&AdminActionKind::ExecuteUpgrade(
+            BytesN::from_array(&env, &[1u8; 32])
+        )),
+        7 * 24 * 60 * 60
+    );
+    // SetOnboardingContract: 48 h.
+    assert_eq!(
+        client.get_action_type_min_delay(&AdminActionKind::SetOnboardingContract(dummy.clone())),
+        48 * 60 * 60
+    );
+    // Generic 24 h actions.
+    assert_eq!(
+        client.get_action_type_min_delay(&AdminActionKind::SetStakeCooldown(3600)),
+        24 * 60 * 60
+    );
+    assert_eq!(
+        client.get_action_type_min_delay(&AdminActionKind::SetMaxDisputeDuration(86400)),
+        24 * 60 * 60
+    );
+    assert_eq!(
+        client.get_action_type_min_delay(&AdminActionKind::ApplyReconciliationRepair(1)),
+        24 * 60 * 60
+    );
+}
+
+/// AC2b: When the configured global delay is *below* the per-action-type
+/// minimum, `propose_admin_action` transparently upgrades `ready_at` to
+/// `created_at + min_delay`, and snapshots the minimum.
+#[test]
+fn test_propose_enforces_per_action_type_minimum_delay() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    client.set_admin_action_threshold(&1);
+    // Global delay is only 60 s — well below the 48 h minimum for SetPlatformFee.
+    client.set_admin_action_timelock_delay(&60);
+
+    let action = client.propose_admin_action(&admin, &AdminActionKind::SetPlatformFee(300));
+
+    let min_48h: u64 = 48 * 60 * 60;
+    // Effective ready_at must use the minimum, not the configured 60 s.
+    assert_eq!(action.ready_at, action.created_at + min_48h);
+    assert_eq!(action.snapshotted_min_delay, min_48h);
+
+    // Execution just after 60 s is blocked.
+    env.ledger().with_mut(|li| li.timestamp += 61);
+    let r = client.try_execute_admin_action(&action.id);
+    assert!(matches!(r, Err(Ok(Error::AdminActionTimelockActive))));
+
+    // Execution after the full minimum succeeds.
+    env.ledger().with_mut(|li| li.timestamp += min_48h);
+    client.execute_admin_action(&action.id);
+}
+
+/// AC3: Execution fails outside the valid window — before `ready_at` (timelock)
+/// and at or after `expiry` (proposal too old).
+#[test]
+fn test_execution_fails_outside_valid_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    client.set_admin_action_threshold(&1);
+    // PausePlatform min = 0, so delay=0 is valid.
+    client.set_admin_action_timelock_delay(&0);
+
+    let action = client.propose_admin_action(&admin, &AdminActionKind::PausePlatform(true));
+    assert_eq!(action.snapshotted_min_delay, 0);
+
+    // Immediately after proposal: timelock already elapsed (delay=0, min=0).
+    // Jump past the 30-day expiry window.
+    let expiry_secs: u64 = 30 * 24 * 60 * 60;
+    env.ledger().with_mut(|li| li.timestamp += expiry_secs);
+
+    // Now past expiry — execution must be rejected.
+    let r = client.try_execute_admin_action(&action.id);
+    assert!(
+        matches!(r, Err(Ok(Error::AdminActionExpired))),
+        "expected AdminActionExpired, got {r:?}"
+    );
+}
+
+/// AC3b: Execution succeeds in the exact valid window: at `ready_at` and
+/// before `expiry`.
+#[test]
+fn test_execution_succeeds_inside_valid_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    client.set_admin_action_threshold(&1);
+    client.set_admin_action_timelock_delay(&0);
+
+    let action = client.propose_admin_action(&admin, &AdminActionKind::PausePlatform(false));
+
+    // Advance to just inside the expiry window (29 days + 23 h).
+    env.ledger()
+        .with_mut(|li| li.timestamp += 29 * 24 * 60 * 60 + 23 * 60 * 60);
+    client.execute_admin_action(&action.id);
+}
+
+/// AC3c: Execution at *exactly* the expiry timestamp is rejected (inclusive-end
+/// convention consistent with the rest of `time_policy`).
+#[test]
+fn test_execution_rejected_at_exact_expiry_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    client.set_admin_action_threshold(&1);
+    client.set_admin_action_timelock_delay(&0);
+
+    let action = client.propose_admin_action(&admin, &AdminActionKind::PausePlatform(true));
+    let expiry_secs: u64 = 30 * 24 * 60 * 60;
+
+    // Advance to exactly `expiry` (= created_at + 30 days).
+    env.ledger()
+        .with_mut(|li| li.timestamp = action.created_at + expiry_secs);
+
+    let r = client.try_execute_admin_action(&action.id);
+    assert!(
+        matches!(r, Err(Ok(Error::AdminActionExpired))),
+        "expected AdminActionExpired at expiry boundary, got {r:?}"
+    );
+}
+
+/// AC4: High-sensitivity action (ExecuteUpgrade) must wait the full 7-day
+/// minimum even when the global delay is set to 0.
+#[test]
+fn test_execute_upgrade_action_enforces_seven_day_minimum() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    client.set_admin_action_threshold(&1);
+    // Global delay deliberately zero — minimum must override.
+    client.set_admin_action_timelock_delay(&0);
+
+    let hash = BytesN::from_array(&env, &[0xABu8; 32]);
+    let action =
+        client.propose_admin_action(&admin, &AdminActionKind::ExecuteUpgrade(hash.clone()));
+
+    let seven_days: u64 = 7 * 24 * 60 * 60;
+    assert_eq!(action.snapshotted_min_delay, seven_days);
+    assert_eq!(action.ready_at, action.created_at + seven_days);
+
+    // Still blocked at 6 days 23 h 59 m 59 s.
+    env.ledger()
+        .with_mut(|li| li.timestamp += seven_days - 1);
+    let r = client.try_execute_admin_action(&action.id);
+    assert!(
+        matches!(r, Err(Ok(Error::AdminActionTimelockActive))),
+        "expected TimelockActive before 7-day minimum, got {r:?}"
+    );
+
+    // Exactly at 7 days the timelock clears.
+    env.ledger().with_mut(|li| li.timestamp += 1);
+    // ExecuteUpgrade needs a WASM upgrade to be proposed first; just verify the
+    // timelock gate itself passes (the upgrade-specific error is different).
+    let r2 = client.try_execute_admin_action(&action.id);
+    assert!(
+        !matches!(r2, Err(Ok(Error::AdminActionTimelockActive))),
+        "timelock should be cleared at exactly 7 days"
+    );
+}
+
+/// AC5: Proposal expiry field is set to `created_at + 30 days` and is
+/// accessible on the returned struct.
+#[test]
+fn test_proposal_expiry_field_is_correct() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    client.set_admin_action_threshold(&1);
+    client.set_admin_action_timelock_delay(&0);
+
+    let t0 = env.ledger().timestamp();
+    let action = client.propose_admin_action(&admin, &AdminActionKind::PausePlatform(true));
+
+    let thirty_days: u64 = 30 * 24 * 60 * 60;
+    assert_eq!(action.expiry, t0 + thirty_days);
+}
+
+/// AC6: A proposal whose `ready_at` has been tampered to be less than
+/// `created_at + snapshotted_min_delay` is rejected at execution time with
+/// `AdminActionPolicyViolation` (defence-in-depth).
+///
+/// We simulate this by directly writing a manipulated proposal into storage
+/// via `env.as_contract`.
+#[test]
+fn test_policy_violation_detected_at_execution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    client.set_admin_action_threshold(&1);
+    client.set_admin_action_timelock_delay(&172_800); // 48 h
+
+    let action = client.propose_admin_action(&admin, &AdminActionKind::SetPlatformFee(200));
+    assert_eq!(action.snapshotted_min_delay, 172_800);
+
+    // Tamper: reduce ready_at to created_at + 1 s (bypassing the minimum).
+    env.as_contract(&client.address, || {
+        let key = AdminActionDataKey::AdminAction(action.id);
+        let mut stored: AdminActionProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .expect("proposal must exist");
+        stored.ready_at = stored.created_at + 1;
+        env.storage().persistent().set(&key, &stored);
+    });
+
+    // Advance past the tampered ready_at but not the real minimum.
+    env.ledger().with_mut(|li| li.timestamp += 2);
+
+    let r = client.try_execute_admin_action(&action.id);
+    assert!(
+        matches!(r, Err(Ok(Error::AdminActionPolicyViolation))),
+        "expected AdminActionPolicyViolation for tampered ready_at, got {r:?}"
+    );
+}
+
 #[test]
 fn test_upgrade_default_threshold_is_one() {
     let env = Env::default();
