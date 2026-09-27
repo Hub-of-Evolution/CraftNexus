@@ -14135,31 +14135,47 @@ impl CraftNexusContract {
         allocated_amount: i128,
         actions: Vec<RepairAction>,
     ) -> Result<ReconciliationRepairPlan, Error> {
-        let admin = Self::get_admin(&env)?;
+        let _guard = ReentryGuardScope::new(&env);
+        Self::check_not_paused(&env);
+
+        let admin = Self::get_admin(&env).unwrap_or_else(|e| env.panic_with_error(e));
         admin.require_auth();
         let report: ReconciliationReport = env
             .storage()
             .persistent()
             .get(&DataKey::ReconciliationReport(token.clone()))
-            .ok_or(Error::ReconciliationRequired)?;
+            .unwrap_or_else(|| env.panic_with_error(Error::ReconciliationRequired));
+        
         if !report.complete || !report.unresolved {
-            return Err(Error::ReconciliationRequired);
-        }
-        if report.balance < report.expected_locked + report.expected_staked {
-            return Err(Error::EmergencyAccountingInvariant);
+            env.panic_with_error(Error::ReconciliationRequired);
         }
 
-        let residual_balance = report.balance - (report.expected_locked + report.expected_staked);
+        let total_expected = report
+            .expected_locked
+            .checked_add(report.expected_staked)
+            .unwrap_or_else(|| env.panic_with_error(Error::EmergencyAccountingInvariant));
+
+        if report.balance < total_expected {
+            env.panic_with_error(Error::EmergencyAccountingInvariant);
+        }
+
+        let residual_balance = report
+            .balance
+            .checked_sub(total_expected)
+            .unwrap_or_else(|| env.panic_with_error(Error::EmergencyAccountingInvariant));
+
         let currently_allocated: i128 = env
             .storage()
             .persistent()
             .get(&DataKey::AllocatedResidualBalance(token.clone()))
             .unwrap_or(0);
 
-        if allocated_amount < 0
-            || currently_allocated.saturating_add(allocated_amount) > residual_balance
-        {
-            return Err(Error::EmergencyAccountingInvariant);
+        let new_allocated = currently_allocated
+            .checked_add(allocated_amount)
+            .unwrap_or_else(|| env.panic_with_error(Error::EmergencyAccountingInvariant));
+
+        if allocated_amount < 0 || new_allocated > residual_balance {
+            env.panic_with_error(Error::EmergencyAccountingInvariant);
         }
 
         let digest = Self::compute_reconciliation_digest(
@@ -14177,6 +14193,10 @@ impl CraftNexusContract {
             .persistent()
             .get(&DataKey::NextReconciliationRepairPlanId)
             .unwrap_or(1);
+
+        let next_id = id
+            .checked_add(1)
+            .unwrap_or_else(|| env.panic_with_error(Error::CounterOverflow));
 
         let mut approvals = Vec::new(&env);
         approvals.push_back(admin);
@@ -14202,14 +14222,14 @@ impl CraftNexusContract {
 
         env.storage().persistent().set(
             &DataKey::AllocatedResidualBalance(token.clone()),
-            &(currently_allocated.saturating_add(allocated_amount)),
+            &new_allocated,
         );
         env.storage()
             .persistent()
             .set(&DataKey::ReconciliationRepairPlan(id), &plan);
         env.storage()
             .persistent()
-            .set(&DataKey::NextReconciliationRepairPlanId, &(id + 1));
+            .set(&DataKey::NextReconciliationRepairPlanId, &next_id);
         Self::extend_persistent(&env, &DataKey::ReconciliationRepairPlan(id));
         Self::extend_persistent(&env, &DataKey::NextReconciliationRepairPlanId);
         Ok(plan)
