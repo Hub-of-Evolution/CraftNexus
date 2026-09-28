@@ -2678,7 +2678,9 @@ fn test_set_max_release_window_and_enforcement() {
     let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     token_admin.mint(&buyer, &100_000_000);
 
-    // Set a tight maximum of 1 hour (3600 seconds)
+    // Lower the minimum first: a one-hour maximum is below the default
+    // one-day minimum, and an inverted configuration is rejected (#1032).
+    client.set_min_release_window(&3600u32);
     client.set_max_release_window(&3600u32);
 
     // Escrow with window exactly at the limit succeeds
@@ -2696,7 +2698,9 @@ fn test_create_escrow_exceeds_configured_max_window() {
     let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     token_admin.mint(&buyer, &100_000_000);
 
-    // Admin sets a 1-hour max
+    // Lower the minimum first: a one-hour maximum is below the default
+    // one-day minimum, and an inverted configuration is rejected (#1032).
+    client.set_min_release_window(&3600u32);
     client.set_max_release_window(&3600u32);
 
     // Attempting 2 hours should panic with ReleaseWindowTooLong

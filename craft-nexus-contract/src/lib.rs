@@ -36,6 +36,8 @@ mod liquidation_test;
 #[cfg(test)]
 mod min_release_window_test;
 #[cfg(test)]
+mod release_window_config_test;
+#[cfg(test)]
 mod pagination_boundary_test;
 #[cfg(test)]
 mod diagnostic_scan_test;
@@ -3857,6 +3859,58 @@ impl CraftNexusContract {
         Self::read_persistent(env, &key).unwrap_or(MAX_TOTAL_RELEASE_WINDOW)
     }
 
+    /// Validate a proposed release-window configuration before it is persisted (#1032).
+    ///
+    /// A release-window configuration is only valid when it is **possible**
+    /// (both bounds are non-zero and correctly ordered), **bounded** (the
+    /// maximum never exceeds the absolute safety ceiling, which is also the
+    /// arithmetic bound that keeps `created_at + release_window` representable
+    /// for every `created_at` the ledger can produce), and **consistent with
+    /// the dispute lifecycle** (the shortest release window cannot outlive the
+    /// longest a dispute may remain open).
+    ///
+    /// Funnelling every configuration-change path — the direct admin setters,
+    /// multi-sig proposals, and their execution — through this single check
+    /// guarantees invalid input is rejected *before* it reaches storage, so a
+    /// committed configuration is never impossible or self-contradictory.
+    ///
+    /// # Errors
+    /// * [`Error::ReleaseWindowTooShort`] when either bound is `0`.
+    /// * [`Error::ReleaseWindowTooLong`] when `max_window` exceeds
+    ///   [`ABSOLUTE_MAX_RELEASE_WINDOW`], when the bounds are inverted
+    ///   (`min_window > max_window`), or when `min_window` exceeds
+    ///   `max_dispute_duration`.
+    fn validate_release_window_config(
+        min_window: u32,
+        max_window: u32,
+        max_dispute_duration: u32,
+    ) -> Result<(), Error> {
+        // Minimums: a zero-second window would auto-release instantly.
+        if min_window == 0 || max_window == 0 {
+            return Err(Error::ReleaseWindowTooShort);
+        }
+
+        // Maximums / arithmetic bound: never exceed the hard safety ceiling.
+        if max_window > ABSOLUTE_MAX_RELEASE_WINDOW {
+            return Err(Error::ReleaseWindowTooLong);
+        }
+
+        // Ordering: an inverted pair admits no window that can satisfy both
+        // bounds, i.e. an impossible configuration.
+        if min_window > max_window {
+            return Err(Error::ReleaseWindowTooLong);
+        }
+
+        // Dispute-period consistency: if the shortest release window outlives
+        // the maximum dispute duration, a dispute opened at funding time would
+        // be force-resolved before the release window could ever elapse.
+        if min_window > max_dispute_duration {
+            return Err(Error::ReleaseWindowTooLong);
+        }
+
+        Ok(())
+    }
+
     /// Returns the configured onboarding contract address, if any (#243).
     fn get_onboarding_address(env: &Env) -> Option<Address> {
         env.storage()
@@ -4286,17 +4340,22 @@ impl CraftNexusContract {
 
     /// Set the configurable maximum release window (admin only).
     ///
+    /// The change is rejected unless the resulting `(min, max)` pair is a
+    /// valid, ordered configuration (see [`Self::validate_release_window_config`]).
+    ///
     /// # Arguments
     /// * `max_window` - Maximum allowed release window in seconds.
-    ///   Must be > 0 and <= ABSOLUTE_MAX_RELEASE_WINDOW.
+    ///   Must be > 0, <= `ABSOLUTE_MAX_RELEASE_WINDOW`, and at least the
+    ///   current `min_release_window`.
     pub fn set_max_release_window(env: Env, max_window: u32) {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
-        if max_window == 0 {
-            env.panic_with_error(crate::Error::ReleaseWindowTooShort);
-        }
-        if max_window > ABSOLUTE_MAX_RELEASE_WINDOW {
-            env.panic_with_error(crate::Error::ReleaseWindowTooLong);
+        if let Err(e) = Self::validate_release_window_config(
+            config.min_release_window,
+            max_window,
+            config.max_dispute_duration,
+        ) {
+            env.panic_with_error(e);
         }
         env.storage()
             .persistent()
@@ -4305,24 +4364,22 @@ impl CraftNexusContract {
 
     /// Set the minimum release window to prevent "flash" auto-releases (admin only).
     ///
+    /// The change is rejected unless the resulting `(min, max)` pair is a
+    /// valid, ordered configuration (see [`Self::validate_release_window_config`]).
+    ///
     /// # Arguments
     /// * `min_window` - Minimum allowed release window in seconds
     ///
-    /// # Panics
-    /// - If min_window is 0
-    /// - If min_window exceeds the current max_release_window
+    /// # Errors
+    /// * [`Error::ReleaseWindowTooShort`] if `min_window` is 0.
+    /// * [`Error::ReleaseWindowTooLong`] if `min_window` exceeds the current
+    ///   `max_release_window`, or the maximum dispute duration.
     pub fn set_min_release_window(env: Env, min_window: u32) -> Result<(), Error> {
         let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
-        if min_window == 0 {
-            env.panic_with_error(crate::Error::ReleaseWindowTooShort);
-        }
-
         let max_window = Self::get_max_release_window(&env);
-        if min_window > max_window {
-            return Err(Error::ReleaseWindowTooLong);
-        }
+        Self::validate_release_window_config(min_window, max_window, config.max_dispute_duration)?;
 
         let old_min = config.min_release_window;
         config.min_release_window = min_window;
@@ -5190,6 +5247,29 @@ impl CraftNexusContract {
             return Err(Error::NotAnAdminActionSigner);
         }
 
+        // Issue #1032: reject an invalid release-window configuration before
+        // the proposal is persisted so it can never be executed later.
+        {
+            let config = Self::get_platform_config_internal(&env);
+            match &action {
+                AdminActionKind::SetMaxReleaseWindow(max_window) => {
+                    Self::validate_release_window_config(
+                        config.min_release_window,
+                        *max_window,
+                        config.max_dispute_duration,
+                    )?;
+                }
+                AdminActionKind::SetMinReleaseWindow(min_window) => {
+                    Self::validate_release_window_config(
+                        *min_window,
+                        Self::get_max_release_window(&env),
+                        config.max_dispute_duration,
+                    )?;
+                }
+                _ => {}
+            }
+        }
+
         let threshold = Self::get_admin_action_threshold(&env);
         let delay = Self::get_admin_action_timelock_delay(&env);
         let created_at = env.ledger().timestamp();
@@ -5480,6 +5560,14 @@ impl CraftNexusContract {
                 Ok(())
             }
             AdminActionKind::SetMaxReleaseWindow(window) => {
+                // Issue #1032: validate the effective configuration before any
+                // state is written, so an invalid proposal can never persist.
+                let config = Self::get_platform_config_internal(env);
+                Self::validate_release_window_config(
+                    config.min_release_window,
+                    *window,
+                    config.max_dispute_duration,
+                )?;
                 let old_value: u32 = env
                     .storage()
                     .persistent()
@@ -5498,7 +5586,14 @@ impl CraftNexusContract {
                 Ok(())
             }
             AdminActionKind::SetMinReleaseWindow(window) => {
+                // Issue #1032: validate the effective configuration before any
+                // state is written, so an invalid proposal can never persist.
                 let mut config = Self::get_platform_config_internal(env);
+                Self::validate_release_window_config(
+                    *window,
+                    Self::get_max_release_window(env),
+                    config.max_dispute_duration,
+                )?;
                 let old_value = config.min_release_window;
                 config.min_release_window = *window;
                 env.storage()
@@ -18027,6 +18122,58 @@ impl CraftNexusContract {
         Self::read_persistent(env, &key).unwrap_or(MAX_TOTAL_RELEASE_WINDOW)
     }
 
+    /// Validate a proposed release-window configuration before it is persisted (#1032).
+    ///
+    /// A release-window configuration is only valid when it is **possible**
+    /// (both bounds are non-zero and correctly ordered), **bounded** (the
+    /// maximum never exceeds the absolute safety ceiling, which is also the
+    /// arithmetic bound that keeps `created_at + release_window` representable
+    /// for every `created_at` the ledger can produce), and **consistent with
+    /// the dispute lifecycle** (the shortest release window cannot outlive the
+    /// longest a dispute may remain open).
+    ///
+    /// Funnelling every configuration-change path — the direct admin setters,
+    /// multi-sig proposals, and their execution — through this single check
+    /// guarantees invalid input is rejected *before* it reaches storage, so a
+    /// committed configuration is never impossible or self-contradictory.
+    ///
+    /// # Errors
+    /// * [`Error::ReleaseWindowTooShort`] when either bound is `0`.
+    /// * [`Error::ReleaseWindowTooLong`] when `max_window` exceeds
+    ///   [`ABSOLUTE_MAX_RELEASE_WINDOW`], when the bounds are inverted
+    ///   (`min_window > max_window`), or when `min_window` exceeds
+    ///   `max_dispute_duration`.
+    fn validate_release_window_config(
+        min_window: u32,
+        max_window: u32,
+        max_dispute_duration: u32,
+    ) -> Result<(), Error> {
+        // Minimums: a zero-second window would auto-release instantly.
+        if min_window == 0 || max_window == 0 {
+            return Err(Error::ReleaseWindowTooShort);
+        }
+
+        // Maximums / arithmetic bound: never exceed the hard safety ceiling.
+        if max_window > ABSOLUTE_MAX_RELEASE_WINDOW {
+            return Err(Error::ReleaseWindowTooLong);
+        }
+
+        // Ordering: an inverted pair admits no window that can satisfy both
+        // bounds, i.e. an impossible configuration.
+        if min_window > max_window {
+            return Err(Error::ReleaseWindowTooLong);
+        }
+
+        // Dispute-period consistency: if the shortest release window outlives
+        // the maximum dispute duration, a dispute opened at funding time would
+        // be force-resolved before the release window could ever elapse.
+        if min_window > max_dispute_duration {
+            return Err(Error::ReleaseWindowTooLong);
+        }
+
+        Ok(())
+    }
+
     /// Returns the configured onboarding contract address, if any (#243).
     fn get_onboarding_address(env: &Env) -> Option<Address> {
         env.storage()
@@ -18399,17 +18546,22 @@ impl CraftNexusContract {
 
     /// Set the configurable maximum release window (admin only).
     ///
+    /// The change is rejected unless the resulting `(min, max)` pair is a
+    /// valid, ordered configuration (see [`Self::validate_release_window_config`]).
+    ///
     /// # Arguments
     /// * `max_window` - Maximum allowed release window in seconds.
-    ///   Must be > 0 and <= ABSOLUTE_MAX_RELEASE_WINDOW.
+    ///   Must be > 0, <= `ABSOLUTE_MAX_RELEASE_WINDOW`, and at least the
+    ///   current `min_release_window`.
     pub fn set_max_release_window(env: Env, max_window: u32) {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
-        if max_window == 0 {
-            env.panic_with_error(crate::Error::ReleaseWindowTooShort);
-        }
-        if max_window > ABSOLUTE_MAX_RELEASE_WINDOW {
-            env.panic_with_error(crate::Error::ReleaseWindowTooLong);
+        if let Err(e) = Self::validate_release_window_config(
+            config.min_release_window,
+            max_window,
+            config.max_dispute_duration,
+        ) {
+            env.panic_with_error(e);
         }
         env.storage()
             .persistent()
@@ -18418,24 +18570,22 @@ impl CraftNexusContract {
 
     /// Set the minimum release window to prevent "flash" auto-releases (admin only).
     ///
+    /// The change is rejected unless the resulting `(min, max)` pair is a
+    /// valid, ordered configuration (see [`Self::validate_release_window_config`]).
+    ///
     /// # Arguments
     /// * `min_window` - Minimum allowed release window in seconds
     ///
-    /// # Panics
-    /// - If min_window is 0
-    /// - If min_window exceeds the current max_release_window
+    /// # Errors
+    /// * [`Error::ReleaseWindowTooShort`] if `min_window` is 0.
+    /// * [`Error::ReleaseWindowTooLong`] if `min_window` exceeds the current
+    ///   `max_release_window`, or the maximum dispute duration.
     pub fn set_min_release_window(env: Env, min_window: u32) -> Result<(), Error> {
         let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
-        if min_window == 0 {
-            env.panic_with_error(crate::Error::ReleaseWindowTooShort);
-        }
-
         let max_window = Self::get_max_release_window(&env);
-        if min_window > max_window {
-            return Err(Error::ReleaseWindowTooLong);
-        }
+        Self::validate_release_window_config(min_window, max_window, config.max_dispute_duration)?;
 
         let old_min = config.min_release_window;
         config.min_release_window = min_window;
@@ -23445,6 +23595,58 @@ impl CraftNexusContract {
         Self::read_persistent(env, &key).unwrap_or(MAX_TOTAL_RELEASE_WINDOW)
     }
 
+    /// Validate a proposed release-window configuration before it is persisted (#1032).
+    ///
+    /// A release-window configuration is only valid when it is **possible**
+    /// (both bounds are non-zero and correctly ordered), **bounded** (the
+    /// maximum never exceeds the absolute safety ceiling, which is also the
+    /// arithmetic bound that keeps `created_at + release_window` representable
+    /// for every `created_at` the ledger can produce), and **consistent with
+    /// the dispute lifecycle** (the shortest release window cannot outlive the
+    /// longest a dispute may remain open).
+    ///
+    /// Funnelling every configuration-change path — the direct admin setters,
+    /// multi-sig proposals, and their execution — through this single check
+    /// guarantees invalid input is rejected *before* it reaches storage, so a
+    /// committed configuration is never impossible or self-contradictory.
+    ///
+    /// # Errors
+    /// * [`Error::ReleaseWindowTooShort`] when either bound is `0`.
+    /// * [`Error::ReleaseWindowTooLong`] when `max_window` exceeds
+    ///   [`ABSOLUTE_MAX_RELEASE_WINDOW`], when the bounds are inverted
+    ///   (`min_window > max_window`), or when `min_window` exceeds
+    ///   `max_dispute_duration`.
+    fn validate_release_window_config(
+        min_window: u32,
+        max_window: u32,
+        max_dispute_duration: u32,
+    ) -> Result<(), Error> {
+        // Minimums: a zero-second window would auto-release instantly.
+        if min_window == 0 || max_window == 0 {
+            return Err(Error::ReleaseWindowTooShort);
+        }
+
+        // Maximums / arithmetic bound: never exceed the hard safety ceiling.
+        if max_window > ABSOLUTE_MAX_RELEASE_WINDOW {
+            return Err(Error::ReleaseWindowTooLong);
+        }
+
+        // Ordering: an inverted pair admits no window that can satisfy both
+        // bounds, i.e. an impossible configuration.
+        if min_window > max_window {
+            return Err(Error::ReleaseWindowTooLong);
+        }
+
+        // Dispute-period consistency: if the shortest release window outlives
+        // the maximum dispute duration, a dispute opened at funding time would
+        // be force-resolved before the release window could ever elapse.
+        if min_window > max_dispute_duration {
+            return Err(Error::ReleaseWindowTooLong);
+        }
+
+        Ok(())
+    }
+
     fn get_onboarding_address(env: &Env) -> Option<Address> {
         env.storage()
             .persistent()
@@ -23683,11 +23885,12 @@ impl CraftNexusContract {
     pub fn set_max_release_window(env: Env, max_window: u32) {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
-        if max_window == 0 {
-            env.panic_with_error(crate::Error::ReleaseWindowTooShort);
-        }
-        if max_window > ABSOLUTE_MAX_RELEASE_WINDOW {
-            env.panic_with_error(crate::Error::ReleaseWindowTooLong);
+        if let Err(e) = Self::validate_release_window_config(
+            config.min_release_window,
+            max_window,
+            config.max_dispute_duration,
+        ) {
+            env.panic_with_error(e);
         }
         env.storage()
             .persistent()
@@ -23698,14 +23901,8 @@ impl CraftNexusContract {
         let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
-        if min_window == 0 {
-            env.panic_with_error(crate::Error::ReleaseWindowTooShort);
-        }
-
         let max_window = Self::get_max_release_window(&env);
-        if min_window > max_window {
-            return Err(Error::ReleaseWindowTooLong);
-        }
+        Self::validate_release_window_config(min_window, max_window, config.max_dispute_duration)?;
 
         let old_min = config.min_release_window;
         config.min_release_window = min_window;
@@ -24251,6 +24448,29 @@ impl CraftNexusContract {
             return Err(Error::NotAnAdminActionSigner);
         }
 
+        // Issue #1032: reject an invalid release-window configuration before
+        // the proposal is persisted so it can never be executed later.
+        {
+            let config = Self::get_platform_config_internal(&env);
+            match &action {
+                AdminActionKind::SetMaxReleaseWindow(max_window) => {
+                    Self::validate_release_window_config(
+                        config.min_release_window,
+                        *max_window,
+                        config.max_dispute_duration,
+                    )?;
+                }
+                AdminActionKind::SetMinReleaseWindow(min_window) => {
+                    Self::validate_release_window_config(
+                        *min_window,
+                        Self::get_max_release_window(&env),
+                        config.max_dispute_duration,
+                    )?;
+                }
+                _ => {}
+            }
+        }
+
         let threshold = Self::get_admin_action_threshold(&env);
         let delay = Self::get_admin_action_timelock_delay(&env);
         let created_at = env.ledger().timestamp();
@@ -24530,6 +24750,14 @@ impl CraftNexusContract {
                 Ok(())
             }
             AdminActionKind::SetMaxReleaseWindow(window) => {
+                // Issue #1032: validate the effective configuration before any
+                // state is written, so an invalid proposal can never persist.
+                let config = Self::get_platform_config_internal(env);
+                Self::validate_release_window_config(
+                    config.min_release_window,
+                    *window,
+                    config.max_dispute_duration,
+                )?;
                 let old_value: u32 = env
                     .storage()
                     .persistent()
@@ -24548,7 +24776,14 @@ impl CraftNexusContract {
                 Ok(())
             }
             AdminActionKind::SetMinReleaseWindow(window) => {
+                // Issue #1032: validate the effective configuration before any
+                // state is written, so an invalid proposal can never persist.
                 let mut config = Self::get_platform_config_internal(env);
+                Self::validate_release_window_config(
+                    *window,
+                    Self::get_max_release_window(env),
+                    config.max_dispute_duration,
+                )?;
                 let old_value = config.min_release_window;
                 config.min_release_window = *window;
                 env.storage()
