@@ -36,6 +36,8 @@ mod liquidation_test;
 #[cfg(test)]
 mod min_release_window_test;
 #[cfg(test)]
+mod migration_precondition_test;
+#[cfg(test)]
 mod pagination_boundary_test;
 #[cfg(test)]
 mod diagnostic_scan_test;
@@ -380,6 +382,15 @@ pub enum Error {
     /// Archival policy parameters are invalid (zero retention, zero batch size,
     /// or batch size above MAX_ARCHIVAL_COMPACTION_BATCH).
     InvalidArchivalPolicy = 111,
+    // ─── Migration preconditions (#1118) ───────────────────────────────────────
+    /// A migration precondition was not satisfied, so the migration refused to
+    /// start. The gate is evaluated to completion *before* any mutation is
+    /// attempted, so this error always implies zero storage writes. Call
+    /// `get_migration_preconditions` to see which condition failed and why.
+    MigrationPreconditionFailed = 112,
+    /// A persisted migration precondition audit record failed its integrity
+    /// check against its own digest (#1118).
+    CorruptedMigrationAudit = 113,
 }
 
 /// Maps a [`conversion::ConversionError`] onto the contract's own [`Error`]
@@ -598,6 +609,22 @@ const DEFAULT_ARCHIVAL_RETENTION_WINDOW: u64 = 90 * 24 * 60 * 60;
 const DEFAULT_ARCHIVAL_COMPACTION_BATCH: u32 = 25;
 /// Upper bound for one archival maintenance step (migration or compaction).
 const MAX_ARCHIVAL_COMPACTION_BATCH: u32 = 50;
+/// Maximum number of records a single migration precondition scan will inspect
+/// before the gate fails closed with `MigrationPrecondition::ScanBudgetExceeded`
+/// (#1118).
+///
+/// The gate is deliberately *not* allowed to validate a prefix of the state and
+/// then report success: a partially-scanned deployment would let a migration
+/// start while an unscanned record still violated a precondition. Exceeding the
+/// budget is therefore reported as a failure, and the operator is told to use
+/// the staged, resumable migration runner (see
+/// `docs/versioned-state-migration.md`) rather than the single-shot migration
+/// entrypoints.
+const MAX_MIGRATION_PRECONDITION_SCAN: u32 = 200;
+/// Maximum number of migration precondition audit records retained in the
+/// bounded FIFO log (#1118). Older records are dropped; long-term audit trails
+/// should mirror the `migration_precondition_audited` events off-chain.
+const MAX_MIGRATION_PRECONDITION_AUDITS: u32 = 32;
 
 /// Symbol topics emitted alongside `UpgradeProposalEvent`.
 const UPGRADE_PROPOSED: Symbol = symbol_short!("UPG_PROP");
@@ -930,6 +957,15 @@ pub enum DataKey {
     ArchivalSummaryIndexed(u32),
     /// Next cursor for bounded/resumable archival compaction.
     ArchivalCompactionCursor,
+    /// Most recent migration precondition audit record (#1118). Kept as its own
+    /// single key so an operator can read the blocking condition with one O(1)
+    /// call instead of paging the log.
+    LastMigrationPreconditionAudit,
+    /// Monotonic counter of migration precondition audits ever recorded (#1118).
+    MigrationPreconditionAuditCount,
+    /// Bounded FIFO log of migration precondition audit records (#1118),
+    /// capped at MAX_MIGRATION_PRECONDITION_AUDITS.
+    MigrationPreconditionAudits,
 }
 
 /// Emergency operation kinds: the four types of critical control operations
@@ -2744,6 +2780,286 @@ impl<'a> Drop for ReentryGuardScope<'a> {
     fn drop(&mut self) {
         CraftNexusContract::exit_reentry_guard(self.env);
     }
+}
+
+/// Stable identifier for every condition the migration gate evaluates (#1118).
+///
+/// Discriminants are grouped by the five families named in the issue and are
+/// **append-only**: existing codes must never be renumbered or reused, because
+/// operators persist them in migration tickets and off-chain runbooks. The
+/// numeric code is carried on [`MigrationPreconditionFailure::code`].
+///
+/// | Range | Family                | Question the family answers                       |
+/// |-------|-----------------------|---------------------------------------------------|
+/// | 0–9   | Versions              | Is this the state the target layout expects?      |
+/// | 10–19 | Terminal states       | Is every record settled, with nothing mid-flight? |
+/// | 20–29 | Outstanding liability | Are balances at rest, with nothing in progress?    |
+/// | 30–39 | Pending governance    | Is no approval round open against this state?     |
+/// | 40–49 | Token identities      | Does every balance still point at a known token?  |
+/// | 50–59 | Gate integrity        | Was the check able to see the whole state?        |
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum MigrationPrecondition {
+    // ── Versions (0–9) ──
+    /// `PlatformConfig` must be readable. An uninitialized platform has no
+    /// legacy state to migrate, and `get_platform_config_internal` would panic
+    /// mid-migration rather than before it.
+    PlatformInitialized = 0,
+    /// The recorded contract version must be non-zero, i.e. the platform was
+    /// really initialized by `initialize`. A zero version means the legacy keys
+    /// belong to something else and must not be rewritten.
+    SourceVersionRecognised = 1,
+    /// The persisted layout version must not be *ahead* of the version this
+    /// build produces. A higher value means a newer build already rewrote the
+    /// layout, and migrating again would move records the new layout owns.
+    LayoutVersionMigratable = 2,
+    /// Every legacy blob the migration reads must decode into the type the
+    /// migration expects. `storage().get` yields `None` both for a missing key
+    /// and for a value of the wrong type, so a shape mismatch would be read as
+    /// "nothing to migrate" and a fresh layout written on top of unreadable
+    /// legacy state.
+    LegacyShapeReadable = 3,
+    // ── Terminal states (10–19) ──
+    /// No dispute may be open. A dispute pins an escrow plus its evidence,
+    /// assignment, and escalation records; re-keying the layout underneath it
+    /// strands the evidence chain.
+    NoOpenDisputes = 10,
+    /// No recurring escrow may be active. Recurring records carry their own
+    /// cycle and balance state that the target layout re-keys independently.
+    NoActiveRecurringEscrows = 11,
+    /// No two-step admin transfer may be half-completed. While a transfer is
+    /// open, `PlatformConfig.admin` and `DataKey::PendingAdmin` disagree about
+    /// who holds authority, so a migration run under the wrong identity is
+    /// indistinguishable from a legitimate one.
+    NoPendingAdminTransfer = 12,
+    /// No emergency operation may be in flight; one is already mid-mutation.
+    NoEmergencyOperationInFlight = 13,
+    /// No escrow may be parked in a `*Pending` in-flight transition. Such a
+    /// record is an exclusive claim on an unsettled transition, and that claim
+    /// outlives the layout that issued it.
+    NoIncompleteTransitions = 14,
+    // ── Outstanding liabilities (20–29) ──
+    /// No token may have funds still locked in escrow. The layout migrations
+    /// re-key `TotalLocked`; re-keying a non-zero value would drop the
+    /// platform's own accounting of funds it is holding.
+    NoLockedFunds = 20,
+    /// No escrow may belong to a batch that has not fully settled. A partially
+    /// executed batch has outstanding per-escrow liabilities that the batch
+    /// job's cursor is responsible for.
+    NoBatchJobInFlight = 21,
+    /// No token reconciliation may be part-way through. A half-finished
+    /// reconciliation has not yet settled the token's balance, so its inputs
+    /// are not final.
+    NoReconciliationInFlight = 22,
+    /// No reconciliation repair plan may have ever been created. Repair plans
+    /// move `TotalLocked` against an allocated residual, so an unapplied plan
+    /// is an outstanding claim on the very balances this migration re-keys.
+    NoPendingRepairPlan = 23,
+    /// Every artisan's stake queue must be internally consistent:
+    /// `ArtisanStakeQueueCount` must equal the number of populated indexed
+    /// entries, and a surviving legacy `Vec` must agree with both. Otherwise
+    /// `migrate_artisan_stake_queue` rewrites the count and silently changes
+    /// which deposits are maturing.
+    StakeQueueConsistent = 24,
+    // ── Pending governance (30–39) ──
+    /// No WASM upgrade round may be open. A live proposal's compatibility
+    /// manifest commits to `preconditions_commitment` and `state_commitment`
+    /// describing the *pre-migration* layout; migrating underneath it leaves
+    /// the committed evidence describing state that no longer exists.
+    NoPendingWasmUpgrade = 30,
+    /// No upgrade signer may hold an outstanding approval. Residual approvals
+    /// carry a round nonce, and a migration changes the state they were
+    /// collected against.
+    NoPendingUpgradeApprovals = 31,
+    // ── Token identities (40–49) ──
+    /// The legacy `WhitelistedTokens` blob and the indexed per-token keys must
+    /// not both be present with a non-zero indexed count. That combination is a
+    /// partially-applied migration, and `migrate_whitelist_storage` assigns
+    /// `WhitelistedTokenCount` from the legacy blob alone — discarding the
+    /// already-indexed entries and making `is_token_whitelisted` start
+    /// rejecting tokens that are genuinely whitelisted.
+    NoMixedWhitelistLayout = 40,
+    /// The legacy `FeeTokenIndex` must not contain the same address twice. A
+    /// duplicate makes `migrate_fee_token_configs` process one token twice and
+    /// double-count its seeded `accumulated` total.
+    FeeTokenIndexDeduplicated = 41,
+    /// Every indexed artisan's stake must resolve to exactly one token identity
+    /// that the deployment actually tracks. A stake against a token absent from
+    /// every index cannot be re-keyed, and a record that decodes as neither
+    /// `ArtisanStakeData` nor the legacy `i128` + `ArtisanStakeToken` pair has
+    /// no recoverable identity at all.
+    NoUnknownStakeTokens = 42,
+    // ── Gate integrity (50–59) ──
+    /// A scan needed to evaluate a precondition holds more records than
+    /// `MAX_MIGRATION_PRECONDITION_SCAN`. The gate fails closed instead of
+    /// validating a prefix, so this is a refusal to certify, not a defect in the
+    /// state.
+    ScanBudgetExceeded = 50,
+}
+
+/// Stable numeric code for a [`MigrationPrecondition`].
+///
+/// Written as an explicit `match` rather than a `repr` cast so the codes stay a
+/// deliberate, reviewable contract: they are what off-chain runbooks record, and
+/// they must not drift if the enum is ever re-ordered.
+fn migration_precondition_code(precondition: MigrationPrecondition) -> u32 {
+    match precondition {
+        MigrationPrecondition::PlatformInitialized => 0,
+        MigrationPrecondition::SourceVersionRecognised => 1,
+        MigrationPrecondition::LayoutVersionMigratable => 2,
+        MigrationPrecondition::LegacyShapeReadable => 3,
+        MigrationPrecondition::NoOpenDisputes => 10,
+        MigrationPrecondition::NoActiveRecurringEscrows => 11,
+        MigrationPrecondition::NoPendingAdminTransfer => 12,
+        MigrationPrecondition::NoEmergencyOperationInFlight => 13,
+        MigrationPrecondition::NoIncompleteTransitions => 14,
+        MigrationPrecondition::NoLockedFunds => 20,
+        MigrationPrecondition::NoBatchJobInFlight => 21,
+        MigrationPrecondition::NoReconciliationInFlight => 22,
+        MigrationPrecondition::NoPendingRepairPlan => 23,
+        MigrationPrecondition::StakeQueueConsistent => 24,
+        MigrationPrecondition::NoPendingWasmUpgrade => 30,
+        MigrationPrecondition::NoPendingUpgradeApprovals => 31,
+        MigrationPrecondition::NoMixedWhitelistLayout => 40,
+        MigrationPrecondition::FeeTokenIndexDeduplicated => 41,
+        MigrationPrecondition::NoUnknownStakeTokens => 42,
+        MigrationPrecondition::ScanBudgetExceeded => 50,
+    }
+}
+
+/// A single failing precondition, with the value that tripped it (#1118).
+///
+/// `observed` is always the measured quantity the condition tested — a counter,
+/// a balance, or a version — and `expected` is the value the condition
+/// requires. The optional identifiers are populated only when the failure is
+/// attributable to a specific record, so an operator can go straight to the
+/// offending token or order id instead of re-deriving it from the counter.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MigrationPreconditionFailure {
+    /// Which condition failed.
+    pub precondition: MigrationPrecondition,
+    /// Numeric code of `precondition`, for stable off-chain reporting.
+    pub code: u32,
+    /// The value read from live state that violated the condition.
+    pub observed: i128,
+    /// The value the condition requires.
+    pub expected: i128,
+    /// Offending token address, when the failure is a token identity.
+    pub token: Option<Address>,
+    /// Offending participant (artisan, buyer, or seller), when applicable.
+    pub participant: Option<Address>,
+    /// Offending escrow order id, when the failure is a single escrow.
+    pub escrow_id: Option<u32>,
+}
+
+/// Outcome of evaluating the migration precondition gate (#1118).
+///
+/// Returned by `get_migration_preconditions` — a free, read-only call that every
+/// migration entrypoint gates on — and embedded in the audit record written by
+/// `audit_migration_preconditions`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MigrationPreconditionReport {
+    /// Layout version this build migrates to (`CURRENT_STORAGE_LAYOUT_VERSION`).
+    pub target_layout_version: u32,
+    /// Layout version read from storage at evaluation time.
+    pub current_layout_version: u32,
+    /// Contract version read from storage at evaluation time.
+    pub contract_version: u32,
+    /// How many conditions were evaluated before the run stopped.
+    pub checks_evaluated: u32,
+    /// First failing condition, or `None` when the gate passed.
+    pub failure: Option<MigrationPreconditionFailure>,
+    /// Tokens the liability and identity conditions could reach.
+    ///
+    /// Soroban has no storage-key enumeration, so this is only the token set
+    /// derivable from the legacy `FeeTokenIndex`, the legacy whitelist blob,
+    /// and the stake tokens of indexed artisans. The figure is reported so the
+    /// operator can see exactly how much of the deployment the verdict covers.
+    pub tokens_scanned: u32,
+    /// Escrows inspected by the terminal-state conditions.
+    pub escrows_scanned: u32,
+    /// Artisans inspected by the stake-identity condition.
+    pub artisans_scanned: u32,
+    /// SHA-256 over the canonical report body. Operators commit to this value
+    /// in the migration ticket so a pre-flight result cannot be re-interpreted
+    /// after the fact.
+    pub digest: BytesN<32>,
+}
+
+/// Durable record of one operator-run precondition audit (#1118).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MigrationPreconditionAudit {
+    /// Monotonic audit sequence number.
+    pub sequence: u32,
+    /// The evaluated report at audit time.
+    pub report: MigrationPreconditionReport,
+    /// Ledger timestamp of the audit.
+    pub recorded_at: u64,
+    /// Admin that requested the audit.
+    pub auditor: Address,
+}
+
+/// Working set threaded through the precondition checks (#1118).
+///
+/// Internal-only (deliberately not a `contracttype`): it carries the reachable
+/// token set discovered once and reused by the liability and identity checks,
+/// plus the per-family counters reported back to the operator.
+///
+/// Every family is bounded by `MAX_MIGRATION_PRECONDITION_SCAN` and fails with
+/// `ScanBudgetExceeded` when it does not fit. The gate never degrades to a
+/// partial scan, because a partial scan reporting success is worse than no gate
+/// at all.
+struct MigrationScan {
+    /// Tokens reachable through the legacy fee index, the legacy whitelist
+    /// blob, and indexed artisans' stake tokens.
+    tokens: Map<Address, bool>,
+    /// Escrows inspected.
+    escrows_scanned: u32,
+    /// Artisans inspected.
+    artisans_scanned: u32,
+}
+
+impl MigrationScan {
+    fn new(env: &Env) -> Self {
+        Self {
+            tokens: Map::new(env),
+            escrows_scanned: 0,
+            artisans_scanned: 0,
+        }
+    }
+
+    fn insert_token(&mut self, token: &Address) {
+        if !self.tokens.contains_key(token.clone()) {
+            self.tokens.set(token.clone(), true);
+        }
+    }
+}
+
+/// Run one migration precondition condition, counting it and latching the first
+/// violation (#1118).
+///
+/// Expansion is `checks_evaluated += 1; if let Err(v) = $check { failure = Some(v) }`
+/// guarded on no prior failure, so conditions after the first violation are
+/// never evaluated — the gate reports the first blocking condition rather than
+/// an exhaustive list, and a condition that would itself need a `&mut` borrow of
+/// the shared scan stays sequenced correctly.
+macro_rules! step_precondition {
+    ($evaluated:ident, $failure:ident, $check:expr) => {
+        if $failure.is_none() {
+            $evaluated += 1;
+            if let Err(violation) = $check {
+                $failure = Some(violation);
+            }
+        }
+    };
 }
 
 #[contractimpl]
@@ -4585,6 +4901,14 @@ impl CraftNexusContract {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
+        // Gate before the first write (#1118). This is also the only thing that
+        // stops a re-run over a half-migrated whitelist from lowering
+        // `WhitelistedTokenCount` and silently changing which tokens pass
+        // `is_token_whitelisted`.
+        if Self::assert_migration_preconditions(&env).is_err() {
+            env.panic_with_error(crate::Error::MigrationPreconditionFailed);
+        }
+
         let legacy_key = DataKey::WhitelistedTokens;
 
         // Check if legacy storage exists
@@ -4676,6 +5000,13 @@ impl CraftNexusContract {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
+        // Gate before the first write (#1118): `check_stake_queue` refuses a
+        // queue whose count and entries disagree, so a re-run cannot reset the
+        // count and change which deposits are maturing.
+        if Self::assert_migration_preconditions(&env).is_err() {
+            env.panic_with_error(crate::Error::MigrationPreconditionFailed);
+        }
+
         let legacy_key = DataKey::ArtisanStakeQueue(artisan.clone());
 
         // Check if legacy storage exists
@@ -4723,6 +5054,22 @@ impl CraftNexusContract {
     /// This function is idempotent: it returns 0 if the record is already in
     /// the new format. Should be called lazily during stake reads or writes
     /// so existing artisan balances are preserved across contract upgrades.
+    ///
+    /// # Deliberately not behind the #1118 gate
+    ///
+    /// This is a lazy *per-record* rewrite on the stake read/write path, not an
+    /// operator-initiated migration, so it is intentionally **not** gated on
+    /// `assert_migration_preconditions`. Doing so would make every stake read
+    /// fail whenever an unrelated precondition (an open dispute, a pending
+    /// upgrade) is violated — trading a migration-safety property for an
+    /// availability regression.
+    ///
+    /// The assumption it does rely on — that an artisan's stake resolves to
+    /// exactly one token identity — is enforced by `check_stake_identities` /
+    /// `MigrationPrecondition::NoUnknownStakeTokens`, which gate every
+    /// operator-initiated `migrate_*` call. This function's write is confined to
+    /// a single artisan's own record and is a no-op unless the legacy pair is
+    /// present.
     pub fn migrate_legacy_artisan_stake(env: Env, artisan: Address) -> u32 {
         let stake_key = DataKey::ArtisanStake(artisan.clone());
         let token_key = DataKey::ArtisanStakeToken(artisan.clone());
@@ -7655,6 +8002,11 @@ impl CraftNexusContract {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
+        // Gate before the first write (#1118): `check_fee_token_index_unique`
+        // refuses a duplicated entry, which would otherwise be migrated twice
+        // and double-count the seeded `accumulated` fee total.
+        Self::assert_migration_preconditions(&env)?;
+
         let tokens: Vec<Address> = env
             .storage()
             .persistent()
@@ -8595,6 +8947,1059 @@ impl CraftNexusContract {
             .unwrap_or(0)
     }
 
+    // ─────────────────────────── Migration preconditions (#1118) ───────────────
+    //
+    // Every `migrate_*` entrypoint calls `assert_migration_preconditions`
+    // before it writes anything. The gate is a pure read: it evaluates each
+    // condition in turn and stops at the first violation, so a refused migration
+    // leaves the ledger byte-for-byte unchanged.
+    //
+    // Two ways for an operator to see the verdict:
+    //   * `get_migration_preconditions` — free, read-only, no state change.
+    //   * `audit_migration_preconditions` — admin-gated, persists the report and
+    //     emits an event so the pre-flight result is on the record.
+
+    /// Build a precondition failure with no attributable record.
+    fn migration_failure(
+        precondition: MigrationPrecondition,
+        observed: i128,
+        expected: i128,
+    ) -> MigrationPreconditionFailure {
+        MigrationPreconditionFailure {
+            precondition,
+            code: migration_precondition_code(precondition),
+            observed,
+            expected,
+            token: None,
+            participant: None,
+            escrow_id: None,
+        }
+    }
+
+    /// Build a precondition failure attributed to a single record.
+    #[allow(clippy::too_many_arguments)]
+    fn migration_failure_at(
+        precondition: MigrationPrecondition,
+        observed: i128,
+        expected: i128,
+        token: Option<Address>,
+        participant: Option<Address>,
+        escrow_id: Option<u32>,
+    ) -> MigrationPreconditionFailure {
+        MigrationPreconditionFailure {
+            precondition,
+            code: migration_precondition_code(precondition),
+            observed,
+            expected,
+            token,
+            participant,
+            escrow_id,
+        }
+    }
+
+    /// The refusal produced when a scan cannot fit inside the on-chain budget.
+    fn migration_scan_overflow(observed: u32) -> MigrationPreconditionFailure {
+        Self::migration_failure(
+            MigrationPrecondition::ScanBudgetExceeded,
+            observed as i128,
+            MAX_MIGRATION_PRECONDITION_SCAN as i128,
+        )
+    }
+
+    /// Canonical SHA-256 preimage for a precondition report.
+    ///
+    /// Every scalar in the report is folded in, plus the failing condition's
+    /// identity and measured values. Two reports share a digest only if they
+    /// describe the same evaluation of the same state, which is what makes the
+    /// digest usable as a commitment in a migration ticket.
+    #[allow(clippy::too_many_arguments)]
+    fn migration_report_digest(
+        env: &Env,
+        target_layout_version: u32,
+        current_layout_version: u32,
+        contract_version: u32,
+        checks_evaluated: u32,
+        failure: &Option<MigrationPreconditionFailure>,
+        tokens_scanned: u32,
+        escrows_scanned: u32,
+        artisans_scanned: u32,
+    ) -> BytesN<32> {
+        let mut preimage = Bytes::new(env);
+        preimage.append(&target_layout_version.to_xdr(env));
+        preimage.append(&current_layout_version.to_xdr(env));
+        preimage.append(&contract_version.to_xdr(env));
+        preimage.append(&checks_evaluated.to_xdr(env));
+        preimage.append(&tokens_scanned.to_xdr(env));
+        preimage.append(&escrows_scanned.to_xdr(env));
+        preimage.append(&artisans_scanned.to_xdr(env));
+        match failure {
+            Some(f) => {
+                preimage.append(&1u32.to_xdr(env));
+                preimage.append(&f.code.to_xdr(env));
+                preimage.append(&f.observed.to_xdr(env));
+                preimage.append(&f.expected.to_xdr(env));
+            }
+            None => preimage.append(&0u32.to_xdr(env)),
+        }
+        env.crypto().sha256(&preimage).into()
+    }
+
+    /// Collect the token set the gate can reach in one transaction (#1118).
+    ///
+    /// Soroban offers no storage-key enumeration, so a single invocation can
+    /// only see tokens reachable from an index. Three indexes are walked: the
+    /// legacy `FeeTokenIndex` Vec, the legacy `WhitelistedTokens` Map, and the
+    /// stake tokens of indexed artisans. Collection refuses as soon as a family
+    /// exceeds the budget, so the caller fails closed rather than scanning a
+    /// prefix.
+    /// Read `V` from persistent storage, yielding `None` when the key is absent
+    /// **or** when the stored value does not decode as `V`.
+    ///
+    /// `Storage::get` unwraps internally (`try_from_val(...).unwrap_optimized()`),
+    /// so a typed read *aborts* on a shape mismatch rather than returning `None`.
+    /// That is unusable here: an undecodable record is one of the conditions this
+    /// gate exists to report, so it has to surface as a `MigrationPrecondition`
+    /// failure instead of a host error. Every shape-sensitive read in the gate
+    /// goes through this helper for that reason.
+    fn try_get_persistent<V>(env: &Env, key: &DataKey) -> Option<V>
+    where
+        V: TryFromVal<Env, Val>,
+    {
+        let raw: Val = env.storage().persistent().get(key)?;
+        V::try_from_val(env, &raw).ok()
+    }
+
+    fn collect_reachable_tokens(
+        env: &Env,
+        scan: &mut MigrationScan,
+    ) -> Result<(), MigrationPreconditionFailure> {
+        let fee_index: soroban_sdk::Vec<Address> =
+            Self::try_get_persistent(env, &DataKey::FeeTokenIndex)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+        if fee_index.len() > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(fee_index.len()));
+        }
+        for index in 0..fee_index.len() {
+            if let Some(token) = fee_index.get(index) {
+                scan.insert_token(&token);
+            }
+        }
+
+        if let Some(whitelist) = Self::read_legacy_whitelist(env) {
+            let keys = whitelist.keys();
+            if keys.len() > MAX_MIGRATION_PRECONDITION_SCAN {
+                return Err(Self::migration_scan_overflow(keys.len()));
+            }
+            for index in 0..keys.len() {
+                if let Some(token) = keys.get(index) {
+                    scan.insert_token(&token);
+                }
+            }
+        }
+
+        let staked_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedArtisanCount)
+            .unwrap_or(0);
+        if staked_count > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(staked_count));
+        }
+        for index in 0..staked_count {
+            let artisan: Address = match env
+                .storage()
+                .persistent()
+                .get(&DataKey::StakedArtisanIndexed(index))
+            {
+                Some(address) => address,
+                None => continue,
+            };
+            if let Some(token) = Self::read_stake_token(env, &artisan) {
+                scan.insert_token(&token);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read the legacy `WhitelistedTokens` Map if present and decodable.
+    ///
+    /// Decoding through `Val` rather than a typed `get` is deliberate: a typed
+    /// `get` returns `None` for a wrong-shaped value, which is indistinguishable
+    /// from "not migrated yet".
+    fn read_legacy_whitelist(env: &Env) -> Option<Map<Address, bool>> {
+        let raw: Val = env.storage().persistent().get(&DataKey::WhitelistedTokens)?;
+        Map::<Address, bool>::try_from_val(env, &raw).ok()
+    }
+
+    /// Resolve an artisan's stake token under either supported record shape.
+    ///
+    /// `ArtisanStake` holds an `ArtisanStakeData` once migrated and a bare
+    /// `i128` before it, with the asset address in the sibling
+    /// `ArtisanStakeToken` key. Both shapes are accepted; the identity checks
+    /// decide whether the combination is coherent.
+    fn read_stake_token(env: &Env, artisan: &Address) -> Option<Address> {
+        let stake_key = DataKey::ArtisanStake(artisan.clone());
+        if let Some(data) = Self::try_get_persistent::<ArtisanStakeData>(env, &stake_key) {
+            return Some(data.token);
+        }
+        Self::try_get_persistent::<Address>(env, &DataKey::ArtisanStakeToken(artisan.clone()))
+    }
+
+    /// Version family: is this the state the target layout expects?
+    fn check_migration_versions(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        if !env.storage().instance().has(&DataKey::PlatformConfig) {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::PlatformInitialized,
+                0,
+                1,
+            ));
+        }
+
+        let contract_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(0);
+        if contract_version == 0 {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::SourceVersionRecognised,
+                0,
+                1,
+            ));
+        }
+
+        let layout_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StorageLayoutVersion)
+            .unwrap_or(0);
+        if layout_version > CURRENT_STORAGE_LAYOUT_VERSION {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::LayoutVersionMigratable,
+                layout_version as i128,
+                CURRENT_STORAGE_LAYOUT_VERSION as i128,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Version family: does every legacy blob decode into the shape the
+    /// migration will read it as?
+    ///
+    /// The `observed` value names which blob failed (0 = whitelist, 1 = escrow
+    /// id index, 2 = fee token index) so the operator does not have to guess
+    /// from a bare error code.
+    fn check_legacy_shapes(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        if let Some(raw) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Val>(&DataKey::WhitelistedTokens)
+        {
+            if Map::<Address, bool>::try_from_val(env, &raw).is_err() {
+                return Err(Self::migration_failure(
+                    MigrationPrecondition::LegacyShapeReadable,
+                    0,
+                    1,
+                ));
+            }
+        }
+
+        if let Some(raw) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Val>(&DataKey::AllEscrowIds)
+        {
+            if soroban_sdk::Vec::<u32>::try_from_val(env, &raw).is_err() {
+                return Err(Self::migration_failure(
+                    MigrationPrecondition::LegacyShapeReadable,
+                    1,
+                    1,
+                ));
+            }
+        }
+
+        if let Some(raw) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Val>(&DataKey::FeeTokenIndex)
+        {
+            if soroban_sdk::Vec::<Address>::try_from_val(env, &raw).is_err() {
+                return Err(Self::migration_failure(
+                    MigrationPrecondition::LegacyShapeReadable,
+                    2,
+                    1,
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Terminal-state family: platform-wide counters and governance locks that
+    /// must be at rest before a layout is rewritten underneath them.
+    fn check_terminal_states(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        let open_disputes: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveDisputeCount)
+            .unwrap_or(0);
+        if open_disputes > 0 {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoOpenDisputes,
+                open_disputes as i128,
+                0,
+            ));
+        }
+
+        let active_recurring: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveRecurringCount)
+            .unwrap_or(0);
+        if active_recurring > 0 {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoActiveRecurringEscrows,
+                active_recurring as i128,
+                0,
+            ));
+        }
+
+        if env.storage().persistent().has(&DataKey::PendingAdmin) {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoPendingAdminTransfer,
+                1,
+                0,
+            ));
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::CurrentEmergencyOperation)
+        {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoEmergencyOperationInFlight,
+                1,
+                0,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Terminal-state family: no escrow may be parked mid-transition or belong
+    /// to a batch that has not fully settled.
+    ///
+    /// Walks `GlobalEscrowIdIndexed`, the index `migrate_storage_layout`
+    /// populates. A legacy deployment that still only holds the `AllEscrowIds`
+    /// Vec therefore reports a zero-escrow scan; that is not a silent gap,
+    /// because the legacy Vec is checked for decodability above and re-running
+    /// `migrate_legacy_all_escrow_ids` is the documented first step.
+    fn check_escrow_terminal_states(
+        env: &Env,
+        scan: &mut MigrationScan,
+    ) -> Result<(), MigrationPreconditionFailure> {
+        let total: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EscrowCount)
+            .unwrap_or(0);
+        if total > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(total));
+        }
+
+        for index in 0..total {
+            let order_id: u32 = match env
+                .storage()
+                .persistent()
+                .get(&DataKey::GlobalEscrowIdIndexed(index))
+            {
+                Some(id) => id,
+                None => continue,
+            };
+            let escrow = match Self::read_escrow_for_precondition(env, order_id) {
+                Ok(record) => record,
+                // An unparseable record is a refusal, not a crash: report it
+                // rather than skipping, because a fresh layout written over an
+                // unreadable record is precisely the corruption being guarded
+                // against.
+                Err(failure) => return Err(failure),
+            };
+            scan.escrows_scanned += 1;
+
+            let unfinished = matches!(
+                escrow.status,
+                EscrowStatus::ReleasePending
+                    | EscrowStatus::RefundPending
+                    | EscrowStatus::DisputePending
+                    | EscrowStatus::SettlementPending
+            );
+            if unfinished {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::NoIncompleteTransitions,
+                    1,
+                    0,
+                    Some(escrow.token.clone()),
+                    Some(escrow.buyer.clone()),
+                    Some(order_id),
+                ));
+            }
+
+            let settled = matches!(
+                escrow.status,
+                EscrowStatus::Released | EscrowStatus::Refunded | EscrowStatus::Resolved
+            );
+            if escrow.batch_id.is_some() && !settled {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::NoBatchJobInFlight,
+                    1,
+                    0,
+                    Some(escrow.token.clone()),
+                    Some(escrow.buyer.clone()),
+                    Some(order_id),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read an escrow record in any historical layout **without writing**.
+    ///
+    /// `get_stored_escrow` upgrades records in place and `.expect("")`s on a
+    /// shape it cannot parse. Both behaviours are wrong for a precondition
+    /// check: the gate runs against *pre*-migration state by definition, so the
+    /// newest shape is the exception rather than the rule, and a panic would
+    /// turn a reportable refusal into an opaque host error.
+    ///
+    /// This mirrors the shape detection in `get_stored_escrow` but converts in
+    /// memory only -- no `upgrade_escrow`, no `extend_persistent` -- and reports
+    /// an unparseable record as [`MigrationPrecondition::LegacyShapeReadable`].
+    fn read_escrow_for_precondition(
+        env: &Env,
+        order_id: u32,
+    ) -> Result<Escrow, MigrationPreconditionFailure> {
+        let unreadable = || {
+            Self::migration_failure_at(
+                MigrationPrecondition::LegacyShapeReadable,
+                1,
+                0,
+                None,
+                None,
+                Some(order_id),
+            )
+        };
+
+        let key = (ESCROW, order_id);
+        let stored: Val = match env.storage().persistent().get(&key) {
+            Some(value) => value,
+            // Callers skip absent records; an absent one here is unexpected.
+            None => return Err(unreadable()),
+        };
+
+        let map = match Map::<Symbol, Val>::try_from_val(env, &stored) {
+            Ok(map) => map,
+            Err(_) => return Err(unreadable()),
+        };
+
+        if !map.contains_key(Symbol::new(env, "version")) {
+            let legacy = match LegacyEscrow::try_from_val(env, &stored) {
+                Ok(legacy) => legacy,
+                Err(_) => return Err(unreadable()),
+            };
+            return Ok(Escrow {
+                version: CURRENT_ESCROW_VERSION,
+                id: legacy.id,
+                batch_id: None,
+                buyer: legacy.buyer,
+                seller: legacy.seller,
+                token: legacy.token,
+                amount: legacy.amount,
+                status: legacy.status,
+                release_window: legacy.release_window,
+                created_at: legacy.created_at,
+                ipfs_hash: legacy.ipfs_hash,
+                metadata_hash: legacy.metadata_hash,
+                dispute_reason: Self::dispute_symbol_from_text(env, legacy.dispute_reason),
+                dispute_initiated_at: legacy.dispute_initiated_at,
+                funded: true,
+                funding_deadline: None, // Legacy escrows were funded at creation
+                service_agreement_hash: None,
+            });
+        }
+
+        if !map.contains_key(Symbol::new(env, "batch_id")) {
+            return match EscrowWithoutBatch::try_from_val(env, &stored) {
+                Ok(previous) => Ok(Self::escrow_from_without_batch(env, previous)),
+                Err(_) => Err(unreadable()),
+            };
+        }
+
+        // v5 carries `service_agreement_hash`; v4 does not.
+        if map.contains_key(Symbol::new(env, "service_agreement_hash")) {
+            return match Escrow::try_from_val(env, &stored) {
+                Ok(escrow) => Ok(escrow),
+                Err(_) => Err(unreadable()),
+            };
+        }
+
+        match EscrowV4::try_from_val(env, &stored) {
+            Ok(v4) => Ok(Self::escrow_from_v4(v4)),
+            Err(_) => Err(unreadable()),
+        }
+    }
+
+    /// Decode a legacy `String` dispute reason into a `Symbol`.
+    ///
+    /// Unlike `get_stored_escrow`, bytes that are not valid UTF-8 yield `None`
+    /// instead of panicking: the gate only inspects status, batch membership, and
+    /// token, so a reason it cannot decode must not abort the whole scan.
+    fn dispute_symbol_from_text(env: &Env, reason: Option<String>) -> Option<Symbol> {
+        let text = reason?;
+        let len = text.len() as usize;
+        let slice_len = core::cmp::min(len, 32);
+        let mut buf = [0u8; 32];
+        text.copy_into_slice(&mut buf[..slice_len]);
+        match core::str::from_utf8(&buf[..slice_len]) {
+            Ok(decoded) => Some(Symbol::new(env, decoded)),
+            Err(_) => None,
+        }
+    }
+
+    /// Outstanding-liability family: no reachable token may still hold escrow
+    /// funds, and no reconciliation may be in progress against one.
+    fn check_outstanding_liabilities(
+        env: &Env,
+        scan: &MigrationScan,
+    ) -> Result<(), MigrationPreconditionFailure> {
+        let keys = scan.tokens.keys();
+        for index in 0..keys.len() {
+            let token = match keys.get(index) {
+                Some(address) => address,
+                None => continue,
+            };
+
+            let locked: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalLocked(token.clone()))
+                .unwrap_or(0);
+            if locked != 0 {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::NoLockedFunds,
+                    locked,
+                    0,
+                    Some(token),
+                    None,
+                    None,
+                ));
+            }
+
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::ReconciliationProgress(token.clone()))
+            {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::NoReconciliationInFlight,
+                    1,
+                    0,
+                    Some(token),
+                    None,
+                    None,
+                ));
+            }
+        }
+
+        // The counter starts at 1 and increments per plan, so anything above 1
+        // means a repair plan was raised at some point. An applied plan leaves an
+        // allocated residual, which the `TotalLocked` check above already
+        // accounts for; requiring a clean counter keeps the migration away from
+        // balances an operator may still be adjusting by hand.
+        let next_plan_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextReconciliationRepairPlanId)
+            .unwrap_or(1);
+        if next_plan_id > 1 {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoPendingRepairPlan,
+                next_plan_id as i128 - 1,
+                0,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Pending-governance family: no upgrade round may be open against state
+    /// that is about to change shape.
+    ///
+    /// A compatibility manifest left behind by a cancelled round is
+    /// deliberately not a blocker: `execute_upgrade` never consumes a manifest
+    /// without a matching live proposal, and the runbook expects a resuming
+    /// runner to resubmit it with a fresh checkpoint.
+    fn check_pending_governance(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        if env.storage().persistent().has(&DataKey::WasmUpgradeProposal) {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoPendingWasmUpgrade,
+                1,
+                0,
+            ));
+        }
+
+        let approvals: UpgradeApprovalState =
+            Self::try_get_persistent(env, &DataKey::UpgradeApprovalState(0)).unwrap_or(UpgradeApprovalState {
+                nonce: 0,
+                signers: Vec::new(env),
+                threshold: 0,
+                approvals: Vec::new(env),
+            });
+        if !approvals.approvals.is_empty() {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoPendingUpgradeApprovals,
+                approvals.approvals.len() as i128,
+                0,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Token-identity family: the whitelist must not be half-migrated.
+    ///
+    /// `migrate_whitelist_storage` assigns `WhitelistedTokenCount` from the
+    /// legacy blob alone, so running it while indexed entries already exist
+    /// would lower the count and make `is_token_whitelisted` reject tokens that
+    /// are genuinely whitelisted. Catching the mixed layout here is what keeps
+    /// effective permissions unchanged across the migration.
+    fn check_whitelist_layout(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        if !env.storage().persistent().has(&DataKey::WhitelistedTokens) {
+            return Ok(());
+        }
+        let indexed: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WhitelistedTokenCount)
+            .unwrap_or(0);
+        if indexed > 0 {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoMixedWhitelistLayout,
+                indexed as i128,
+                0,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Token-identity family: the legacy fee index must not list a token twice.
+    fn check_fee_token_index_unique(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        let fee_index: soroban_sdk::Vec<Address> =
+            Self::try_get_persistent(env, &DataKey::FeeTokenIndex)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+        if fee_index.len() > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(fee_index.len()));
+        }
+
+        let mut seen: Map<Address, bool> = Map::new(env);
+        for index in 0..fee_index.len() {
+            let token = match fee_index.get(index) {
+                Some(address) => address,
+                None => continue,
+            };
+            if seen.contains_key(token.clone()) {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::FeeTokenIndexDeduplicated,
+                    index as i128 + 1,
+                    1,
+                    Some(token),
+                    None,
+                    None,
+                ));
+            }
+            seen.set(token, true);
+        }
+
+        Ok(())
+    }
+
+    /// Token-identity family: every indexed artisan's stake must resolve to one
+    /// known token, and their stake queue must be internally consistent.
+    fn check_stake_identities(
+        env: &Env,
+        scan: &mut MigrationScan,
+    ) -> Result<(), MigrationPreconditionFailure> {
+        let staked_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedArtisanCount)
+            .unwrap_or(0);
+        if staked_count > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(staked_count));
+        }
+
+        for index in 0..staked_count {
+            let artisan: Address = match env
+                .storage()
+                .persistent()
+                .get(&DataKey::StakedArtisanIndexed(index))
+            {
+                Some(address) => address,
+                None => continue,
+            };
+            scan.artisans_scanned += 1;
+
+            let token = match Self::read_stake_token(env, &artisan) {
+                Some(address) => address,
+                None => {
+                    // Neither supported shape decodes. If a stake key is present
+                    // the amount is unrecoverable, so refuse; otherwise this is a
+                    // stale index entry and nothing needs re-keying.
+                    if env
+                        .storage()
+                        .persistent()
+                        .has(&DataKey::ArtisanStake(artisan.clone()))
+                    {
+                        return Err(Self::migration_failure_at(
+                            MigrationPrecondition::NoUnknownStakeTokens,
+                            0,
+                            1,
+                            None,
+                            Some(artisan),
+                            None,
+                        ));
+                    }
+                    continue;
+                }
+            };
+
+            if !scan.tokens.contains_key(token.clone()) {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::NoUnknownStakeTokens,
+                    0,
+                    1,
+                    Some(token),
+                    Some(artisan.clone()),
+                    None,
+                ));
+            }
+
+            Self::check_stake_queue(env, &artisan)?;
+        }
+
+        Ok(())
+    }
+
+    /// Token-identity family: one artisan's stake queue must be internally
+    /// consistent, or re-running `migrate_artisan_stake_queue` would reset the
+    /// count and change which deposits are maturing.
+    fn check_stake_queue(
+        env: &Env,
+        artisan: &Address,
+    ) -> Result<(), MigrationPreconditionFailure> {
+        let declared: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ArtisanStakeQueueCount(artisan.clone()))
+            .unwrap_or(0);
+        if declared > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(declared));
+        }
+
+        let mut populated: u32 = 0;
+        for slot in 0..declared {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), slot))
+            {
+                populated += 1;
+            }
+        }
+        if populated != declared {
+            return Err(Self::migration_failure_at(
+                MigrationPrecondition::StakeQueueConsistent,
+                populated as i128,
+                declared as i128,
+                None,
+                Some(artisan.clone()),
+                None,
+            ));
+        }
+
+        // A surviving legacy Vec must agree with the indexed entries; otherwise
+        // the queue is mid-migration and the legacy length is what a re-run
+        // would adopt.
+        if declared > 0 {
+            if let Some(raw) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Val>(&DataKey::ArtisanStakeQueue(artisan.clone()))
+            {
+                if let Ok(legacy) = soroban_sdk::Vec::<StakeDeposit>::try_from_val(env, &raw) {
+                    if legacy.len() != populated {
+                        return Err(Self::migration_failure_at(
+                            MigrationPrecondition::StakeQueueConsistent,
+                            legacy.len() as i128,
+                            populated as i128,
+                            None,
+                            Some(artisan.clone()),
+                            None,
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Evaluate the migration precondition gate without writing anything (#1118).
+    ///
+    /// Read-only by construction: it uses raw `storage().get`/`has` throughout
+    /// and never calls a helper that extends a TTL or repairs a corrupt key, so
+    /// a refused migration is guaranteed to have left no trace.
+    ///
+    /// Conditions run in a fixed order — versions, then legacy shape, terminal
+    /// states, liabilities, governance, token identities — and evaluation stops
+    /// at the first violation, so `report.failure` names the single condition
+    /// that blocked the migration. `checks_evaluated` records how far the run got.
+    fn evaluate_migration_preconditions(env: &Env) -> MigrationPreconditionReport {
+        let current_layout_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StorageLayoutVersion)
+            .unwrap_or(0);
+        let contract_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(0);
+
+        let mut scan = MigrationScan::new(env);
+        let mut checks_evaluated: u32 = 0;
+        let mut failure: Option<MigrationPreconditionFailure> = None;
+
+        step_precondition!(checks_evaluated, failure, Self::check_migration_versions(env));
+        step_precondition!(checks_evaluated, failure, Self::check_legacy_shapes(env));
+        step_precondition!(checks_evaluated, failure, Self::check_terminal_states(env));
+        step_precondition!(
+            checks_evaluated,
+            failure,
+            Self::collect_reachable_tokens(env, &mut scan)
+        );
+        step_precondition!(
+            checks_evaluated,
+            failure,
+            Self::check_escrow_terminal_states(env, &mut scan)
+        );
+        step_precondition!(
+            checks_evaluated,
+            failure,
+            Self::check_outstanding_liabilities(env, &scan)
+        );
+        step_precondition!(checks_evaluated, failure, Self::check_pending_governance(env));
+        step_precondition!(checks_evaluated, failure, Self::check_whitelist_layout(env));
+        step_precondition!(
+            checks_evaluated,
+            failure,
+            Self::check_fee_token_index_unique(env)
+        );
+        step_precondition!(
+            checks_evaluated,
+            failure,
+            Self::check_stake_identities(env, &mut scan)
+        );
+
+        let tokens_scanned = scan.tokens.len();
+        let digest = Self::migration_report_digest(
+            env,
+            CURRENT_STORAGE_LAYOUT_VERSION,
+            current_layout_version,
+            contract_version,
+            checks_evaluated,
+            &failure,
+            tokens_scanned,
+            scan.escrows_scanned,
+            scan.artisans_scanned,
+        );
+
+        MigrationPreconditionReport {
+            target_layout_version: CURRENT_STORAGE_LAYOUT_VERSION,
+            current_layout_version,
+            contract_version,
+            checks_evaluated,
+            failure,
+            tokens_scanned,
+            escrows_scanned: scan.escrows_scanned,
+            artisans_scanned: scan.artisans_scanned,
+            digest,
+        }
+    }
+
+    /// Gate a migration on the precondition report.
+    ///
+    /// Returns `Err(Error::MigrationPreconditionFailed)` on the first violated
+    /// condition. Callers must invoke this *before* their first write, which is
+    /// what makes "a failed precondition causes no writes" hold.
+    fn assert_migration_preconditions(env: &Env) -> Result<(), Error> {
+        match Self::evaluate_migration_preconditions(env).failure {
+            Some(_) => Err(Error::MigrationPreconditionFailed),
+            None => Ok(()),
+        }
+    }
+
+    /// Evaluate the migration preconditions without changing any state (#1118).
+    ///
+    /// Read-only and permissionless: operators should run this before every
+    /// `migrate_*` call, because a migration that is refused writes nothing —
+    /// including no record of why. This call is the supported way to observe the
+    /// blocking condition, and its `digest` is the value to quote in the
+    /// migration ticket.
+    pub fn get_migration_preconditions(env: Env) -> MigrationPreconditionReport {
+        Self::evaluate_migration_preconditions(&env)
+    }
+
+    /// Evaluate the preconditions and persist the verdict for the audit trail
+    /// (admin only, #1118).
+    ///
+    /// Unlike the refused migration itself, this call commits. It stores the
+    /// report as the latest audit, appends it to a bounded FIFO log, and emits
+    /// `migration_precondition_audited`, so a blocked migration stays explainable
+    /// after the fact rather than only at the moment it was attempted.
+    pub fn audit_migration_preconditions(env: Env) -> MigrationPreconditionReport {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let report = Self::evaluate_migration_preconditions(&env);
+        let sequence = Self::get_persistent_u32(&env, &DataKey::MigrationPreconditionAuditCount);
+
+        let audit = MigrationPreconditionAudit {
+            sequence,
+            report: report.clone(),
+            recorded_at: env.ledger().timestamp(),
+            auditor: config.admin.clone(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::LastMigrationPreconditionAudit, &audit);
+        Self::extend_persistent(&env, &DataKey::LastMigrationPreconditionAudit);
+
+        let mut history: Vec<MigrationPreconditionAudit> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MigrationPreconditionAudits)
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(audit);
+        while history.len() > MAX_MIGRATION_PRECONDITION_AUDITS {
+            history.pop_front();
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::MigrationPreconditionAudits, &history);
+        Self::extend_persistent(&env, &DataKey::MigrationPreconditionAudits);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::MigrationPreconditionAuditCount, &(sequence + 1));
+        Self::extend_persistent(&env, &DataKey::MigrationPreconditionAuditCount);
+
+        let (topic, code) = match &report.failure {
+            Some(failure) => (Symbol::new(&env, "blocked"), failure.code),
+            None => (Symbol::new(&env, "passed"), 0u32),
+        };
+        env.events().publish(
+            (Symbol::new(&env, "migration_precondition_audited"), topic),
+            (sequence, report.digest.clone(), code),
+        );
+
+        report
+    }
+
+    /// Return the most recent persisted precondition audit, if any (#1118).
+    ///
+    /// A single O(1) read of the blocking condition, for operators who want the
+    /// last verdict without paging the log.
+    pub fn get_last_precondition_audit(env: Env) -> Option<MigrationPreconditionAudit> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LastMigrationPreconditionAudit)
+    }
+
+    /// Return a page of persisted precondition audits, oldest first (#1118).
+    pub fn get_precondition_audits(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<MigrationPreconditionAudit> {
+        let page_size =
+            pagination_validation::validate_limit(limit, pagination_validation::MAX_ADMIN_PAGE_SIZE)
+                .unwrap_or(limit.min(pagination_validation::MAX_ADMIN_PAGE_SIZE));
+
+        let stored: Vec<MigrationPreconditionAudit> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MigrationPreconditionAudits)
+            .unwrap_or_else(|| Vec::new(&env));
+        let total = stored.len();
+        let mut page = Vec::new(&env);
+        let end = offset.saturating_add(page_size).min(total);
+        for index in offset..end {
+            if let Some(audit) = stored.get(index) {
+                page.push_back(audit);
+            }
+        }
+        page
+    }
+
+    /// Verify a persisted audit still matches its own report digest (#1118).
+    ///
+    /// Audits are ordinary storage and a future migration could in principle
+    /// rewrite them. Off-chain tooling that relies on the audit trail calls this
+    /// before quoting a verdict, so a rewritten record is detected rather than
+    /// trusted.
+    pub fn verify_precondition_audit(
+        env: Env,
+        sequence: u32,
+    ) -> Result<MigrationPreconditionAudit, Error> {
+        let stored: Vec<MigrationPreconditionAudit> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MigrationPreconditionAudits)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut found: Option<MigrationPreconditionAudit> = None;
+        for index in 0..stored.len() {
+            if let Some(audit) = stored.get(index) {
+                if audit.sequence == sequence {
+                    found = Some(audit);
+                    break;
+                }
+            }
+        }
+        let audit = found.ok_or(Error::CorruptedMigrationAudit)?;
+
+        let report = &audit.report;
+        let recomputed = Self::migration_report_digest(
+            &env,
+            report.target_layout_version,
+            report.current_layout_version,
+            report.contract_version,
+            report.checks_evaluated,
+            &report.failure,
+            report.tokens_scanned,
+            report.escrows_scanned,
+            report.artisans_scanned,
+        );
+        if recomputed != report.digest {
+            return Err(Error::CorruptedMigrationAudit);
+        }
+        Ok(audit)
+    }
+
     /// Migrate persisted storage to the current layout version.
     ///
     /// This is an explicit, admin-gated migration path for legacy deployments.
@@ -8612,6 +10017,13 @@ impl CraftNexusContract {
             .unwrap_or(0);
         if current_version == CURRENT_STORAGE_LAYOUT_VERSION {
             return 0;
+        }
+
+        // Gate before the first write (#1118): nothing below this point may run
+        // unless every precondition holds, so a refusal leaves the layout
+        // version, the legacy blobs, and every indexed record untouched.
+        if Self::assert_migration_preconditions(&env).is_err() {
+            env.panic_with_error(crate::Error::MigrationPreconditionFailed);
         }
 
         Self::migrate_legacy_all_escrow_ids(&env);

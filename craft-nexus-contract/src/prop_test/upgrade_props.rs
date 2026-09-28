@@ -2799,6 +2799,12 @@ fn test_migrate_storage_layout_marks_current_layout_and_preserves_state() {
 
     token_admin.mint(&buyer, &100_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+    // Settle before migrating: the #1118 gate refuses a migration while
+    // `TotalLocked` is still outstanding, so "state is preserved" is only
+    // meaningful against a settled record.
+    client.refund(&1);
+    let settled = client.get_escrow(&1);
+    assert_eq!(settled.status, EscrowStatus::Refunded);
 
     env.as_contract(&client.address, || {
         env.storage()
@@ -2816,7 +2822,7 @@ fn test_migrate_storage_layout_marks_current_layout_and_preserves_state() {
     let escrow = client.get_escrow(&1);
     assert_eq!(escrow.buyer, buyer);
     assert_eq!(escrow.amount, 50_000_000);
-    assert_eq!(escrow.status, EscrowStatus::Active);
+    assert_eq!(escrow, settled);
 }
 
 // ===== Multi-sig / timelocked admin action tests =====
