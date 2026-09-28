@@ -14434,6 +14434,7 @@ impl CraftNexusContract {
     ) -> Result<ArchivalCompactionProgress, Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
+        Self::check_not_paused(&env);
 
         let policy = Self::get_archival_policy(env.clone());
         let limit = limit
@@ -14446,7 +14447,10 @@ impl CraftNexusContract {
         if cursor > total {
             return Err(Error::PaginationCursorInvalid);
         }
-        let end = cursor.saturating_add(limit).min(total);
+        let end = cursor
+            .checked_add(limit)
+            .ok_or(Error::CounterOverflow)?
+            .min(total);
         let mut scanned = 0u32;
         let mut pruned = 0u32;
         for index in cursor..end {
@@ -14465,10 +14469,10 @@ impl CraftNexusContract {
                 if age >= policy.retention_window {
                     env.storage().persistent().remove(&summary_key);
                     env.storage().persistent().remove(&index_key);
-                    pruned += 1;
+                    pruned = pruned.checked_add(1).ok_or(Error::CounterOverflow)?;
                 }
             }
-            scanned += 1;
+            scanned = scanned.checked_add(1).ok_or(Error::CounterOverflow)?;
         }
         env.storage()
             .persistent()
