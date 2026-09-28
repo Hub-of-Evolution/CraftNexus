@@ -11578,14 +11578,19 @@ impl CraftNexusContract {
     /// job does not exist.
     pub fn get_batch_cursor(env: Env, job_id: u64) -> Option<BatchCursor> {
         let key = DataKey::BatchEscrowJob(job_id);
-        let job: BatchEscrowJob = env.storage().persistent().get(&key)?;
-        Some(BatchCursor {
-            job_id,
-            owner: job.owner,
-            op_type: job.op_type,
-            revision: job.revision,
-            next_index: job.next_index,
-        })
+        let job: Option<BatchEscrowJob> = env.storage().persistent().get(&key);
+        if let Some(job) = job {
+            Self::extend_persistent_read(&env, &key);
+            Some(BatchCursor {
+                job_id,
+                owner: job.owner,
+                op_type: job.op_type,
+                revision: job.revision,
+                next_index: job.next_index,
+            })
+        } else {
+            None
+        }
     }
 
     /// Process the next deterministic chunk of a scheduled batch (#1075/#1076).
@@ -28325,4 +28330,26 @@ impl CraftNexusContract {
         let mut i = 0;
         loop {
             if i >= buyer_next_counts.len() {
-                break;Sorry, something went wrong. Please try your request again.
+                break;
+                }
+                i += 1;
+            }
+
+            // Update total volume and escrow count
+            let mut total_volume: i128 = 0;
+            for result in &results {
+                if let Some(escrow) = env.storage().persistent().get::<_, Escrow>(&(ESCROW, *result as u32)) {
+                    total_volume += escrow.amount;
+                }
+            }
+            if total_volume > 0 {
+                Self::update_total_volume(&env, total_volume);
+            }
+            let escrow_count: u32 = env.storage().persistent().get(&DataKey::EscrowCount).unwrap_or(0);
+            env.storage().persistent().set(&DataKey::EscrowCount, &(escrow_count + results.len() as u32));
+            Self::extend_persistent(&env, &DataKey::EscrowCount);
+
+            Ok(results)
+        }
+    }
+}

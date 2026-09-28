@@ -1229,3 +1229,82 @@ fn test_escrow_counters_stay_in_sync_at_scale() {
         100
     );
 }
+
+#[test]
+fn test_get_batch_cursor_missing_key_and_terminal_state() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+
+    // 1. Call get_batch_cursor before the record exists - should return None
+    let missing_cursor = client.try_get_batch_cursor(&9999);
+    assert!(missing_cursor.is_ok(), "get_batch_cursor should not panic for missing key");
+    assert_eq!(missing_cursor.unwrap(), None, "get_batch_cursor should return None for missing key");
+
+    // Create a batch job
+    let mut params = soroban_sdk::Vec::new(&env);
+    for i in 0..3u32 {
+        params.push_back(EscrowCreateParams {
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token.clone(),
+            amount: 1_000,
+            order_id: 5_000 + i,
+            release_window: Some(3_600),
+            ipfs_hash: None,
+            metadata_hash: None,
+            service_agreement_hash: None,
+        });
+    }
+
+    let job_id = client.schedule_batch_escrow(&buyer, &params);
+
+    // 2. Get cursor before any work - should return initial cursor (revision 0, index 0)
+    let cursor0 = client.get_batch_cursor(&job_id).unwrap();
+    assert_eq!(cursor0.revision, 0);
+    assert_eq!(cursor0.next_index, 0);
+    assert_eq!(cursor0.op_type, BatchOpType::EscrowCreation);
+
+    // Process the batch to completion
+    let first = client.continue_batch_escrow(&cursor0, &2);
+    assert_eq!(first.next_index, 2);
+    assert_eq!(first.revision, 1);
+    assert_eq!(first.status, BatchJobStatus::Pending);
+
+    let cursor1 = client.get_batch_cursor(&job_id).unwrap();
+    assert_eq!(cursor1.revision, 1);
+    assert_eq!(cursor1.next_index, 2);
+
+    let second = client.continue_batch_escrow(&cursor1, &2);
+    assert_eq!(second.next_index, 3);
+    assert_eq!(second.revision, 2);
+    assert_eq!(second.status, BatchJobStatus::Completed);
+
+    // 3. Call get_batch_cursor after terminal state (Completed) - should return cursor
+    let terminal_cursor = client.get_batch_cursor(&job_id).unwrap();
+    assert_eq!(terminal_cursor.revision, 2);
+    assert_eq!(terminal_cursor.next_index, 3);
+    assert_eq!(terminal_cursor.op_type, BatchOpType::EscrowCreation);
+    assert_eq!(terminal_cursor.job_id, job_id);
+    assert_eq!(terminal_cursor.owner, buyer);
+
+    // 4. Test with cancelled job - also a terminal state
+    let mut params2 = soroban_sdk::Vec::new(&env);
+    params2.push_back(EscrowCreateParams {
+        buyer: buyer.clone(),
+        seller: seller.clone(),
+        token: token.clone(),
+        amount: 1_000,
+        order_id: 6_000,
+        release_window: Some(3_600),
+        ipfs_hash: None,
+        metadata_hash: None,
+        service_agreement_hash: None,
+    });
+
+    let job_id2 = client.schedule_batch_escrow(&buyer, &params2);
+    client.cancel_batch_escrow(&job_id2, &buyer);
+
+    let cancelled_cursor = client.get_batch_cursor(&job_id2).unwrap();
+    assert_eq!(cancelled_cursor.revision, 0);
+    assert_eq!(cancelled_cursor.next_index, 0);
+    assert_eq!(cancelled_cursor.job_id, job_id2);
+}
