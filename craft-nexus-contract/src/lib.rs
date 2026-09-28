@@ -40,6 +40,8 @@ mod pagination_boundary_test;
 #[cfg(test)]
 mod diagnostic_scan_test;
 #[cfg(test)]
+mod test_observability_snapshot_missing_storage;
+#[cfg(test)]
 mod differential_upgrade_compatibility_test {
     use super::*;
 
@@ -14440,38 +14442,48 @@ impl CraftNexusContract {
         Ok(unallocated)
     }
 
+    /// Read a persistent snapshot value, extending its read TTL on hit.
+    ///
+    /// `None` means the key is absent — because archival evicted it, because a
+    /// partial migration never wrote it, or simply because nothing has written it
+    /// yet. Monitoring reads must never trap, and must keep the hot keys they touch
+    /// from lapsing into archival (#1391).
+    #[inline(always)]
+    fn read_snapshot_value<K, V>(env: &Env, key: &K) -> Option<V>
+    where
+        K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>,
+        V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>,
+    {
+        let value = env.storage().persistent().get::<K, V>(key);
+        if value.is_some() {
+            Self::extend_persistent_read(env, key);
+        }
+        value
+    }
+
     /// Returns an aggregate observability snapshot for off-chain monitoring.
     ///
     /// The snapshot is aggregate-only: no buyer, seller, arbitrator, or token
     /// addresses are included.
+    ///
+    /// Every counter is read defensively: an absent key reports as zero rather than
+    /// trapping, so monitoring keeps working across archival and partial migrations
+    /// (#1391).
     pub fn get_observability_snapshot(env: Env) -> ObservabilitySnapshot {
         ObservabilitySnapshot {
             version: OBSERVABILITY_SNAPSHOT_VERSION,
-            reset_epoch: env
-                .storage()
-                .persistent()
-                .get::<Symbol, u64>(&OBSERVABILITY_RESET_EPOCH)
+            reset_epoch: Self::read_snapshot_value::<Symbol, u64>(&env, &OBSERVABILITY_RESET_EPOCH)
                 .unwrap_or(0),
-            total_escrows: env
-                .storage()
-                .persistent()
-                .get::<DataKey, u32>(&DataKey::EscrowCount)
+            total_escrows: Self::read_snapshot_value::<DataKey, u32>(&env, &DataKey::EscrowCount)
                 .unwrap_or(0) as u64,
-            total_volume: env
-                .storage()
-                .persistent()
-                .get::<DataKey, i128>(&DataKey::TotalVolume)
+            total_volume: Self::read_snapshot_value::<DataKey, i128>(&env, &DataKey::TotalVolume)
                 .unwrap_or(0),
-            active_disputes: env
-                .storage()
-                .persistent()
-                .get::<DataKey, u32>(&DataKey::ActiveDisputeCount)
-                .unwrap_or(0) as u64,
-            staked_artisans: env
-                .storage()
-                .persistent()
-                .get::<DataKey, u32>(&DataKey::StakedArtisanCount)
-                .unwrap_or(0) as u64,
+            active_disputes:
+                Self::read_snapshot_value::<DataKey, u32>(&env, &DataKey::ActiveDisputeCount)
+                    .unwrap_or(0) as u64,
+            staked_artisans:
+                Self::read_snapshot_value::<DataKey, u32>(&env, &DataKey::StakedArtisanCount)
+                    .unwrap_or(0) as u64,
             total_failures: Self::compute_total_failures(&env),
             active_jobs: Self::compute_active_jobs(&env),
         }
