@@ -173,6 +173,9 @@ pub fn ensure_chunk_within_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate alloc;
+    use alloc::format;
+    use soroban_sdk::testutils::Address as _;
 
     #[test]
     fn estimate_uses_worst_case_cid_clamped_to_max() {

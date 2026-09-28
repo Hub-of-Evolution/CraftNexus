@@ -712,6 +712,7 @@ pub enum ModelError {
 #[cfg(test)]
 mod prop_tests {
     use super::*;
+    use alloc::format;
     use proptest::prelude::*;
 
     #[derive(Clone, Debug)]

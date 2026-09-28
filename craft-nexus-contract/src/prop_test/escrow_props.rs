@@ -18,6 +18,8 @@
 
 #![cfg(test)]
 extern crate alloc;
+extern crate std;
+use std::println;
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -679,15 +681,10 @@ fn run_op(
             same_party,
         } => {
             let s = if *same_party { buyer } else { seller };
-            matches!(client.try_create_escrow(buyer, s, token_id, amount, order_id, &Some(*release_window)), Ok(Ok(_)))
-            let _ = client.try_create_escrow(
-                buyer,
-                s,
-                token_id,
-                amount,
-                order_id,
-                &Some(*release_window),
-            );
+            matches!(
+                client.try_create_escrow(buyer, s, token_id, amount, order_id, &Some(*release_window)),
+                Ok(Ok(_))
+            )
         }
         EscrowOp::FundEscrow { .. } => {
             // Escrows are funded at creation in the test environment.
@@ -709,8 +706,10 @@ fn run_op(
                 1 => seller,
                 _ => admin,
             };
-            matches!(client.try_dispute_escrow(order_id, &Symbol::new(env, "Reason"), caller), Ok(Ok(())))
-            let _ = client.try_dispute_escrow(order_id, &Symbol::new(env, "Reason"), caller);
+            matches!(
+                client.try_dispute_escrow(order_id, &Symbol::new(env, "Reason"), caller),
+                Ok(Ok(()))
+            )
         }
         EscrowOp::ResolveDispute {
             order_id,

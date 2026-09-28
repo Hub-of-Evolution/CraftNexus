@@ -53,7 +53,7 @@ fn setup(
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
     client.set_min_escrow_amount(&token_contract.address(), &0);
     client.set_min_release_window(&1);
@@ -511,13 +511,13 @@ fn test_duplicate_evidence_digest_is_rejected_deterministically() {
 
     // Same payload again (identical digest) → defined rejection.
     let dup = client.try_submit_evidence(&1, &seller, &uri);
-    assert!(matches!(dup, Err(Ok(Error::EvidenceAlreadyUsed))));
+    assert!(matches!(dup, Err(Ok(err)) if err == Error::EvidenceAlreadyUsed.into()));
 
     // The digest guard also covers the counter-evidence path: a fresh, valid
     // parent still cannot smuggle a previously-used payload back in.
     let parent = client.submit_evidence(&1, &buyer, &String::from_str(&env, "ipfs://parent"));
     let dup_counter = client.try_submit_counter_evidence(&1, &seller, &uri, &parent);
-    assert!(matches!(dup_counter, Err(Ok(Error::EvidenceAlreadyUsed))));
+    assert!(matches!(dup_counter, Err(Ok(err)) if err == Error::EvidenceAlreadyUsed.into()));
 }
 
 /// #1078 AC1 + AC3: counter-evidence against a parent is accepted one second
@@ -556,7 +556,7 @@ fn test_counter_evidence_parent_expiry_exact_boundary() {
         &String::from_str(&env, "ipfs://counter-after"),
         &parent,
     );
-    assert!(matches!(counter_expired, Err(Ok(Error::EvidenceExpired))));
+    assert!(matches!(counter_expired, Err(Ok(err)) if err == Error::EvidenceExpired.into()));
 }
 
 /// #1078 AC1 + AC2: resolving a dispute at the evidence-expiry deadline

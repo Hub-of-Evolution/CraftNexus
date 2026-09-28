@@ -26,7 +26,9 @@
 
 #![cfg(test)]
 extern crate alloc;
+extern crate std;
 use alloc::string::{String, ToString};
+use std::println;
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -61,8 +63,7 @@ fn setup_env() -> (
     Env,
     Address,
     Address,
-    Address,
-    Vec<Address>,
+    alloc::vec::Vec<Address>,
     Address,
     token::StellarAssetClient<'static>,
 ) {
@@ -209,7 +210,7 @@ fn shrink_reduces_actor_diversity() {
         },
     ];
 
-    let is_failure = |_seq: &[ShrinkableOp<TestOp>]| -> bool { true };
+    let is_failure = |seq: &[ShrinkableOp<TestOp>]| -> bool { seq.len() >= 3 };
 
     let shrunk = shrink_model_based(sequence.clone(), is_failure);
 
@@ -257,7 +258,7 @@ fn shrink_minimizes_timestamp_jumps() {
         },
     ];
 
-    let is_failure = |_seq: &[ShrinkableOp<TestOp>]| -> bool { true };
+    let is_failure = |seq: &[ShrinkableOp<TestOp>]| -> bool { seq.len() >= 3 };
 
     let shrunk = shrink_model_based(sequence.clone(), is_failure);
 
@@ -292,7 +293,7 @@ fn shrink_reduces_amounts() {
         },
     ];
 
-    let is_failure = |_seq: &[ShrinkableOp<TestOp>]| -> bool { true };
+    let is_failure = |seq: &[ShrinkableOp<TestOp>]| -> bool { seq.len() >= 2 };
 
     let shrunk = shrink_model_based(sequence.clone(), is_failure);
 
@@ -332,7 +333,7 @@ fn shrink_normalizes_token_ids() {
         },
     ];
 
-    let is_failure = |_seq: &[ShrinkableOp<TestOp>]| -> bool { true };
+    let is_failure = |seq: &[ShrinkableOp<TestOp>]| -> bool { seq.len() >= 2 };
 
     let shrunk = shrink_model_based(sequence.clone(), is_failure);
 
@@ -401,7 +402,7 @@ fn model_harness_reports_first_violation() {
                 order_counter += 1;
             }
             TestOp::RaiseDispute => {
-                let _ = client.try_raise_dispute(&(order_counter - 1), buyer);
+                let _ = client.try_dispute_escrow(&(order_counter - 1), &soroban_sdk::Symbol::new(&env, "dispute"), buyer);
             }
             TestOp::ResolveDispute { to_seller } => {
                 let resolution = if *to_seller {
@@ -465,7 +466,7 @@ fn shrunk_sequences_are_deterministic() {
 
     // Execute the shrunk sequence
     let order_id = 200u32;
-    client.create_escrow(buyer, seller, &token_id, &amount, &604_800, &None);
+    client.create_escrow(buyer, seller, &token_id, &amount, &order_id, &None);
     let result = client.try_release_funds(&order_id);
 
     // Verify expected outcome

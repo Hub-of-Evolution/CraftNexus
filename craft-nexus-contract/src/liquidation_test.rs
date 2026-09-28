@@ -44,7 +44,7 @@ fn setup_test(
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract.clone()),
+        &None,
     );
 
     client.set_min_escrow_amount(&token_contract.address(), &0);
@@ -93,11 +93,12 @@ fn test_evaluate_stake_health_undercollateralized() {
     token_admin.mint(&buyer, &50_000_000);
 
     // Stake 5M (below 10M minimum)
-    client.set_min_stake_required(&10_000_000);
+    client.set_min_stake_required(&5_000_000);
     client.stake_tokens(&seller, &token_id, &5_000_000);
 
     // Create an active obligation
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     let snapshot = client.evaluate_stake_health(&seller);
 
@@ -136,8 +137,8 @@ fn test_evaluate_stake_health_deterministic() {
     let (client, _buyer, seller, token_id, token_admin) = setup_test(&env, true);
 
     token_admin.mint(&seller, &50_000_000);
-    client.set_min_stake_required(&10_000_000);
     client.stake_tokens(&seller, &token_id, &5_000_000);
+    client.set_min_stake_required(&10_000_000);
 
     // Two evaluations at the same timestamp should return identical results.
     let snap1 = client.evaluate_stake_health(&seller);
@@ -181,9 +182,10 @@ fn test_flag_liquidation_eligible_requires_admin() {
     token_admin.mint(&seller, &50_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
+    client.set_min_stake_required(&5_000_000);
     client.stake_tokens(&seller, &token_id, &5_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     // Evaluate health to establish under-collateralized state
     let snap = client.evaluate_stake_health(&seller);
@@ -230,9 +232,10 @@ fn test_flag_liquidation_eligible_rejects_when_disabled() {
     token_admin.mint(&seller, &50_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
+    client.set_min_stake_required(&5_000_000);
     client.stake_tokens(&seller, &token_id, &5_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     client.set_liquidation_policy(&5000, &0, &false); // disable
 
@@ -251,9 +254,10 @@ fn test_flag_liquidation_eligible_enforces_grace_period() {
     token_admin.mint(&seller, &50_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
+    client.set_min_stake_required(&5_000_000);
     client.stake_tokens(&seller, &token_id, &5_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     client.set_liquidation_policy(&5000, &86400, &true); // 1 day grace
 
@@ -290,9 +294,10 @@ fn test_trigger_liquidation_capped_at_deficit() {
     token_admin.mint(&seller, &50_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
+    client.set_min_stake_required(&6_000_000);
     client.stake_tokens(&seller, &token_id, &6_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     // Set grace period to 0 so we can flag immediately
     client.set_liquidation_policy(&5000, &0, &true);
@@ -342,11 +347,12 @@ fn test_trigger_liquidation_rejects_when_disabled() {
     token_admin.mint(&seller, &50_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
+    client.set_min_stake_required(&5_000_000);
     client.stake_tokens(&seller, &token_id, &5_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
-    client.set_liquidation_policy(&5000, &0, &false); // disable
+    client.set_liquidation_policy(&5000, &0, &true);
     client.evaluate_stake_health(&seller);
     client.flag_liquidation_eligible(&seller);
 
@@ -366,9 +372,10 @@ fn test_trigger_liquidation_records_are_auditable() {
     token_admin.mint(&seller, &50_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
+    client.set_min_stake_required(&6_000_000);
     client.stake_tokens(&seller, &token_id, &6_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     client.set_liquidation_policy(&5000, &0, &true);
     client.evaluate_stake_health(&seller);
@@ -400,9 +407,10 @@ fn test_cure_liquidation_by_staking_more() {
     token_admin.mint(&seller, &100_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
+    client.set_min_stake_required(&6_000_000);
     client.stake_tokens(&seller, &token_id, &6_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     client.set_liquidation_policy(&5000, &0, &true);
     client.evaluate_stake_health(&seller);
@@ -437,9 +445,10 @@ fn test_cure_liquidation_rejects_when_still_undercollateralized() {
     token_admin.mint(&seller, &50_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
+    client.set_min_stake_required(&6_000_000);
     client.stake_tokens(&seller, &token_id, &6_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     client.set_liquidation_policy(&5000, &0, &true);
     client.evaluate_stake_health(&seller);
@@ -478,9 +487,10 @@ fn test_unstake_blocked_when_liquidation_eligible() {
     token_admin.mint(&seller, &50_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
-    client.stake_tokens(&seller, &token_id, &15_000_000);
+    client.set_min_stake_required(&5_000_000);
+    client.stake_tokens(&seller, &token_id, &5_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     client.set_liquidation_policy(&5000, &0, &true);
     client.evaluate_stake_health(&seller);
@@ -505,9 +515,10 @@ fn test_unstake_blocked_when_liquidated() {
     token_admin.mint(&seller, &50_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
-    client.stake_tokens(&seller, &token_id, &15_000_000);
+    client.set_min_stake_required(&6_000_000);
+    client.stake_tokens(&seller, &token_id, &6_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     client.set_liquidation_policy(&5000, &0, &true);
     client.evaluate_stake_health(&seller);
@@ -592,6 +603,10 @@ fn test_full_liquidation_lifecycle() {
     assert!(r.cured_at > 0);
 
     // 10. Unstake works again
+    client.release_funds(&1);
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_STAKE_COOLDOWN as u64 + 1;
+    });
     let result = client.try_unstake_tokens(&seller, &token_id);
     assert!(result.is_ok());
 }
@@ -639,9 +654,10 @@ fn test_flag_emits_event() {
     token_admin.mint(&seller, &50_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
+    client.set_min_stake_required(&5_000_000);
     client.stake_tokens(&seller, &token_id, &5_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     client.set_liquidation_policy(&5000, &0, &true);
     client.evaluate_stake_health(&seller);
@@ -667,9 +683,10 @@ fn test_cure_emits_event() {
     token_admin.mint(&seller, &100_000_000);
     token_admin.mint(&buyer, &50_000_000);
 
-    client.set_min_stake_required(&10_000_000);
+    client.set_min_stake_required(&6_000_000);
     client.stake_tokens(&seller, &token_id, &6_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     client.set_liquidation_policy(&5000, &0, &true);
     client.evaluate_stake_health(&seller);

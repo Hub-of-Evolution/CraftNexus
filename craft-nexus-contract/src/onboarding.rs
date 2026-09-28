@@ -308,7 +308,7 @@ pub struct ObservabilityMetrics {
     pub last_reset_ledger: u32,
 }
 
-#[contracttype]
+#[contracttype(export = false)]
 #[derive(Clone)]
 pub enum DataKey {
     /// Maps a user address to their flat persisted profile record
@@ -3204,7 +3204,9 @@ impl OnboardingContract {
             if existing.username != optimized_username || existing.role != role {
                 Self::emit_onboard_failed_and_panic(&env, &user, Error::AlreadyOnboarded);
             }
-            Self::repair_onboarding_state(&env, &normalized, &user);
+            if existing.status != ProfileStatus::Deactivated {
+                Self::repair_onboarding_state(&env, &normalized, &user);
+            }
             return Self::stored_to_public(&env, existing, Self::read_portfolio_cid(&env, &user));
         }
 

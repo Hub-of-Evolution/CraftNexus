@@ -1,8 +1,5 @@
-#![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype,
-    testutils::{Address as _, Ledger},
-    vec, Address, Env, Vec,
+    contract, contractimpl, contracttype, Address, Env, Vec,
 };
 
 // ============================================================================
@@ -104,8 +101,9 @@ impl StakeContract {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
 
-    fn setup() -> (Env, Address, StakeContractClient) {
+    fn setup() -> (Env, Address, StakeContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
 
