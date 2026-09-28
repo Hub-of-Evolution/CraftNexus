@@ -13047,6 +13047,10 @@ impl CraftNexusContract {
         refund_amount: i128,
         caller: Address,
     ) -> Result<(), Error> {
+        // Proposal gates settlement value: reject while paused before any read
+        // that could lead to a write. Pause/unpause itself never goes through
+        // this path.
+        Self::check_not_paused(&env);
         let escrow_opt: Option<Escrow> = env.storage().persistent().get(&(ESCROW, order_id));
         if escrow_opt.is_none() {
             return Err(Error::EscrowNotFound);
