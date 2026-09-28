@@ -40,6 +40,8 @@ mod pagination_boundary_test;
 #[cfg(test)]
 mod diagnostic_scan_test;
 #[cfg(test)]
+mod test_archival_compaction_cursor_missing_storage;
+#[cfg(test)]
 mod differential_upgrade_compatibility_test {
     use super::*;
 
@@ -14399,7 +14401,17 @@ impl CraftNexusContract {
 
     /// Returns the last persisted archival compaction cursor.
     pub fn get_archival_compaction_cursor(env: Env) -> u32 {
-        Self::get_persistent_u32(&env, &DataKey::ArchivalCompactionCursor)
+        // `0` — never a trap — when the key is absent after archival or a partial
+        // migration, and the read TTL of the cursor is extended on hit so a resumable
+        // compaction can always pick up where it left off (#1390).
+        let key = DataKey::ArchivalCompactionCursor;
+        match env.storage().persistent().get::<DataKey, u32>(&key) {
+            Some(cursor) => {
+                Self::extend_persistent_read(&env, &key);
+                cursor
+            }
+            None => 0,
+        }
     }
 
     /// Recovery function to sweep unallocated tokens from the contract (admin only).
