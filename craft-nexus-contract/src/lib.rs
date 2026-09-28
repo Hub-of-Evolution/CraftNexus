@@ -22,6 +22,8 @@ pub mod storage_lifecycle;
 #[cfg(test)]
 mod admin_idempotency_test;
 #[cfg(test)]
+mod archival_summary_test;
+#[cfg(test)]
 mod arbitration_escalation_test;
 #[cfg(test)]
 mod dispute_escalation_timeout_test;
@@ -14284,9 +14286,12 @@ impl CraftNexusContract {
 
     /// Returns the immutable archival summary for an order, if one exists.
     pub fn get_archival_summary(env: Env, order_id: u32) -> Option<ArchivalSummary> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ArchivalSummary(order_id))
+        let key = DataKey::ArchivalSummary(order_id);
+        let summary = env.storage().persistent().get(&key);
+        if summary.is_some() {
+            Self::extend_persistent_read(&env, &key);
+        }
+        summary
     }
 
     fn write_archival_summary_for_escrow(env: &Env, escrow: &Escrow) -> Result<bool, Error> {
