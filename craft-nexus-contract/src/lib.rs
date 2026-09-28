@@ -22,6 +22,8 @@ pub mod storage_lifecycle;
 #[cfg(test)]
 mod admin_idempotency_test;
 #[cfg(test)]
+mod archival_policy_test;
+#[cfg(test)]
 mod arbitration_escalation_test;
 #[cfg(test)]
 mod dispute_escalation_timeout_test;
@@ -14265,6 +14267,7 @@ impl CraftNexusContract {
     ) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
+        Self::check_not_paused(&env);
         if retention_window == 0
             || compaction_batch_size == 0
             || compaction_batch_size > MAX_ARCHIVAL_COMPACTION_BATCH
