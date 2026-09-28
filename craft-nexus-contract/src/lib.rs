@@ -19,6 +19,9 @@ pub mod conversion;
 /// Storage lifecycle, compaction, and TTL-management framework (#920).
 pub mod storage_lifecycle;
 
+/// Resumable, bounded-chunk storage migrations (#1117).
+pub mod resumable_migration;
+
 #[cfg(test)]
 mod admin_idempotency_test;
 #[cfg(test)]
@@ -64,6 +67,8 @@ mod differential_upgrade_compatibility_test {
 mod prop_test;
 #[cfg(test)]
 mod reentrancy_test;
+#[cfg(test)]
+mod resumable_migration_test;
 #[cfg(test)]
 mod safe_arithmetic_counters_test;
 #[cfg(test)]
