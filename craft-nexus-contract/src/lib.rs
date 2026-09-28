@@ -40,6 +40,8 @@ mod pagination_boundary_test;
 #[cfg(test)]
 mod diagnostic_scan_test;
 #[cfg(test)]
+mod test_reconciliation_repair_plan_missing_storage;
+#[cfg(test)]
 mod differential_upgrade_compatibility_test {
     use super::*;
 
@@ -14241,9 +14243,15 @@ impl CraftNexusContract {
         env: Env,
         plan_id: u64,
     ) -> Option<ReconciliationRepairPlan> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ReconciliationRepairPlan(plan_id))
+        // `None` — never a trap — when the key is absent after archival or a partial
+        // migration, and the read TTL of a hot plan is extended on hit so a polling
+        // operator cannot let it lapse into archival (#1384).
+        let key = DataKey::ReconciliationRepairPlan(plan_id);
+        let plan: Option<ReconciliationRepairPlan> = env.storage().persistent().get(&key);
+        if plan.is_some() {
+            Self::extend_persistent_read(&env, &key);
+        }
+        plan
     }
 
     /// Returns the current archival record policy, using defaults when unset.
