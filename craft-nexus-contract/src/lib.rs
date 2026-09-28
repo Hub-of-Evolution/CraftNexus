@@ -37,6 +37,8 @@ mod expired_dispute_fee_test;
 #[cfg(test)]
 mod liquidation_test;
 #[cfg(test)]
+mod max_dispute_duration_test;
+#[cfg(test)]
 mod min_release_window_test;
 #[cfg(test)]
 mod pagination_boundary_test;
@@ -393,6 +395,11 @@ pub enum Error {
     /// long, longer than `attestation::MAX_ATTESTATION_VALIDITY_LEDGERS`, or
     /// overflowing `u32` — so no ledger can ever satisfy it (#1122).
     InvalidAttestationWindow = 114,
+    /// The requested `max_dispute_duration` is zero (which would expire every
+    /// dispute the instant it is opened) or exceeds
+    /// `ABSOLUTE_MAX_DISPUTE_DURATION`, beyond which the deadline addition
+    /// `now + duration` could overflow `u64` (#1365).
+    InvalidDisputeDuration = 115,
 }
 
 /// Maps a [`conversion::ConversionError`] onto the contract's own [`Error`]
@@ -543,6 +550,16 @@ const CANCEL_REPROPOSE_COOLDOWN: u64 = time_policy::CANCEL_REPROPOSE_COOLDOWN;
 
 /// Default maximum duration a dispute can remain open before it can be force-resolved (30 days in seconds)
 const DEFAULT_MAX_DISPUTE_DURATION: u32 = time_policy::MAX_DISPUTE_DURATION as u32;
+
+/// Absolute ceiling for an admin-configurable `max_dispute_duration` (365 days).
+///
+/// The dispute deadline is evaluated as `dispute_initiated_at + max_dispute_duration`.
+/// Since `dispute_initiated_at` is a `u64` ledger timestamp that keeps advancing,
+/// an unbounded `max_dispute_duration` would eventually overflow that addition and
+/// wrap the deadline to a value in the past, silently expiring disputes early
+/// (#1365). Bounding the value keeps the sum well inside `u64` for any realistic
+/// ledger timestamp while still allowing a full year for dispute resolution.
+const ABSOLUTE_MAX_DISPUTE_DURATION: u32 = 365 * 24 * 60 * 60;
 
 /// Default cooldown period after staking before tokens can be unstaked (7 days in seconds)
 const DEFAULT_STAKE_COOLDOWN: u32 = time_policy::STAKE_COOLDOWN as u32;
@@ -13049,9 +13066,38 @@ impl CraftNexusContract {
     }
 
     /// Admin sets the maximum dispute duration (in seconds).
+    ///
+    /// This value is the final dispute deadline: a dispute is force-resolvable
+    /// once `now >= dispute_initiated_at + max_dispute_duration`, and every
+    /// escalation checkpoint must remain strictly below it (#1080). It is
+    /// therefore validated *before* any storage is touched — an invalid value
+    /// must leave `PlatformConfig` and the admin-mutation revision untouched.
+    ///
+    /// # Errors
+    /// * [`Error::InvalidDisputeDuration`] — `duration_seconds` is zero or
+    ///   greater than [`ABSOLUTE_MAX_DISPUTE_DURATION`].
+    /// * [`Error::StaleAdminRevision`] / [`Error::AdminActionAlreadyApplied`] —
+    ///   raised by the admin-mutation gate (#1071).
+    ///
+    /// # Panics
+    /// Panics with [`crate::Error::ContractPaused`] while the platform is
+    /// paused. `set_paused` is the pause/unpause path itself and does not route
+    /// through this function, so a paused platform can always be unpaused.
     pub fn set_max_dispute_duration(env: Env, duration_seconds: u32) -> Result<(), Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
+
+        // The deadline gates dispute settlement value, so reject while paused
+        // before any read that could lead to a write.
+        Self::check_not_paused(&env);
+
+        // A zero window expires every dispute at the ledger it was opened, and
+        // an unbounded window can overflow `initiated_at + duration` and wrap
+        // the deadline into the past. Both are rejected up front so no storage
+        // or admin revision is written for a rejected input.
+        if duration_seconds == 0 || duration_seconds > ABSOLUTE_MAX_DISPUTE_DURATION {
+            return Err(Error::InvalidDisputeDuration);
+        }
 
         let mut payload = Bytes::new(&env);
         payload.extend_from_slice(&duration_seconds.to_be_bytes());
