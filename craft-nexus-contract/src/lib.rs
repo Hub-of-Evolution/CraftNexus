@@ -12443,9 +12443,34 @@ impl CraftNexusContract {
         if config.min_stake_required <= 0 {
             return false;
         }
-        let stake = Self::get_stake(env.clone(), artisan.clone());
-        let active = Self::has_active_escrows(env, artisan);
-        active && stake < config.min_stake_required
+        Self::migrate_legacy_artisan_stake(env.clone(), artisan.clone());
+
+        let stake_key = DataKey::ArtisanStake(artisan.clone());
+        let stake = match env
+            .storage()
+            .persistent()
+            .get::<DataKey, ArtisanStakeData>(&stake_key)
+        {
+            Some(stake) => {
+                Self::extend_persistent_read(&env, &stake_key);
+                stake.amount
+            }
+            None => 0,
+        };
+
+        let obligations_key = DataKey::ActiveObligations(artisan);
+        let active_obligations: u32 = match env
+            .storage()
+            .persistent()
+            .get(&obligations_key)
+        {
+            Some(count) => {
+                Self::extend_persistent_read(&env, &obligations_key);
+                count
+            }
+            None => 0,
+        };
+        active_obligations > 0 && stake < config.min_stake_required
     }
 
     // ─── Liquidation / Collateral Health (#1111) ────────────────────────────
@@ -22890,9 +22915,34 @@ impl CraftNexusContract {
         if config.min_stake_required <= 0 {
             return false;
         }
-        let stake = Self::get_stake(env.clone(), artisan.clone());
-        let active = Self::has_active_escrows(env, artisan);
-        active && stake < config.min_stake_required
+        Self::migrate_legacy_artisan_stake(env.clone(), artisan.clone());
+
+        let stake_key = DataKey::ArtisanStake(artisan.clone());
+        let stake = match env
+            .storage()
+            .persistent()
+            .get::<DataKey, ArtisanStakeData>(&stake_key)
+        {
+            Some(stake) => {
+                Self::extend_persistent_read(&env, &stake_key);
+                stake.amount
+            }
+            None => 0,
+        };
+
+        let obligations_key = DataKey::ActiveObligations(artisan);
+        let active_obligations: u32 = match env
+            .storage()
+            .persistent()
+            .get(&obligations_key)
+        {
+            Some(count) => {
+                Self::extend_persistent_read(&env, &obligations_key);
+                count
+            }
+            None => 0,
+        };
+        active_obligations > 0 && stake < config.min_stake_required
     }
 
     /// Admin sets the minimum stake required for artisans to create escrows.
