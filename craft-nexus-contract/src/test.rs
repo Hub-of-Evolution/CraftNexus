@@ -8127,3 +8127,32 @@ fn test_differential_upgrade_compatibility_representative_fixture() {
         total_supply
     );
 }
+#[test]
+fn test_validate_batch_creation_dry_run() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    let token_client = token::Client::new(&env, &token_id);
+    
+    token_admin.mint(&buyer, &1000);
+    let initial_balance = token_client.balance(&buyer);
+    
+    client.pause_platform(&true);
+    
+    let params = soroban_sdk::vec![
+        &env,
+        crate::EscrowCreateParams {
+            order_id: 1,
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token_id.clone(),
+            amount: 100,
+            release_window: 86400,
+            description: soroban_sdk::String::from_str(&env, "test"),
+        }
+    ];
+    
+    let res = client.try_validate_batch_creation(&params);
+    assert!(res.is_err());
+    assert_eq!(token_client.balance(&buyer), initial_balance);
+}
