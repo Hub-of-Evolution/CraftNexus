@@ -11591,6 +11591,10 @@ impl CraftNexusContract {
         cursor: BatchCursor,
         work_limit: u32,
     ) -> Result<BatchJobProgress, Error> {
+        // Value-moving continuation: reject while paused before any read that
+        // could lead to a write or transfer. Pause/unpause itself never goes
+        // through this path.
+        Self::check_not_paused(&env);
         // Bound the work per continuation first, so an out-of-range request is
         // rejected identically whether or not the job exists.
         pagination_validation::validate_strict_limit(
@@ -11642,7 +11646,12 @@ impl CraftNexusContract {
             return Err(Error::BatchCursorMismatch);
         }
 
-        let end = core::cmp::min(job.next_index + work_limit, job.params.len());
+        let end = core::cmp::min(
+            job.next_index
+                .checked_add(work_limit)
+                .ok_or(Error::CounterOverflow)?,
+            job.params.len(),
+        );
         let mut chunk = Vec::new(&env);
         for index in job.next_index..end {
             if let Some(entry) = job.params.get(index) {
@@ -11655,7 +11664,10 @@ impl CraftNexusContract {
         // token transfers). Everything below persists only on success.
         Self::create_batch_escrow(env.clone(), cursor.job_id, chunk)?;
         job.next_index = end;
-        job.revision = job.revision.saturating_add(1);
+        job.revision = job
+            .revision
+            .checked_add(1)
+            .ok_or(Error::CounterOverflow)?;
         if job.next_index == job.params.len() {
             job.status = BatchJobStatus::Completed;
         }
@@ -22374,6 +22386,10 @@ impl CraftNexusContract {
         owner: Address,
         work_limit: u32,
     ) -> Result<BatchJobProgress, Error> {
+        // Value-moving continuation: reject while paused before any read that
+        // could lead to a write or transfer. Pause/unpause itself never goes
+        // through this path.
+        Self::check_not_paused(&env);
         pagination_validation::validate_strict_limit(
             work_limit,
             pagination_validation::MAX_BATCH_WORK_LIMIT,
@@ -22395,7 +22411,12 @@ impl CraftNexusContract {
             BatchJobStatus::Pending => {}
         }
 
-        let end = core::cmp::min(job.next_index + work_limit, job.params.len());
+        let end = core::cmp::min(
+            job.next_index
+                .checked_add(work_limit)
+                .ok_or(Error::CounterOverflow)?,
+            job.params.len(),
+        );
         let mut chunk = Vec::new(&env);
         for index in job.next_index..end {
             if let Some(entry) = job.params.get(index) {

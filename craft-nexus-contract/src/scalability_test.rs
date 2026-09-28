@@ -1229,3 +1229,100 @@ fn test_escrow_counters_stay_in_sync_at_scale() {
         100
     );
 }
+
+#[test]
+fn test_continue_batch_escrow_unauthorized_leaves_storage_untouched() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+    let stranger = Address::generate(&env);
+    let mut params = soroban_sdk::Vec::new(&env);
+    for i in 0..3u32 {
+        params.push_back(EscrowCreateParams {
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token.clone(),
+            amount: 1_000,
+            order_id: 8_000 + i,
+            release_window: Some(3_600),
+            ipfs_hash: None,
+            metadata_hash: None,
+            service_agreement_hash: None,
+        });
+    }
+
+    let job_id = client.schedule_batch_escrow(&buyer, &params);
+    let cursor = client.get_batch_cursor(&job_id).unwrap();
+    let token_client = token::Client::new(&env, &token);
+    let balance_before = token_client.balance(&buyer);
+    let progress_before = client.get_batch_escrow_progress(&job_id).unwrap();
+
+    let forged = BatchCursor {
+        owner: stranger.clone(),
+        ..cursor.clone()
+    };
+    let result = client.try_continue_batch_escrow(&forged, &5);
+    assert!(
+        matches!(result, Err(Ok(Error::BatchJobUnauthorized))),
+        "unauthorized continuation must raise BatchJobUnauthorized, got {:?}",
+        result
+    );
+
+    assert_eq!(
+        token_client.balance(&buyer),
+        balance_before,
+        "balances must be unchanged after unauthorized rejection"
+    );
+    assert_eq!(
+        client.get_batch_escrow_progress(&job_id).unwrap(),
+        progress_before,
+        "job checkpoint must not advance on unauthorized call"
+    );
+    assert_eq!(client.get_batch_cursor(&job_id).unwrap(), cursor);
+    assert!(client.try_get_escrow(&8_000).is_err());
+}
+
+#[test]
+fn test_continue_batch_escrow_rejected_while_paused() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+    let mut params = soroban_sdk::Vec::new(&env);
+    for i in 0..2u32 {
+        params.push_back(EscrowCreateParams {
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token.clone(),
+            amount: 1_000,
+            order_id: 9_000 + i,
+            release_window: Some(3_600),
+            ipfs_hash: None,
+            metadata_hash: None,
+            service_agreement_hash: None,
+        });
+    }
+
+    let job_id = client.schedule_batch_escrow(&buyer, &params);
+    let cursor = client.get_batch_cursor(&job_id).unwrap();
+    let token_client = token::Client::new(&env, &token);
+    let balance_before = token_client.balance(&buyer);
+
+    client.set_paused(&true);
+    assert!(client.is_paused());
+
+    let result = client.try_continue_batch_escrow(&cursor, &5);
+    assert!(
+        matches!(result, Err(Ok(Error::ContractPaused))),
+        "paused continuation must raise ContractPaused, got {:?}",
+        result
+    );
+
+    assert_eq!(
+        token_client.balance(&buyer),
+        balance_before,
+        "balances must be unchanged while paused"
+    );
+    assert_eq!(client.get_batch_cursor(&job_id).unwrap(), cursor);
+    assert!(client.try_get_escrow(&9_000).is_err());
+
+    client.set_paused(&false);
+    let progress = client.continue_batch_escrow(&cursor, &5);
+    assert_eq!(progress.next_index, 2);
+    assert_eq!(progress.status, BatchJobStatus::Completed);
+}
