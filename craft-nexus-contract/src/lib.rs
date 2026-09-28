@@ -40,6 +40,8 @@ mod pagination_boundary_test;
 #[cfg(test)]
 mod diagnostic_scan_test;
 #[cfg(test)]
+mod test_cancel_recurring_escrow_auth;
+#[cfg(test)]
 mod differential_upgrade_compatibility_test {
     use super::*;
 
@@ -13632,6 +13634,9 @@ impl CraftNexusContract {
     /// Cancel a recurring escrow and refund remaining funds to the buyer.
     pub fn cancel_recurring_escrow(env: Env, id: u64) {
         let _guard = ReentryGuardScope::new(&env);
+        // A refund must not be triggered while the platform is paused, and the
+        // rejection has to happen before the escrow is loaded or mutated (#1376).
+        Self::check_not_paused(&env);
         let key = DataKey::RecurringEscrow(id);
         let mut escrow: RecurringEscrow = env
             .storage()
@@ -13659,7 +13664,13 @@ impl CraftNexusContract {
         // Accounting invariant: 0 <= released <= total, so the residual
         // `total - released` is always a valid, non-negative refund amount.
         Self::assert_recurring_accounting_invariant(&env, &escrow);
-        let remaining = escrow.total_amount - escrow.released_amount;
+        // The invariant above already guarantees `released <= total`, but the refund
+        // is the value-bearing step here, so it is computed with checked arithmetic
+        // rather than trusting the invariant (#1376).
+        let remaining = escrow
+            .total_amount
+            .checked_sub(escrow.released_amount)
+            .unwrap_or_else(|| env.panic_with_error(crate::Error::CounterUnderflow));
 
         // CEI Pattern: EFFECTS - Update state BEFORE external calls
         escrow.is_active = false;
