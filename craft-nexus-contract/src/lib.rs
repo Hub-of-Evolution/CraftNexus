@@ -40,6 +40,8 @@ mod pagination_boundary_test;
 #[cfg(test)]
 mod diagnostic_scan_test;
 #[cfg(test)]
+mod test_approve_reconciliation_repair_auth;
+#[cfg(test)]
 mod differential_upgrade_compatibility_test {
     use super::*;
 
@@ -14219,6 +14221,9 @@ impl CraftNexusContract {
         env: Env,
         plan_id: u64,
     ) -> Result<ReconciliationRepairPlan, Error> {
+        // Approving a repair mutates the approval set of value-bearing state, so it is
+        // rejected outright while the platform is paused (#1383).
+        Self::check_not_paused(&env);
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
         let key = DataKey::ReconciliationRepairPlan(plan_id);
@@ -14227,12 +14232,19 @@ impl CraftNexusContract {
             .persistent()
             .get(&key)
             .ok_or(Error::RepairPlanNotFound)?;
+        // Both terminal guards run before any write, so a rejected call leaves the
+        // plan byte-for-byte unchanged.
         if plan.applied || plan.cancelled {
             return Err(Error::RepairPlanTerminal);
         }
         if !plan.approvals.contains(&admin) {
             plan.approvals.push_back(admin);
             env.storage().persistent().set(&key, &plan);
+            Self::extend_persistent(&env, &key);
+        } else {
+            // Already approved: this is a pure read of the stored plan, so only the
+            // read TTL is extended.
+            Self::extend_persistent_read(&env, &key);
         }
         Ok(plan)
     }
