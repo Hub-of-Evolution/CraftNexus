@@ -13,6 +13,9 @@ extern crate alloc;
 /// Centralised time-boundary policy for the contract.
 pub mod time_policy;
 
+/// Attestation expiry and ledger binding for cross-contract authorization (#1122).
+pub mod attestation;
+
 /// Bounded, overflow-safe oracle-price conversion (Issue #1088).
 pub mod conversion;
 
@@ -380,6 +383,16 @@ pub enum Error {
     /// Archival policy parameters are invalid (zero retention, zero batch size,
     /// or batch size above MAX_ARCHIVAL_COMPACTION_BATCH).
     InvalidArchivalPolicy = 111,
+    /// The cross-contract attestation offered as authorization is past its
+    /// expiry ledger, so it proves a state that is no longer current (#1122).
+    OnboardingAttestationExpired = 112,
+    /// The cross-contract attestation is future-dated: its issuance ledger is
+    /// ahead of the ledger being executed (#1122).
+    OnboardingAttestationNotYetValid = 113,
+    /// The attestation's declared validity window is unusable — zero ledgers
+    /// long, longer than `attestation::MAX_ATTESTATION_VALIDITY_LEDGERS`, or
+    /// overflowing `u32` — so no ledger can ever satisfy it (#1122).
+    InvalidAttestationWindow = 114,
 }
 
 /// Maps a [`conversion::ConversionError`] onto the contract's own [`Error`]
@@ -399,6 +412,31 @@ impl From<conversion::ConversionError> for Error {
             }
             conversion::ConversionError::ExcessiveMovement => Error::ConversionExcessiveMovement,
             conversion::ConversionError::OutputUnderflow => Error::ConversionOutputUnderflow,
+        }
+    }
+}
+
+/// Maps an [`attestation::AttestationError`] onto the contract's own [`Error`]
+/// enum, following the same ABI-stability rule as the `conversion` mapping
+/// above: freshness failures keep their own discriminants so callers can tell
+/// "stale evidence" apart from "wrong instance", while every other rejection
+/// collapses onto the single authorization failure code (#1122).
+impl From<attestation::AttestationError> for Error {
+    fn from(err: attestation::AttestationError) -> Self {
+        match err {
+            attestation::AttestationError::Expired => Error::OnboardingAttestationExpired,
+            attestation::AttestationError::NotYetIssued => {
+                Error::OnboardingAttestationNotYetValid
+            }
+            attestation::AttestationError::ZeroValidityWindow
+            | attestation::AttestationError::ValidityWindowTooLong
+            | attestation::AttestationError::LedgerWindowOverflow => {
+                Error::InvalidAttestationWindow
+            }
+            attestation::AttestationError::ForeignContractInstance
+            | attestation::AttestationError::OperationNonceMismatch => {
+                Error::OnboardingAuthorizationFailed
+            }
         }
     }
 }
@@ -3895,6 +3933,24 @@ impl CraftNexusContract {
         {
             env.panic_with_error(crate::Error::OnboardingAuthorizationFailed);
         }
+        // #1122: bind the evidence to this deployment and bound its age before
+        // it is forwarded. The onboarding contract re-checks freshness, but an
+        // authorization boundary that only holds while the peer behaves
+        // correctly is not a boundary: evidence minted for another instance, or
+        // issued more than the validity window ago, is refused here too.
+        let current_ledger = env.ledger().sequence();
+        let window = crate::attestation::Attestation::issue(
+            attestation.ledger_sequence,
+            crate::attestation::DEFAULT_ATTESTATION_VALIDITY_LEDGERS,
+            attestation.contract_instance.clone(),
+            attestation.state_revision,
+        )
+        .unwrap_or_else(|err| env.panic_with_error(crate::Error::from(err)));
+        if let Err(err) =
+            window.validate(current_ledger, &escrow_address, attestation.state_revision)
+        {
+            env.panic_with_error(crate::Error::from(err));
+        }
         match env.try_invoke_contract::<bool, soroban_sdk::Error>(
             &onboarding_address,
             &Symbol::new(env, "validate_onboarding_attestation"),
@@ -4743,6 +4799,24 @@ impl CraftNexusContract {
         }
 
         0
+    }
+
+    /// Read an artisan stake without performing the lazy legacy migration.
+    ///
+    /// Reconciliation queries are intentionally read-only, so they must not
+    /// call `migrate_legacy_artisan_stake`, which writes the converted record
+    /// and removes the legacy token key.
+    fn get_artisan_stake_read_only(env: &Env, artisan: Address) -> Option<ArtisanStakeData> {
+        let stake_key = DataKey::ArtisanStake(artisan.clone());
+        let token_key = DataKey::ArtisanStakeToken(artisan);
+
+        if env.storage().persistent().has(&token_key) {
+            let amount = env.storage().persistent().get(&stake_key)?;
+            let token = env.storage().persistent().get(&token_key)?;
+            return Some(ArtisanStakeData { amount, token });
+        }
+
+        env.storage().persistent().get(&stake_key)
     }
 
     /// Get the count of stake deposits in an artisan's queue.
@@ -13958,6 +14032,10 @@ impl CraftNexusContract {
         page: u32,
         page_size: u32,
     ) -> Result<ReconciliationReport, Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        Self::check_not_paused(&env);
+
         // Validate pagination inputs
         let page_size =
             pagination_validation::validate_limit(page_size, pagination_validation::MAX_PAGE_SIZE)?;
@@ -13969,7 +14047,10 @@ impl CraftNexusContract {
         let total_escrows: u32 = Self::get_persistent_u32(&env, &DataKey::EscrowCount);
 
         // Calculate page bounds
-        let end = page.saturating_add(page_size).min(total_escrows);
+        let end = page
+            .checked_add(page_size)
+            .ok_or(Error::CounterOverflow)?
+            .min(total_escrows);
 
         // Sum active escrow amounts for this page
         let mut expected_locked = 0i128;
@@ -14000,9 +14081,11 @@ impl CraftNexusContract {
                             | EscrowStatus::SettlementPending
                     )
                 {
-                    expected_locked = expected_locked.saturating_add(escrow.amount);
+                    expected_locked = expected_locked
+                        .checked_add(escrow.amount)
+                        .ok_or(Error::CounterOverflow)?;
                 }
-                scanned = scanned.saturating_add(1);
+                scanned = scanned.checked_add(1).ok_or(Error::CounterOverflow)?;
             }
         }
 
@@ -14021,11 +14104,13 @@ impl CraftNexusContract {
                     .get::<DataKey, RecurringEscrow>(&DataKey::RecurringEscrow(id))
                 {
                     if recurring.token == token && recurring.is_active {
-                        expected_locked = expected_locked.saturating_add(
-                            recurring
-                                .total_amount
-                                .saturating_sub(recurring.released_amount),
-                        );
+                        let remaining = recurring
+                            .total_amount
+                            .checked_sub(recurring.released_amount)
+                            .ok_or(Error::CounterUnderflow)?;
+                        expected_locked = expected_locked
+                            .checked_add(remaining)
+                            .ok_or(Error::CounterOverflow)?;
                     }
                 }
             }
@@ -14045,14 +14130,11 @@ impl CraftNexusContract {
                 .persistent()
                 .get::<DataKey, Address>(&DataKey::StakedArtisanIndexed(index))
             {
-                Self::migrate_legacy_artisan_stake(env.clone(), artisan.clone());
-                if let Some(stake) = env
-                    .storage()
-                    .persistent()
-                    .get::<DataKey, ArtisanStakeData>(&DataKey::ArtisanStake(artisan))
-                {
+                if let Some(stake) = Self::get_artisan_stake_read_only(&env, artisan) {
                     if stake.token == token {
-                        expected_staked = expected_staked.saturating_add(stake.amount);
+                        expected_staked = expected_staked
+                            .checked_add(stake.amount)
+                            .ok_or(Error::CounterOverflow)?;
                     }
                 }
             }
@@ -14077,9 +14159,12 @@ impl CraftNexusContract {
         // Check for discrepancies only when complete
         let mut unresolved = false;
         if complete {
+            let obligations = expected_locked
+                .checked_add(expected_staked)
+                .ok_or(Error::CounterOverflow)?;
             unresolved = expected_locked != tracked_locked
                 || expected_staked != tracked_staked
-                || balance < expected_locked.saturating_add(expected_staked);
+                || balance < obligations;
         }
 
         Ok(ReconciliationReport {
