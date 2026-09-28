@@ -1,7 +1,7 @@
 #![cfg(test)]
 extern crate std;
 
-use crate::{CraftNexusContract, CraftNexusContractClient};
+use crate::{CraftNexusContract, CraftNexusContractClient, Error};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::Client as TokenClient,
@@ -98,4 +98,51 @@ fn test_matured_deposits_remain_withdrawable() {
         remaining_stake, 500,
         "Matured deposit was blocked by the new deposit"
     );
+}
+
+// ── Issue #1366: get_stake_cooldown must tolerate missing storage ────────────
+
+/// The getter must return the typed `PlatformNotInitialized` error — instead of
+/// trapping the host — when the platform config key has never been written.
+/// This is the state a fresh deployment, an archived key, or a partial
+/// migration presents to callers.
+#[test]
+fn test_get_stake_cooldown_returns_error_when_config_missing() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Deliberately skip `initialize`: nothing has been written to
+    // `DataKey::PlatformConfig` yet.
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    let result = client.try_get_stake_cooldown();
+    assert_eq!(result, Err(Ok(Error::PlatformNotInitialized)));
+}
+
+/// Once initialized, the getter keeps returning the configured cooldown even
+/// after the stake lifecycle reaches a terminal (fully withdrawn) state.
+#[test]
+fn test_get_stake_cooldown_readable_after_terminal_stake_state() {
+    let (env, client, _, artisan, token) = setup_env();
+
+    const COOLDOWN: u32 = 86_400; // 1 day
+    client.set_stake_cooldown(&COOLDOWN);
+    assert_eq!(client.get_stake_cooldown(), COOLDOWN);
+
+    // Drive the artisan's stake to a terminal state: stake, wait out the
+    // cooldown, then withdraw everything.
+    client.stake_tokens(&artisan, &token.address, &1000);
+    let stake_time = env.ledger().timestamp();
+    env.ledger().set_timestamp(stake_time + COOLDOWN as u64 + 1);
+    client.unstake_tokens(&artisan, &token.address);
+    assert_eq!(
+        client.get_stake(&artisan),
+        0,
+        "stake should be fully withdrawn"
+    );
+
+    // The config entry is untouched by the staking lifecycle, so the getter
+    // must still return the configured value rather than an error.
+    assert_eq!(client.get_stake_cooldown(), COOLDOWN);
 }

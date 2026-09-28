@@ -13074,8 +13074,41 @@ impl CraftNexusContract {
     }
 
     /// Get the current stake cooldown period (in seconds).
-    pub fn get_stake_cooldown(env: Env) -> u32 {
-        Self::get_platform_config_internal(&env).stake_cooldown
+    ///
+    /// This read-only accessor never traps. When the platform configuration has
+    /// not been written yet (a fresh deployment, an archived key, or a partial
+    /// migration) it returns [`Error::PlatformNotInitialized`]; when the stored
+    /// bytes cannot be decoded it returns [`Error::CorruptedPlatformConfig`].
+    /// Callers therefore receive a typed, handleable error instead of a host panic.
+    pub fn get_stake_cooldown(env: Env) -> Result<u32, Error> {
+        // Primary location: the instance-storage config written by `initialize`.
+        if let Some(stored) = env
+            .storage()
+            .instance()
+            .get::<_, Val>(&DataKey::PlatformConfig)
+        {
+            let config = PlatformConfig::try_from_val(&env, &stored)
+                .map_err(|_| Error::CorruptedPlatformConfig)?;
+            env.storage()
+                .instance()
+                .extend_ttl(TTL_THRESHOLD, TTL_EXTENSION);
+            return Ok(config.stake_cooldown);
+        }
+
+        // Secondary location: the persistent mirror kept in sync by admin
+        // recovery. Reading it keeps the getter usable during a partial
+        // migration, and the TTL is extended on this hot read path instead of
+        // panicking when the key is absent.
+        if let Some(config) = env
+            .storage()
+            .persistent()
+            .get::<_, PlatformConfig>(&PLATFORM_FEE)
+        {
+            Self::extend_persistent_read(&env, &PLATFORM_FEE);
+            return Ok(config.stake_cooldown);
+        }
+
+        Err(Error::PlatformNotInitialized)
     }
 
     /// Admin sets the stake cooldown period (in seconds).
@@ -23067,8 +23100,41 @@ impl CraftNexusContract {
     }
 
     /// Get the current stake cooldown period (in seconds).
-    pub fn get_stake_cooldown(env: Env) -> u32 {
-        Self::get_platform_config_internal(&env).stake_cooldown
+    ///
+    /// This read-only accessor never traps. When the platform configuration has
+    /// not been written yet (a fresh deployment, an archived key, or a partial
+    /// migration) it returns [`Error::PlatformNotInitialized`]; when the stored
+    /// bytes cannot be decoded it returns [`Error::CorruptedPlatformConfig`].
+    /// Callers therefore receive a typed, handleable error instead of a host panic.
+    pub fn get_stake_cooldown(env: Env) -> Result<u32, Error> {
+        // Primary location: the instance-storage config written by `initialize`.
+        if let Some(stored) = env
+            .storage()
+            .instance()
+            .get::<_, Val>(&DataKey::PlatformConfig)
+        {
+            let config = PlatformConfig::try_from_val(&env, &stored)
+                .map_err(|_| Error::CorruptedPlatformConfig)?;
+            env.storage()
+                .instance()
+                .extend_ttl(TTL_THRESHOLD, TTL_EXTENSION);
+            return Ok(config.stake_cooldown);
+        }
+
+        // Secondary location: the persistent mirror kept in sync by admin
+        // recovery. Reading it keeps the getter usable during a partial
+        // migration, and the TTL is extended on this hot read path instead of
+        // panicking when the key is absent.
+        if let Some(config) = env
+            .storage()
+            .persistent()
+            .get::<_, PlatformConfig>(&PLATFORM_FEE)
+        {
+            Self::extend_persistent_read(&env, &PLATFORM_FEE);
+            return Ok(config.stake_cooldown);
+        }
+
+        Err(Error::PlatformNotInitialized)
     }
 
     /// Admin sets the stake cooldown period (in seconds).
