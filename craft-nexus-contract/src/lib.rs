@@ -682,6 +682,14 @@ pub enum DataKey {
     EmergencyOperationHistoryIndexed(u32),
     /// Count of currently active recurring escrows for conflict detection (#1072)
     ActiveRecurringCount,
+    /// Monotonically-incrementing per-escrow settlement nonce (#1113).
+    ///
+    /// Consumed atomically at the start of every dispute settlement path so that
+    /// each `SettlementReceipt` carries a unique identifier.  A receipt whose
+    /// `proposal_nonce` matches the current counter value cannot be replayed
+    /// because the nonce is incremented before the receipt is written and the
+    /// `has_settlement_receipt` guard prevents a second execution entirely.
+    SettlementNonce(u32),
 }
 
 /// Emergency operation kinds: the four types of critical control operations
@@ -5679,6 +5687,22 @@ impl CraftNexusContract {
         Ok(())
     }
 
+    /// Atomically consume the per-escrow settlement nonce (#1113).
+    ///
+    /// Reads the current nonce, writes back an incremented value, then returns
+    /// the *original* value to be embedded in the `SettlementReceipt`.  Because
+    /// this is called inside the atomic state-transition window (after the
+    /// `assert_no_prior_settlement` guard and before the receipt is written),
+    /// every successful settlement path receives a distinct nonce even if two
+    /// invocations race on different ledger edges.
+    fn consume_settlement_nonce(env: &Env, order_id: u32) -> u64 {
+        let key = DataKey::SettlementNonce(order_id);
+        let current: u64 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(&key, &(current + 1));
+        Self::extend_persistent(env, &key);
+        current
+    }
+
     fn assert_disputed_for_policy(escrow: &Escrow) -> Result<(), Error> {
         if escrow.status != EscrowStatus::Disputed {
             return Err(Error::InvalidEscrowState);
@@ -7653,7 +7677,7 @@ impl CraftNexusContract {
 
         let escrow = Self::claim_disputed_settlement(&env, order_id)
             .unwrap_or_else(|e| env.panic_with_error(e));
-        let escrow = Self::commit_resolved_escrow(&env, order_id, escrow, path, 0);
+        let escrow = Self::commit_resolved_escrow(&env, order_id, escrow, path, Self::consume_settlement_nonce(&env, order_id));
 
         Self::apply_fee_allocation_transfers(
             &env,
@@ -8066,7 +8090,7 @@ impl CraftNexusContract {
             order_id,
             escrow,
             SettlementPath::ArbitratedPartial,
-            0,
+            Self::consume_settlement_nonce(&env, order_id),
         );
 
         Self::apply_fee_allocation_transfers(
@@ -9232,31 +9256,22 @@ impl CraftNexusContract {
         let snapshot = snapshot_opt.unwrap();
 
         let config = Self::get_platform_config_internal(&env);
-        // The deadline guard: if the dispute is still within the allowed window
-        // the arbitrator must resolve it via `resolve_dispute`. Returning an
-        // error (rather than panicking) allows the caller to detect this case
-        // without rolling back unrelated ledger state.
-        if (initiated_at as u64) + config.max_dispute_duration as u64 > current_time {
-            return Err(Error::DisputeExpired);
-        }
+
+        // --- Checks ---
+        // assert_open_for_settlement verifies: no prior receipt + status == Disputed.
+        Self::assert_open_for_settlement(&env, &snapshot, order_id)?;
+        // assert_expired_dispute_window verifies: max_dispute_duration has elapsed.
+        Self::assert_expired_dispute_window(&env, &snapshot, &config)?;
 
         let operation_id = Self::onboarding_operation_id(&env, b"resolve_expired_dispute:", order_id);
-        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
-        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+        Self::authorize_onboarding_state(&env, &snapshot.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &snapshot.seller, operation_id, UserRole::Artisan);
 
-        // --- Effects (CEI: all writes before the token transfer) ---
-
-        // CRITICAL: Update status BEFORE external calls (CEI pattern)
-        escrow.status = EscrowStatus::Resolved;
-        env.storage().persistent().set(&(ESCROW, order_id), &escrow);
-
-        // Decrement active counts
-        Self::update_active_obligations(&env, &escrow.buyer, -1);
-        Self::update_active_obligations(&env, &escrow.seller, -1);
-
-        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
-        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
-        Self::update_total_locked(&env, &escrow.token, -escrow.amount);
+        // --- Effects (CEI: all writes committed before token transfers) ---
+        // Consume the per-escrow settlement nonce atomically (#1113).
+        // This must happen before claim_disputed_settlement so the nonce value
+        // embedded in the receipt is unique across every settlement path.
+        let nonce = Self::consume_settlement_nonce(&env, order_id);
 
         let fee_bps = Self::get_effective_fee_bps(env.clone(), snapshot.seller.clone());
         let settlement_kind = match config.expired_dispute_fee_policy {
@@ -9274,10 +9289,14 @@ impl CraftNexusContract {
         let allocation =
             Self::compute_fee_allocation(&env, snapshot.amount, fee_bps, settlement_kind);
 
+        // claim_disputed_settlement: Disputed → SettlementPending (atomic state guard).
+        // commit_resolved_escrow: SettlementPending → Resolved, writes receipt, decrements counters.
+        // Both helpers own the state machine transition; no manual mutations above.
         let escrow = Self::claim_disputed_settlement(&env, order_id)?;
         let escrow =
-            Self::commit_resolved_escrow(&env, order_id, escrow, SettlementPath::ExpiredDispute, 0);
+            Self::commit_resolved_escrow(&env, order_id, escrow, SettlementPath::ExpiredDispute, nonce);
 
+        // --- Interactions (token transfers happen only after state is terminal) ---
         Self::apply_fee_allocation_transfers(
             &env,
             &escrow,
