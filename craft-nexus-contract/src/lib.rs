@@ -40,6 +40,8 @@ mod pagination_boundary_test;
 #[cfg(test)]
 mod diagnostic_scan_test;
 #[cfg(test)]
+mod test_reset_observability_metrics_auth;
+#[cfg(test)]
 mod differential_upgrade_compatibility_test {
     use super::*;
 
@@ -14556,6 +14558,10 @@ impl CraftNexusContract {
     /// Monotonic counters are retained; off-chain tools should treat the new
     /// epoch as a fresh comparison baseline.
     pub fn reset_observability_metrics(env: Env) -> Result<(), Error> {
+        // The observability baseline is admin-gated value-bearing state, so an
+        // incident-response pause must reject the reset before anything is read or
+        // written (#1392).
+        Self::check_not_paused(&env);
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
         let epoch: u64 = env
@@ -14563,7 +14569,9 @@ impl CraftNexusContract {
             .persistent()
             .get::<Symbol, u64>(&OBSERVABILITY_RESET_EPOCH)
             .unwrap_or(0);
-        let next_epoch = epoch.saturating_add(1);
+        // A silently saturating epoch would let two different baselines share a
+        // value, so overflow is a hard error instead (#1392).
+        let next_epoch = epoch.checked_add(1).ok_or(Error::CounterOverflow)?;
         env.storage()
             .persistent()
             .set(&OBSERVABILITY_RESET_EPOCH, &next_epoch);
