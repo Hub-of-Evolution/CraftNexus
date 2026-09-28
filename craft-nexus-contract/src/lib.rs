@@ -12483,7 +12483,14 @@ impl CraftNexusContract {
         let current_stake = Self::get_stake(env.clone(), artisan.clone());
         let active_obligations = Self::get_active_obligation_count(env.clone(), artisan.clone());
 
-        let required_collateral = (active_obligations as i128) * config.min_stake_required;
+        // Checked math (#1359): an obligations × min_stake product that
+        // overflows i128 must not wrap — a wrap could invent a small or zero
+        // required collateral and let an unhealthy stake pass as cured.
+        // Saturating at i128::MAX maximizes the deficit, which steers every
+        // downstream gate (cure/flag/liquidate) in the reject direction.
+        let required_collateral = (active_obligations as i128)
+            .checked_mul(config.min_stake_required)
+            .unwrap_or(i128::MAX);
 
         let denominator = if required_collateral > 0 {
             required_collateral
@@ -12823,19 +12830,37 @@ impl CraftNexusContract {
 
     /// Artisan cures their liquidation by topping up their stake.
     ///
-    /// Any artisan in `UnderCollateralized`, `LiquidationEligible`, or `Liquidated`
+    /// The artisan must authorize the call. Any
+    /// artisan in `UnderCollateralized`, `LiquidationEligible`, or `Liquidated`
     /// status can call `stake_tokens` — once their stake meets or exceeds
     /// the required collateral, `cure_liquidation` transitions them back to
     /// `Healthy` and marks any open `LiquidationRecord` as cured.
     ///
     /// # Preconditions
+    /// - The contract must not be paused.
+    /// - The artisan must authorize the call.
     /// - The artisan must have a pending liquidation status (not Healthy).
+    ///
+    /// # Failure ordering
+    /// All validation (pause, auth, status, health) happens before any
+    /// storage write, so a rejected call leaves storage untouched.
     ///
     /// # Postconditions
     /// - If the artisan's stake now meets the required collateral, the status
     ///   transitions to `Healthy` and all open records are marked cured.
     /// - An event `stake_liquidation_cured` is emitted.
     pub fn cure_liquidation(env: Env, artisan: Address) -> Result<(), Error> {
+        // A paused platform must not accept state transitions (#1359).
+        // Cure is a mutation (it flips LiquidationStatus and rewrites
+        // LiquidationRecords), so unlike the pause/unpause entrypoint itself
+        // it is rejected while paused.
+        Self::check_not_paused(&env);
+
+        // Only the artisan themself may cure their liquidation (#1359).
+        // The artisan's signature gates the state transition, so an
+        // unauthorized caller can never flip the status or rewrite records.
+        artisan.require_auth();
+
         let current_status: LiquidationStatus = env
             .storage()
             .persistent()

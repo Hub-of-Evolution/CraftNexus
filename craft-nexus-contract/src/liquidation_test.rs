@@ -467,6 +467,156 @@ fn test_cure_liquidation_rejects_healthy_artisan() {
     assert!(result.is_err());
 }
 
+// ===== Cure Liquidation Auth / Pause Hardening (#1359) =====
+
+/// The artisan must authorize `cure_liquidation`: without their signature the
+/// call must trap with an auth error instead of flipping the status.
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_cure_liquidation_requires_authorization() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin) = setup_test(&env, true);
+
+    token_admin.mint(&seller, &100_000_000);
+    token_admin.mint(&buyer, &50_000_000);
+
+    client.set_min_stake_required(&10_000_000);
+    client.stake_tokens(&seller, &token_id, &6_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+
+    client.set_liquidation_policy(&5000, &0, &true);
+    client.evaluate_stake_health(&seller);
+    client.flag_liquidation_eligible(&seller);
+    client.trigger_liquidation(&seller);
+
+    // Top up so the cure would succeed if it were authorized.
+    client.stake_tokens(&seller, &token_id, &10_000_000);
+
+    // Drop every authorization: the cure must be rejected.
+    env.set_auths(&[]);
+    client.cure_liquidation(&seller);
+}
+
+/// `cure_liquidation` is rejected with `Error::ContractPaused` while the
+/// platform is paused, and the rejection leaves storage untouched: status,
+/// stake, token balance, record count, and the open liquidation record are
+/// all unchanged. After unpause the same call succeeds.
+#[test]
+fn test_cure_liquidation_rejected_when_paused_and_storage_unchanged() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin) = setup_test(&env, true);
+
+    token_admin.mint(&seller, &100_000_000);
+    token_admin.mint(&buyer, &50_000_000);
+
+    client.set_min_stake_required(&10_000_000);
+    client.stake_tokens(&seller, &token_id, &6_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+
+    client.set_liquidation_policy(&5000, &0, &true);
+    client.evaluate_stake_health(&seller);
+    client.flag_liquidation_eligible(&seller);
+    client.trigger_liquidation(&seller);
+
+    // Top up so the cure would succeed if the platform were not paused.
+    client.stake_tokens(&seller, &token_id, &10_000_000);
+
+    // Baseline state before the rejected attempt.
+    let token_client = token::Client::new(&env, &token_id);
+    let baseline_balance = token_client.balance(&seller);
+    let baseline_stake = client.get_stake(&seller);
+    let baseline_status = client.get_liquidation_status(&seller);
+    let baseline_record = client.get_liquidation_record(&0).unwrap();
+    let baseline_record_count = client.get_liquidation_record_count();
+    assert_eq!(baseline_status, LiquidationStatus::Liquidated);
+    assert!(!baseline_record.cured);
+
+    // Pause the platform and attempt the cure.
+    client.set_paused(&true);
+
+    let result = client.try_cure_liquidation(&seller);
+    match result {
+        // The rejected input must raise the specific ContractPaused variant.
+        Ok(Err(Error::ContractPaused)) => {}
+        other => panic!(
+            "expected Error::ContractPaused while paused, got {:?}",
+            other
+        ),
+    }
+
+    // Storage is unchanged after the rejection.
+    assert_eq!(token_client.balance(&seller), baseline_balance);
+    assert_eq!(client.get_stake(&seller), baseline_stake);
+    assert_eq!(
+        client.get_liquidation_status(&seller),
+        baseline_status,
+        "status must not change after a rejected cure"
+    );
+    let record_after = client.get_liquidation_record(&0).unwrap();
+    assert_eq!(record_after.cured, baseline_record.cured);
+    assert_eq!(record_after.cured_at, baseline_record.cured_at);
+    assert_eq!(
+        client.get_liquidation_record_count(),
+        baseline_record_count
+    );
+
+    // Unpause: the identical call now succeeds.
+    client.set_paused(&false);
+    client.cure_liquidation(&seller);
+    assert_eq!(
+        client.get_liquidation_status(&seller),
+        LiquidationStatus::Healthy
+    );
+    assert!(client.get_liquidation_record(&0).unwrap().cured);
+}
+
+/// The main rejected input for `cure_liquidation` — a top-up that still
+/// leaves the artisan under-collateralized — raises `Error::InsufficientStake`
+/// and leaves balances and the liquidation state unchanged.
+#[test]
+fn test_cure_liquidation_undercollateralized_raises_insufficient_stake() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin) = setup_test(&env, true);
+
+    token_admin.mint(&seller, &50_000_000);
+    token_admin.mint(&buyer, &50_000_000);
+
+    client.set_min_stake_required(&10_000_000);
+    client.stake_tokens(&seller, &token_id, &6_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+
+    client.set_liquidation_policy(&5000, &0, &true);
+    client.evaluate_stake_health(&seller);
+    client.flag_liquidation_eligible(&seller);
+    client.trigger_liquidation(&seller);
+
+    // Still 4M staked against a 10M requirement.
+    let token_client = token::Client::new(&env, &token_id);
+    let baseline_balance = token_client.balance(&seller);
+    let baseline_stake = client.get_stake(&seller);
+
+    let result = client.try_cure_liquidation(&seller);
+    match result {
+        Ok(Err(Error::InsufficientStake)) => {}
+        other => panic!(
+            "expected Error::InsufficientStake for an under-collateralized cure, got {:?}",
+            other
+        ),
+    }
+
+    // Balances and liquidation state are unchanged after the rejection.
+    assert_eq!(token_client.balance(&seller), baseline_balance);
+    assert_eq!(client.get_stake(&seller), baseline_stake);
+    assert_eq!(
+        client.get_liquidation_status(&seller),
+        LiquidationStatus::Liquidated
+    );
+    assert!(!client.get_liquidation_record(&0).unwrap().cured);
+}
+
 // ===== Unstake Blocking Tests =====
 
 #[test]
