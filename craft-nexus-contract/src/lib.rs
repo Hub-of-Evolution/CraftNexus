@@ -12526,14 +12526,18 @@ impl CraftNexusContract {
 
     /// Return the default or persisted liquidation policy.
     fn get_liquidation_policy_internal(env: &Env) -> LiquidationPolicyData {
-        env.storage()
-            .persistent()
-            .get(&DataKey::LiquidationPolicyConfig)
-            .unwrap_or(LiquidationPolicyData {
+        let key = DataKey::LiquidationPolicyConfig;
+        match env.storage().persistent().get(&key) {
+            Some(policy) => {
+                Self::extend_persistent_read(env, &key);
+                policy
+            }
+            None => LiquidationPolicyData {
                 max_seizure_bps: DEFAULT_LIQUIDATION_MAX_SEIZURE_BPS,
                 grace_period_secs: DEFAULT_LIQUIDATION_GRACE_PERIOD,
                 enabled: true,
-            })
+            },
+        }
     }
 
     /// Evaluate an artisan's collateral health deterministically at the
