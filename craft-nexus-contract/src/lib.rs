@@ -10349,7 +10349,10 @@ impl CraftNexusContract {
         }
         // Routed through `get_stored_escrow` so legacy storage layouts are
         // normalised the same way every settlement path normalises them.
-        let escrow = Self::get_stored_escrow(&env, order_id);
+        let escrow = match env.storage().persistent().get::<_, Escrow>(&(ESCROW, order_id)) {
+            Some(escrow) => escrow,
+            None => return false,
+        };
         if escrow.status != EscrowStatus::Disputed || Self::has_settlement_receipt(&env, order_id) {
             return false;
         }
