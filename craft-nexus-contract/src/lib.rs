@@ -14006,9 +14006,12 @@ impl CraftNexusContract {
     }
 
     pub fn get_reconciliation_report(env: Env, token: Address) -> Option<ReconciliationReport> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ReconciliationReport(token))
+        let key = DataKey::ReconciliationReport(token);
+        let report = env.storage().persistent().get(&key);
+        if report.is_some() {
+            Self::extend_persistent_read(&env, &key);
+        }
+        report
     }
 
     /// Pure read-only query to compute a reconciliation report on demand.

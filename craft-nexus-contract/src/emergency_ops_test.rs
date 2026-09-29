@@ -146,6 +146,18 @@ fn test_reconciliation_is_bounded_and_blocks_unresolved_sweep() {
 }
 
 #[test]
+fn test_get_reconciliation_report_handles_missing_and_completed_report() {
+    let (_env, client, _buyer, _seller, token, _token_admin, _wallet, _admin) =
+        setup_emergency_env();
+
+    assert_eq!(client.get_reconciliation_report(&token), None);
+
+    let report = client.reconcile_token(&token, &0, &1).unwrap();
+    assert!(report.complete);
+    assert_eq!(client.get_reconciliation_report(&token), Some(report));
+}
+
+#[test]
 fn test_repair_plan_requires_approval_and_is_idempotent() {
     let (env, client, buyer, seller, token, token_admin, wallet, admin) =
         setup_emergency_env();
