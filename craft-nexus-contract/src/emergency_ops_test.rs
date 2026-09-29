@@ -6,9 +6,11 @@ use soroban_sdk::{
     token, Address, BytesN, Env, Symbol,
 };
 
+
 fn setup_emergency_env() -> (
     Env,
     CraftNexusContractClient<'static>,
+    Address,
     Address,
     Address,
     Address,
@@ -65,6 +67,20 @@ fn setup_emergency_env() -> (
         platform_wallet,
         admin,
     )
+}
+
+#[test]
+fn test_is_paused_safe_when_storage_missing() {
+    let env = Env::default();
+    env.budget().reset_unlimited();
+    env.mock_all_auths();
+
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    // Before any initialization or pause record exists, is_paused must not trap.
+    let paused = client.is_paused();
+    assert!(!paused);
 }
 
 #[test]
