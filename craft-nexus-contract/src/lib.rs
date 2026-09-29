@@ -78,6 +78,9 @@ mod stake_cooldown_test; // Add this line
 mod staking;
 #[cfg(test)]
 mod sweep_allowance_test;
+
+#[cfg(test)]
+mod upgrade_snapshot_test;
 #[cfg(test)]
 mod test;
 #[cfg(test)]
@@ -2032,6 +2035,24 @@ pub struct UpgradeStateSnapshot {
     pub upgrade_threshold: u32,
     pub paused: bool,
     pub onboarding_configured: bool,
+    /// #1137: explicit storage-layout version (records schema).
+    pub storage_layout_version: u32,
+    /// #1137: length of the versioned WASM upgrade history.
+    pub upgrade_history_len: u32,
+    /// #1137: deterministic cumulative escrow volume (`TotalVolume`).
+    pub total_locked: i128,
+    /// #1137: number of whitelisted tokens (permission surface).
+    pub whitelisted_token_count: u32,
+    /// #1137: number of addresses authorized to co-sign upgrades.
+    pub upgrade_signer_count: u32,
+    /// #1137: number of pending admin actions queued in the timelock.
+    pub pending_admin_action_count: u32,
+    /// #1137: number of recurring escrow records created.
+    pub recurring_escrow_count: u32,
+    /// #1137: whether any batch escrow job has been persisted.
+    pub pending_batch_job_count: u32,
+    /// #1137: whether a WASM upgrade proposal is currently open.
+    pub has_pending_upgrade_proposal: bool,
 }
 
 /// Immutable per-round state for the multi-sig upgrade approval flow.
@@ -8547,6 +8568,30 @@ impl CraftNexusContract {
     /// isolated old/new differential run.
     pub fn get_upgrade_state_snapshot(env: Env) -> UpgradeStateSnapshot {
         let config = Self::get_platform_config_internal(&env);
+        let upgrade_history = Self::get_upgrade_history(env.clone());
+        let upgrade_signers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UpgradeSigners)
+            .unwrap_or_else(|| Vec::new(&env));
+        let pending_admin_actions = Self::get_pending_admin_actions(env.clone());
+        let recurring_escrow_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RecurringEscrowCount)
+            .unwrap_or(0);
+        let has_pending_upgrade_proposal: bool = env
+            .storage()
+            .persistent()
+            .has(&DataKey::WasmUpgradeProposal);
+        // Batch escrow jobs are persisted under a monotonic `next_batch_id`
+        // counter; the pending-job surface is the presence of any job.
+        let next_batch_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&Symbol::new(&env, "next_batch_id"))
+            .unwrap_or(0);
+        let pending_batch_job_count: u32 = if next_batch_id > 1 { 1 } else { 0 };
         UpgradeStateSnapshot {
             contract_version: Self::get_version(env.clone()),
             escrow_count: env
@@ -8565,6 +8610,15 @@ impl CraftNexusContract {
                 .storage()
                 .persistent()
                 .has(&DataKey::OnboardingContractAddress),
+            storage_layout_version: Self::get_storage_layout_version(env.clone()),
+            upgrade_history_len: upgrade_history.len(),
+            total_locked: Self::get_total_volume(&env),
+            whitelisted_token_count: Self::get_whitelisted_token_count(env.clone()),
+            upgrade_signer_count: upgrade_signers.len(),
+            pending_admin_action_count: pending_admin_actions.len(),
+            recurring_escrow_count,
+            pending_batch_job_count,
+            has_pending_upgrade_proposal,
         }
     }
 
