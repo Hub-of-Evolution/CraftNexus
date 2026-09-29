@@ -541,3 +541,55 @@ fn test_expired_dispute_cannot_be_resolved_through_another_path() {
     assert_eq!(client.get_escrow(&order_id).status, EscrowStatus::Resolved);
     assert!(client.try_resolve_expired_dispute(&order_id).is_err());
 }
+
+#[test]
+fn test_propose_partial_refund_unauthorized_leaves_storage_untouched() {
+    let (env, client, buyer, seller, token_addr, _, _, _, _) = setup_test();
+    let order_id = 77u32;
+    create_and_dispute_escrow(&client, &buyer, &seller, &token_addr, 1_000_000, order_id);
+
+    let token_client = token::Client::new(&env, &token_addr);
+    let buyer_before = token_client.balance(&buyer);
+    let seller_before = token_client.balance(&seller);
+
+    let stranger = Address::generate(&env);
+    let result = client.try_propose_partial_refund(&order_id, &100_000, &stranger);
+    assert!(
+        matches!(result, Err(Ok(crate::Error::Unauthorized))),
+        "stranger propose must raise Unauthorized, got {:?}",
+        result
+    );
+
+    assert_eq!(token_client.balance(&buyer), buyer_before);
+    assert_eq!(token_client.balance(&seller), seller_before);
+    // No proposal was persisted: a legitimate propose still succeeds instead
+    // of raising ProposalAlreadyExists.
+    client.propose_partial_refund(&order_id, &100_000, &buyer);
+}
+
+#[test]
+fn test_propose_partial_refund_rejected_while_paused() {
+    let (env, client, buyer, seller, token_addr, _, _, _, _) = setup_test();
+    let order_id = 78u32;
+    create_and_dispute_escrow(&client, &buyer, &seller, &token_addr, 1_000_000, order_id);
+
+    let token_client = token::Client::new(&env, &token_addr);
+    let buyer_before = token_client.balance(&buyer);
+    let seller_before = token_client.balance(&seller);
+
+    client.set_paused(&true);
+    assert!(client.is_paused());
+
+    let result = client.try_propose_partial_refund(&order_id, &100_000, &buyer);
+    assert!(
+        matches!(result, Err(Ok(crate::Error::ContractPaused))),
+        "paused propose must raise ContractPaused, got {:?}",
+        result
+    );
+
+    assert_eq!(token_client.balance(&buyer), buyer_before);
+    assert_eq!(token_client.balance(&seller), seller_before);
+
+    client.set_paused(&false);
+    client.propose_partial_refund(&order_id, &100_000, &buyer);
+}
