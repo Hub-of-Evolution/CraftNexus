@@ -160,7 +160,6 @@ fn assert_typed_error<T, C>(
 fn pending_dispute_exposes_a_final_deadline() {
     let h = Harness::new();
     h.dispute(1);
-
     let deadline = h.escrow.get_dispute_final_deadline(&1);
     assert_eq!(
         deadline,
@@ -185,6 +184,47 @@ fn pending_dispute_exposes_a_final_deadline() {
     );
     assert!(!status.is_timed_out);
     assert!(!status.is_finalized);
+}
+
+#[test]
+fn timeout_settlement_requires_admin_authorization_without_changing_state() {
+    let h = Harness::new();
+    h.dispute(1);
+    h.warp_to(DEFAULT_MAX_DISPUTE_DURATION as u64);
+
+    let escrow_before = h.escrow.get_escrow(&1);
+    let buyer_before = h.balance(&h.buyer);
+    let seller_before = h.balance(&h.seller);
+
+    let result = h
+        .escrow
+        .mock_auths(&[])
+        .try_resolve_expired_dispute(&1);
+
+    assert!(result.is_err(), "missing admin authorization must be rejected");
+    assert_eq!(h.escrow.get_escrow(&1), escrow_before);
+    assert_eq!(h.balance(&h.buyer), buyer_before);
+    assert_eq!(h.balance(&h.seller), seller_before);
+}
+
+#[test]
+fn timeout_settlement_is_rejected_while_platform_is_paused() {
+    let h = Harness::new();
+    h.dispute(1);
+    h.warp_to(DEFAULT_MAX_DISPUTE_DURATION as u64);
+    h.escrow.set_paused(&true);
+
+    let escrow_before = h.escrow.get_escrow(&1);
+    let buyer_before = h.balance(&h.buyer);
+    let seller_before = h.balance(&h.seller);
+
+    assert_typed_error(
+        h.escrow.try_resolve_expired_dispute(&1),
+        Error::ContractPaused,
+    );
+    assert_eq!(h.escrow.get_escrow(&1), escrow_before);
+    assert_eq!(h.balance(&h.buyer), buyer_before);
+    assert_eq!(h.balance(&h.seller), seller_before);
 }
 
 #[test]

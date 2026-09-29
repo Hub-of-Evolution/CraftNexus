@@ -3387,10 +3387,9 @@ impl CraftNexusContract {
                 .unwrap_or_else(|| env.panic_with_error(Error::CounterOverflow))
         } else {
             let subtract = (-delta) as u32;
-            if subtract > count {
-                env.panic_with_error(Error::CounterUnderflow);
-            }
-            count - subtract
+            count
+                .checked_sub(subtract)
+                .unwrap_or_else(|| env.panic_with_error(Error::CounterUnderflow))
         };
         env.storage().persistent().set(&key, &new_val);
         Self::extend_persistent(env, &key);
@@ -3406,10 +3405,9 @@ impl CraftNexusContract {
                 .unwrap_or_else(|| env.panic_with_error(Error::CounterOverflow))
         } else {
             let subtract = (-delta) as u32;
-            if subtract > count {
-                env.panic_with_error(Error::CounterUnderflow);
-            }
-            count - subtract
+            count
+                .checked_sub(subtract)
+                .unwrap_or_else(|| env.panic_with_error(Error::CounterUnderflow))
         };
         env.storage().persistent().set(&key, &new_val);
         Self::extend_persistent(env, &key);
@@ -3675,7 +3673,9 @@ impl CraftNexusContract {
             if sub_amount > current {
                 env.panic_with_error(Error::CounterUnderflow);
             }
-            current - sub_amount
+            current
+                .checked_sub(sub_amount)
+                .unwrap_or_else(|| env.panic_with_error(Error::CounterUnderflow))
         };
         env.storage().persistent().set(&key, &new_total);
         Self::extend_persistent(env, &key);
@@ -6985,7 +6985,9 @@ impl CraftNexusContract {
             // ── Normal release: platform fee from seller's share ──────────────
             SettlementKind::ReleaseFunds => {
                 let platform_fee = Self::calculate_fee(env, escrow_amount, fee_bps);
-                let seller_amount = escrow_amount - platform_fee;
+                let seller_amount = escrow_amount
+                    .checked_sub(platform_fee)
+                    .unwrap_or_else(|| env.panic_with_error(crate::Error::InvalidFee));
                 FeeAllocation {
                     platform_fee,
                     seller_amount,
@@ -7013,7 +7015,9 @@ impl CraftNexusContract {
             // ── Expired dispute – fee deducted from buyer's refund ────────────
             SettlementKind::ExpiredDisputeDeductFromBuyer => {
                 let platform_fee = Self::calculate_fee(env, escrow_amount, fee_bps);
-                let buyer_amount = escrow_amount - platform_fee;
+                let buyer_amount = escrow_amount
+                    .checked_sub(platform_fee)
+                    .unwrap_or_else(|| env.panic_with_error(crate::Error::InvalidFee));
                 FeeAllocation {
                     platform_fee,
                     seller_amount: 0,
@@ -7026,7 +7030,9 @@ impl CraftNexusContract {
                 let full_fee = Self::calculate_fee(env, escrow_amount, fee_bps);
                 // Integer division: any remainder (odd-bps rounding) stays with buyer.
                 let platform_fee = full_fee / 2;
-                let buyer_amount = escrow_amount - platform_fee;
+                let buyer_amount = escrow_amount
+                    .checked_sub(platform_fee)
+                    .unwrap_or_else(|| env.panic_with_error(crate::Error::InvalidFee));
                 FeeAllocation {
                     platform_fee,
                     seller_amount: 0,
@@ -7049,9 +7055,12 @@ impl CraftNexusContract {
                 // Seller-side fee only: buyer receives the gross refund; the
                 // platform fee is taken exclusively from the seller remainder.
                 let platform_fee = Self::calculate_fee(env, seller_gross, fee_bps);
+                let seller_amount = seller_gross
+                    .checked_sub(platform_fee)
+                    .unwrap_or_else(|| env.panic_with_error(crate::Error::InvalidFee));
                 FeeAllocation {
                     platform_fee,
-                    seller_amount: seller_gross - platform_fee,
+                    seller_amount,
                     buyer_amount: refund_gross,
                 }
             }
@@ -11984,13 +11993,11 @@ impl CraftNexusContract {
     /// This is the **safety-net exit** from the `Disputed` state. When the
     /// designated arbitrator does not call `resolve_dispute` before the
     /// `max_dispute_duration` deadline (measured from `dispute_initiated_at`),
-    /// any account — including bots and the disputing parties themselves — can
-    /// call this function to unblock the locked funds.
+    /// the platform admin can call this function to unblock the locked funds.
     ///
-    /// Unlike `resolve_dispute`, this path does not require authorization and
-    /// does not consult the arbitrator. The outcome is fully determined by the
-    /// operator-configured `expired_dispute_fee_policy` (see
-    /// [`Self::update_expired_dispute_policy`]).
+    /// Unlike `resolve_dispute`, this path does not consult the arbitrator. The
+    /// outcome is fully determined by the operator-configured
+    /// `expired_dispute_fee_policy` (see [`Self::update_expired_dispute_policy`]).
     ///
     /// ## Fee policies
     ///
@@ -12018,17 +12025,19 @@ impl CraftNexusContract {
     ///   settlement receipt; a timed-out dispute cannot be resolved twice (#1080).
     /// * [`Error::DisputeExpired`] — the `max_dispute_duration` deadline has **not**
     ///   yet passed; the regular `resolve_dispute` path must be used instead.
-    /// * [`Error::SettlementAlreadyFinalized`] — another settlement path already ran.
+    /// * [`Error::ContractPaused`] — the platform is paused.
     pub fn resolve_expired_dispute(env: Env, order_id: u32) -> Result<(), Error> {
+        Self::check_not_paused(&env);
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
         let _guard = ReentryGuardScope::new(&env);
+
         let snapshot_opt: Option<Escrow> = env.storage().persistent().get(&(ESCROW, order_id));
         let snapshot = match snapshot_opt {
             Some(escrow) => escrow,
             None => return Err(Error::EscrowNotFound),
         };
-        Self::extend_persistent(&env, &(ESCROW, order_id));
 
-        let config = Self::get_platform_config_internal(&env);
         let current_time = env.ledger().timestamp();
 
         // A dispute has exactly one terminal settlement. `assert_open_for_settlement`
