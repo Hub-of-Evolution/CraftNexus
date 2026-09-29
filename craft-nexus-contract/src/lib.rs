@@ -1,1 +1,152 @@
-dXNlIHNvcm9iYW5fc3RkOjp7YWRkcmVzcywgYWRkcmVzc19wYXlsb2FkLCBhc3NlcnRfZXEsIGFzc2VydF9uZSwgZW52LCBzeW1ib2xfZXJyb3IsIEVudmlyb25tZW50LCBTdHJpbmd9OwoKLy8vIEVycm9yIHR5cGUgcmV0dXJuZWQgYnkgY29udHJhY3QgZW50cnkgcG9pbnRzLgojW3Nvcm9iYW5fc3RkOjpjb250cmFjdGVycm9yXQojW2Rlcml2ZShDbG9uZSwgRGVidWcsIEVxLCBQYXJ0aWFsRXEsIFBhcnRpYWxPcmQpXQpwdWIgZW51bSBFcnJvciB7CiAgICAvLy8gVGhlIGRpc3B1dGVkIG9yZGVyIGhhcyBubyBwZXJzaXN0ZWQgZXZpZGVuY2UgY2hhbGxlbmdlIHdpbmRvdy4KICAgIEV2aWRlbmNlQ2hhbGxlbmdlTm90Rm91bmQgPSAxLAogICAgLy8vIFRoZSBvcmRlciBpcyBub3QgaW4gYSBkaXNwdXRlZCBzdGF0ZS4KICAgIE9yZGVyTm90RGlzcHV0ZWQgPSAyLAogICAgLy8vIFRoZSBvcmRlciBpcyBhbHJlYWR5IGluIGEgdGVybWluYWwgc3RhdGUuCiAgICBPcmRlckFscmVhZHlUZXJtaW5hbCA9IDMsCiAgICAvLy8gVGhlIG9yZGVyIGlkIGRvZXMgbm90IGV4aXN0LgogICAgT3JkZXJOb3RGb3VuZCA9IDQsCn0KCi8vLyBTdG9yYWdlIGtleSBmb3IgdGhlIHBlcnNpc3RlZCBldmlkZW5jZSBjaGFsbGVuZ2Ugd2luZG93IG9mIGFuIG9yZGVyLgpjb25zdCBFVklERU5DRV9DSEFMTEVOR0VfS0VZOiBzeW1ib2wgPSBzeW1ib2xfZXJyb3IoImV2X2NoYWxsZW5nZSIpOwoKLy8vIFN0b3JhZ2Uga2V5IGZvciB0aGUgb3JkZXIgc3RhdGUuCmNvbnN0IE9SREVSX1NUQVRFX0tFWTogc3ltYm9sID0gc3ltYm9sX2Vycm9yKCJvcmRlcl9zdGF0ZSIpOwoKLy8vIE1hcmtlciB2YWx1ZSBmb3IgYSB0ZXJtaW5hbCBvcmRlciBzdGF0ZS4KY29uc3QgVEVSTUlOQUxfU1RBVEU6IHUzMiA9IDk5OTk7CgovLy8gUmV0dXJuIHRoZSBwZXJzaXN0ZWQgZXZpZGVuY2UgY2hhbGxlbmdlIHdpbmRvdyBmb3IgYSBkaXNwdXRlZCBvcmRlci4KLy8vCi8vLyBUaGlzIGZ1bmN0aW9uIGlzIHNhZmUgdG8gY2FsbCBhZnRlciBhcmNoaXZhbCwgYSBwYXJ0aWFsIG1pZ3JhdGlvbiwgb3Igd2hlbiB0aGUKLy8vIGtleSBpcyBzaW1wbHkgbWlzc2luZy4gSXQgbmV2ZXIgcGFuaWNzIGFuZCBuZXZlciBwZXJmb3JtcyBhbiB1bmJvdW5kZWQgc2NhbjsgaXQKLy8vIHJldHVybnMgdGhlIHR5cGVkIGBFcnJvcmAgdmFyaWFudCB0aGF0IG1hdGNoZXMgdGhlIGFic2VudCByZWNvcmQuCi8vLwovLy8gIEFyZ3VtZW50cwo vLy8gICogYGVudmAgLSB0aGUgY29udHJhY3QgZW52aXJvbm1lbnQuCi8vLyAgKiBgb3JkZXJfaWRgIC0gdGhlIGlkIG9mIHRoZSBkaXNwdXRlZCBvcmRlci4KLy8vCi8vLyAgUmV0dXJucwo vLy8gICogYE9rKHVuZGVmaW5lZClgIHdoZW4gdGhlIGNoYWxsZW5nZSB3aW5kb3cgaXMgcGVyc2lzdGVkLgovLy8gICogYEVycmB3aXRoIGBFcnJvckV2aWRlbmNlQ2hhbGxlbmdlTm90Rm91bmRgIHdoZW4gdGhlIGtleSBpcyBhYnNlbnQuCi8vLyAgKiBgRXJyYCB3aXRoIGBPcmRlck5vdEZvdW5kYCB3aGVuIHRoZSBvcmRlciBpcyB1bmtub3duLgovLy8gICogYEVycmB3aXRoIGBPcmRlckFscmVhZHlUZXJtaW5hbGAgd2hlbiB0aGUgb3JkZXIgaXMgdGVybWluYWwuCnB1YiBmbiBnZXRfZXZpZGVuY2VfY2hhbGxlbmdlKGVudjogRW52aXJvbm1lbnQsIG9yZGVyX2lkOiB1NjQpIC0+IFJlc3VsdDx1NjQsIEVycm9yPiB7CiAgICAvLy8gUmVhZCB0aGUgb3JkZXIgc3RhdGUgZmlyc3Qgc28gd2UgY2FuIGRpc3Rpbmd1aXNoIGFuIGFic2VudCBvcmRlciBmcm9tIGFuCiAgICAvLy8gYWJzZW50IGNoYWxsZW5nZSByZWNvcmQuIFdlIGV4dGVuZCB0aGUgcmVhZCBUVEwgb24gdGhpcyBob3QgcGVyc2lzdGVudCBrZXkuCiAgICBsZXQgc3RhdGVfa2V5ID0gKE9SREVSX1NUQVRFX0tFWSwgb3JkZXJfaWQpOwogICAgbGV0IHN0YXRlOiB1MzIgPSBlbnYKICAgICAgICAuc3RvcmFnZSgpCiAgICAgICAgLnBlcnNpc3RlbnQoKQogICAgICAgIC5nZXQoJnN0YXRlX2tleSkKICAgICAgICAuZXh0ZW5kX3BlcnNpc3RlbnRfcmVhZCgxMDAsIDEwMCkKICAgICAgICAub2soKQogICAgICAgIC5mbGF0dGVuKCkKICAgICAgICAub2tfb3IoRXJyb3I6Ok9yZGVyTm90Rm91bmQpPzsKCiAgICBpZiBzdGF0ZSA9PSBURVJNSU5BTF9TVEFURSB7CiAgICAgICAgcmV0dXJuIEVycihFcnJvcjo6T3JkZXJBbHJlYWR5VGVybWluYWwpOwogICAgfQoKICAgIC8vLyBSZWFkIHRoZSBjaGFsbGVuZ2Ugd2luZG93IHdpdGggYSBib3VuZGVkIFRUTCBleHRlbnNpb24uIEEgbWlzc2luZyBrZXkgaXMgYQogICAgLy8vIG5vcm1hbCBjbGllbnQgZXJyb3IsIG5vdCBhIGhvc3QgcGFuaWMuCiAgICBsZXQgY2hhbGxlbmdlX2tleSA9IChFVklERU5DRV9DSEFMTEVOR0VfS0VZLCBvcmRlcl9pZCk7CiAgICBlbnYKICAgICAgICAuc3RvcmFnZSgpCiAgICAgICAgLnBlcnNpc3RlbnQoKQogICAgICAgIC5nZXQoJmNoYWxsZW5nZV9rZXkpCiAgICAgICAgLmV4dGVuZF9wZXJzaXN0ZW50X3JlYWQoMTAwLCAxMDApCiAgICAgICAgLm9rKCkKICAgICAgICAuZmxhdHRlbigpCiAgICAgICAgLm9rX29yKEVycm9yOjpFdmlkZW5jZUNoYWxsZW5nZU5vdEZvdW5kKQp9CgovLy8gUGVyc2lzdCB0aGUgZXZpZGVuY2UgY2hhbGxlbmdlIHdpbmRvdyBmb3IgYSBkaXNwdXRlZCBvcmRlci4KLy8vCi8vLyBUaGlzIGlzIHRoZSB3cml0ZSBzaWRlIHRoYXQgdGhlIHRlc3RzIGV4ZXJjaXNlIGJlZm9yZSBjYWxsaW5nCi8vLyBgZ2V0X2V2aWRlbmNlX2NoYWxsZW5nZWAuCnB1YiBmbiBzZXRfZXZpZGVuY2VfY2hhbGxlbmdlKGVudjogRW52aXJvbm1lbnQsIG9yZGVyX2lkOiB1NjQsIHdpbmRvdzogdTY0KSB7CiAgICBsZXQga2V5ID0gKEVWSURFTkNFX0NIQUxMRU5HRV9LRVksIG9yZGVyX2lkKTsKICAgIGVudgogICAgICAgIC5zdG9yYWdlKCkKICAgICAgICAucGVyc2lzdGVudCgpCiAgICAgICAgLnNldCgma2V5LCAmd2luZG93KTsKfQoKLy8vIFBlcnNpc3QgdGhlIG9yZGVyIHN0YXRlLiBUZXJtaW5hbCBzdGF0ZXMgYXJlIHJlcHJlc2VudGVkIGJ5IGBURVJNSU5BTF9TVEFURWAuCnB1YiBmbiBzZXRfb3JkZXJfc3RhdGUoZW52OiBFbnZpcm9ubWVudCwgb3JkZXJfaWQ6IHU2NCwgc3RhdGU6IHUzMikgewogICAgbGV0IGtleSA9IChPUkRFUl9TVEFURV9LRVksIG9yZGVyX2lkKTsKICAgIGVudgogICAgICAgIC5zdG9yYWdlKCkKICAgICAgICAucGVyc2lzdGVudCgpCiAgICAgICAgLnNldCgma2V5LCAmc3RhdGUpOwp9CgojW2NvbmZpZ10KcHVibGljIGZuIG1haW4oKSB7fQoKI1tjZmddCnRlc3QgbW9kdWxlIHRlc3QgewogICAgdXNlIHN1cGVyOjoqOwogICAgdXNlIHNvcm9iYW5fc3RkOjp7YWRkcmVzcywgRW52aXJvbm1lbnR9OwoKICAgIGZuIHNldHVwKCkgLT4gKEVudmlyb25tZW50LCBhZGRyZXNzOjpBZGRyZXNzKSB7CiAgICAgICAgbGV0IGVudiA9IEVudmlyb25tZW50OjpkZWZhdWx0KCk7CiAgICAgICAgbGV0IGNvbnRyYWN0X2lkID0gYWRkcmVzcy5nZW5lcmF0ZSgpOwogICAgICAgIGVudi5yZWdpc3Rlcihjb250cmFjdF9pZCwgKCkpOwogICAgICAgIChlbnYsIGNvbnRyYWN0X2lkKQogICAgfQoKICAgIC8vLyBUaGUgbWlzc2luZy1rZXkgcGF0aCBtdXN0IG5vdCB0cmFwIGFuZCBtdXN0IHJldHVybiB0aGUgdHlwZWQgZXJyb3IuCiAgICAjW3Rlc3RdCiAgICBmbiBnZXRfZXZpZGVuY2VfY2hhbGxlbmdlX21pc3Npbmdfa2V5X3JldHVybnNfZXJyb3IoKSB7CiAgICAgICAgbGV0IChlbnYsIGNvbnRyYWN0X2lkKSA9IHNldHVwKCk7CiAgICAgICAgZW52LmFzX2NvbnRyYWN0KGNvbnRyYWN0X2lkLCB8fCB7CiAgICAgICAgICAgIC8vIE5vIG9yZGVyIHN0YXRlIGFuZCBubyBjaGFsbGVuZ2UgcmVjb3JkIGV4aXN0cyB5ZXQuCiAgICAgICAgICAgIGxldCByZXN1bHQgPSBnZXRfZXZpZGVuY2VfY2hhbGxlbmdlKGVudi5jbG9uZSgpLCA3Nyk7CiAgICAgICAgICAgIGFzc2VydF9lcSEocmVzdWx0LCBFcnIoRXJyb3I6Ok9yZGVyTm90Rm91bmQpKTsKICAgICAgICB9KTsKICAgIH0KCiAgICAvLy8gQW4gb3JkZXIgd2l0aCBhIG1pc3NpbmcgY2hhbGxlbmdlIHJlY29yZCBtdXN0IHJldHVybiB0aGUgZGVkaWNhdGVkIGVycm9yLgogICAgI1t0ZXN0XQogICAgZm4gZ2V0X2V2aWRlbmNlX2NoYWxsZW5nZV9taXNzaW5nX3JlY29yZF9yZXR1cm5zX2Vycm9yKCkgewogICAgICAgIGxldCAoZW52LCBjb250cmFjdF9pZCkgPSBzZXR1cCgpOwogICAgICAgIGVudi5hc19jb250cmFjdChjb250cmFjdF9pZCwgfHwgewogICAgICAgICAgICAvLyBPcmRlciBleGlzdHMgYnV0IGlzIG5vdCB0ZXJtaW5hbCBhbmQgaGFzIG5vIGNoYWxsZW5nZSByZWNvcmQuCiAgICAgICAgICAgIHNldF9vcmRlcl9zdGF0ZShlbnYuY2xvbmUoKSwgNDIsIDEpOwogICAgICAgICAgICBsZXQgcmVzdWx0ID0gZ2V0X2V2aWRlbmNlX2NoYWxsZW5nZShlbnYuY2xvbmUoKSwgNDIpOwogICAgICAgICAgICBhc3NlcnRfZXEoCiAgICAgICAgICAgICAgICByZXN1bHQsCiAgICAgICAgICAgICAgICBFcnIoRXJyb3I6OkV2aWRlbmNlQ2hhbGxlbmdlTm90Rm91bmQpLAogICAgICAgICAgICApOwogICAgICAgIH0pOwogICAgfQoKICAgIC8vLyBBZnRlciBhIHRlcm1pbmFsIHN0YXRlIHRoZSBjYWxsIG11c3QgcmV0dXJuIHRoZSB0ZXJtaW5hbCBlcnJvciwgbm90IHRyYXAuCiAgICAjW3Rlc3RdCiAgICBmbiBnZXRfZXZpZGVuY2VfY2hhbGxlbmdlX3Rlcm1pbmFsX3JldHVybnNfZXJyb3IoKSB7CiAgICAgICAgbGV0IChlbnYsIGNvbnRyYWN0X2lkKSA9IHNldHVwKCk7CiAgICAgICAgZW52LmFzX2NvbnRyYWN0KGNvbnRyYWN0X2lkLCB8fCB7CiAgICAgICAgICAgIHNldF9vcmRlcl9zdGF0ZShlbnYuY2xvbmUoKSwgOTksIFRFUk1JTkFMX1NUQVRFKTsKICAgICAgICAgICAgbGV0IHJlc3VsdCA9IGdldF9ldmlkZW5jZV9jaGFsbGVuZ2UoZW52LmNsb25lKCksIDk5KTsKICAgICAgICAgICAgYXNzZXJ0X2VxKHJlc3VsdCwgRXJyKEVycm9yOjpPcmRlckFscmVhZHlUZXJtaW5hbCkpOwogICAgICAgIH0pOwogICAgfQoKICAgIC8vLyBUaGUgaGFwcHkgcGF0aCByZXR1cm5zIHRoZSBwZXJzaXN0ZWQgY2hhbGxlbmdlIHdpbmRvdy4KICAgICNbdGVzdF0KICAgIGZuIGdldF9ldmlkZW5jZV9jaGFsbGVuZ2VfcmV0dXJuc193aW5kb3coKSB7CiAgICAgICAgbGV0IChlbnYsIGNvbnRyYWN0X2lkKSA9IHNldHVwKCk7CiAgICAgICAgZW52LmFzX2NvbnRyYWN0KGNvbnRyYWN0X2lkLCB8fCB7CiAgICAgICAgICAgIHNldF9vcmRlcl9zdGF0ZShlbnYuY2xvbmUoKSwgNywgMSk7CiAgICAgICAgICAgIHNldF9ldmlkZW5jZV9jaGFsbGVuZ2UoZW52LmNsb25lKCksIDcsIDg2NDAwKTsKICAgICAgICAgICAgbGV0IHJlc3VsdCA9IGdldF9ldmlkZW5jZV9jaGFsbGVuZ2UoZW52LmNsb25lKCksIDcpOwogICAgICAgICAgICBhc3NlcnRfZXEocmVzdWx0LCBPayg4NjQwMCkpOwogICAgICAgIH0pOwogICAgfQp9Cg==
+use soroban_std::{address, contract, contractimpl, Env};
+
+/// Error types returned by the craft-nexus contract.
+///
+/// The evidence challenge lookup returns `Error::NotFound` when the
+/// persisted challenge window is missing (see #942).
+#[contracterror]
+#[sorban_std::contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrder, HASH)]
+#[representation(uint32)]
+pub enum Error {
+    /// The requested evidence challenge record does not exist.
+    NotFound = 1,
+    /// The order is not in a disputed state.
+    NotDisputed = 2,
+    /// The challenge window has already closed.
+    ChallengeClosed = 3,
+    /// The order identifier is invalid.
+    InvalidOrder = 4,
+}
+
+/// Typed challenge window persisted for a disputed order.
+#[contracttype]
+#[sorban_std::contracttype]
+#[derive(Clone, Debug, Eq, PartialEq, PartialOrder)]
+pub struct EvidenceChallenge {
+    /// Ledger timestamp at which the challenge window opened.
+    pub opened_at: u64,
+    /// Ledger timestamp at which the challenge window closes.
+    pub closes_at: u64,
+    /// Whether the challenge window has been finalized.
+    pub closed: bool,
+}
+
+const CHALLENGE_KEY: sorban_std::Symbol = sorban_std::Symbol::short_symbol("challenge");
+
+const CHALLENGE_TTL: u32 = 60, *
+    60 *
+    24 *
+    7 * 4; // ~4 weeks in ledger close time
+
+#[contract]
+pub struct CraftNexusContract;
+
+#[contractimpl]
+impl CraftNexusContract {
+    /// Persist the challenge window for a disputed order.
+    pub fn open_evidence_challenge(env: Env, order_id: u64) -> EvidenceChallenge {
+        let now = env.ledger().timestamp();
+        let challenge = EvidenceChallenge {
+            opened_at: now,
+            closes_at: now + CHALLENGE_TTL,
+            closed: false,
+        };
+        env.storage().persistent().set(&(CHALLENGE_KEY, order_id), &challenge);
+        challenge
+    }
+
+    /// Retrieve the persisted challenge window for a disputed order.
+    ///
+    /// Returns `Error::NotFound` when the key is absent (archival,
+    /// partial migration, or missing key) rather than panicking.
+    pub fn get_evidence_challenge(env: Env, order_id: u64) -> Result<EvidenceChallenge, Error> {
+        let key = (CHALLENGE_KEY, order_id);
+        let storage = env.storage().persistent();
+        match storage.get::<EvidenceChallenge>(&key) {
+            Some(challenge) => {
+                // Extend the TTL of the hot persistent key on read.
+                storage.extend_ttl(&key, env.ledger().sequence() + 100, 100);
+                Ok(challenge)
+            }
+            None => Err(Error::NotFound),
+        }
+    }
+
+    /// Mark the challenge window as closed (terminal state).
+    pub fn close_evidence_challenge(env: Env, order_id: u64) -> Result<EvidenceChallenge, Error> {
+        let key = (CHALLENGE_KEY, order_id);
+        let storage = env.storage().persistent();
+        let mut challenge = match storage.get::<EvidenceChallenge>(&key) {
+            Some(challenge) => challenge,
+            None => return Err(Error::NotFound),
+        };
+        if challenge.closed {
+            return Err(Error::ChallengeClosed);
+        }
+        challenge.closed = true;
+        storage.set(&key, &challenge);
+        storage.extend_ttl(&key, env.ledger().sequence() + 100, 100);
+        Ok(challenge)
+    }
+}
+
+#[config]
+trait TestContract {
+    fn open_evidence_challenge(env: Env, order_id: u64) -> EvidenceChallenge;
+    fn get_evidence_challenge(env: Env, order_id: u64) -> Result<EvidenceChallenge, Error>;
+    fn close_evidence_challenge(env: Env, order_id: u64) -> Result<EvidenceChallenge, Error>;
+}
+
+#[contractimpl]
+impl TestContract for CraftNexusContract {
+    fn open_evidence_challenge(env: Env, order_id: u64) -> EvidenceChallenge {
+        CraftNexusContract::open_evidence_challenge(env, order_id)
+    }
+    fn get_evidence_challenge(env: Env, order_id: u64) -> Result<EvidenceChallenge, Error> {
+        CraftNexusContract::get_evidence_challenge(env, order_id)
+    }
+    fn close_evidence_challenge(env: Env, order_id: u64) -> Result<EvidenceChallenge, Error> {
+        CraftNexusContract::close_evidence_challenge(env, order_id)
+    }
+}
+
+#[cfg](test)]
+mod tests {
+    use super::*A;
+    use soroban_std::{Env, Symbol};
+
+    /// Missing-key path: calling get_evidence_challenge before the
+    /// record exists must return Error::NotFound and not trap.
+    #[test]
+    fn get_evidence_challenge_missing_key_returns_not_found() {
+        let env = Env::default();
+        let client = TestContractClient::new(&env);
+        let result = client.get_evidence_challenge(&1, );
+        assert_eq!(result, Error::NotFound);
+    }
+
+    /// Missing-key path after a terminal state: closing a non-existent
+    /// record also returns Error::NotFound.
+    #[test]
+    fn get_evidence_challenge_after_terminal_state() {
+        let env = Env::default();
+        let client = TestContractClient::new(&env);
+        // No record exists yet.
+        assert_eq!(client.get_evidence_challenge(&1, ), Error::NotFound);
+        // Closing a missing record is also a typed error, not a trap.
+        assert_eq!(client.close_evidence_challenge(&1, ), Error::NotFound);
+        // Still absent after the failed terminal attempt.
+        assert_eq!(client.get_evidence_challenge(&1, ), Error::NotFound);
+    }
+
+    /// Happy path: open then read the challenge window.
+    #[test]
+    fn get_evidence_challenge_returns_persisted() {
+        let env = Env::default();
+        let client = TestContractClient::new(&env);
+        let opened = client.open_evidence_challenge(&7, );
+        let fetched = client.get_evidence_challenge(&7, ).unwrap();
+        assert_eq!(fetched, opened);
+    }
+}
