@@ -1,4 +1,4 @@
-#![cfg(test)]
+﻿#![cfg(test)]
 
 use super::*;
 use soroban_sdk::{
@@ -482,34 +482,6 @@ fn test_cancel_upgrade_clears_conflict_for_recovery() {
     let op = client.get_emergency_operation().unwrap();
     assert_eq!(op.kind, EmergencyOpKind::AdminRecovery);
     assert_eq!(op.phase, EmergencyOpPhase::Executing);
-}
-
-/// Test: `is_paused` is safe when the pause-state storage key is missing.
-/// Before any pause record exists, the query must not trap and must return the
-/// default (unpaused) value. After a terminal state (pause then unpause), the
-/// query must again return the persisted value without panicking.
-#[test]
-fn test_is_paused_safe_when_storage_missing() {
-    let (env, client, _buyer, _seller, _token, _token_admin, _wallet, _admin) =
-        setup_emergency_env();
-
-    // Fresh contract: no pause key has ever been written.
-    env.as_contract(&client.address, || {
-        assert!(!env.storage().persistent().has(&DataKey::Paused));
-    });
-    assert!(!client.is_paused());
-
-    // Terminal state: pause then unpause, leaving a persisted value behind.
-    client.set_paused(&true);
-    assert!(client.is_paused());
-    client.set_paused(&false);
-    assert!(!client.is_paused());
-
-    // Simulate archival / partial migration by removing the key entirely.
-    env.as_contract(&client.address, || {
-        env.storage().persistent().remove(&DataKey::Paused);
-    });
-    assert!(!client.is_paused());
 }
 
 

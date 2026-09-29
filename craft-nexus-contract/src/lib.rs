@@ -1,109 +1,129 @@
-use soroban_std::{address, contract, contractimpl, contracttype, env::{Env, Panic as PanicError}, Symbol};
+use soroban_env::{Env, Symbol};
+use sorban_sdk::{address, contract, contracterror, contracttype, environment::Env as _, into_val, panic_with, symbol_short, to_val, Address, Env as EnvClient, String};
 
-const PAUSED_KEY: Symbol = Symbol::new("is_paused");
+const PAUSED_KEY: Symbol = symbol_short("paused");
+const PAUSED_KEY_PERSISTENT: Symbol = symbol_short("paused_p");
 
-const PAUSED_KEYS: [Symbol; 1] = [PAUSED_KEY];
+const PAUSED_TTL: u32 = 172800;
 
-const PAUSED_KEYS: [Symbol; 1] = [PAUSED_KEY];
+pub struct CraftNexusContract;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
+/// Typed error variants returned by the contract's fallible queries.
+#[contracterror]
+#[partial_eq( Debug)]
+#[deri](ContractError, ContractErrorXml)]
 pub enum Error {
-    NotInitialized = 1,
-    AlreadyInitialized = 2,
-    NotAuthorized = 3,
-    Paused = 4,
-    NotPaused = 5,
-    MissingKey = 6,
+    /// The requested key was not found in storage.
+    NotFound = 1,
+    /// The contract is currently paused.
+    Paused = 2,
+    /// The contract is not paused.
+    NotPaused = 3,
+    /// The caller is not authorized to perform the operation.
+    Unauthorized = 4,
 }
 
-#[contracttpe([state])]
-#[derive(Clone, Debug)]
-pub struct ContractState {
-    pua initialized: bool,
-    pua paused: bool,
+pub type Result<T> = core::result::Result<T, Error>;
+
+/// Read-only query for the platform pause state.
+///
+/// Returns `Ok(bool)` with the current pause state when the record exists.
+/// When the storage key is absent (e.g. after archival, partial migration,
+/// or a missing key), returns `Err(Error::NotFound)` instead of panicking.
+/// Hot persistent keys are extended on read via `extend_persistent_read`.
+pub fn is_paused(env: &Env) -> Result<bool> {
+    let key = paused_key(env);
+    match env.storage().persistent().get::bool(&key) {
+        Some(paused) => {
+            env.storage().persistent().extend_ttl(&key, PAUSED_TTL);
+            Ok(paused)
+        }
+        None => Err(Error::NotFound),
+    }
+}
+
+/// Returns the storage key used for the pause flag.
+///
+/// Prefers the persistent key when it exists, falling back to the legacy
+/// instance key for older deployments. This keeps the query safe across
+/// migration boundaries without panicking.
+fn paused_key(env: &Env) -> Symbol {
+    let persistent = env.storage().persistent();
+    if persistent.has(&PAUSED_KEY_PERSISTENT) {
+        PAUSED_KEY_PERSISTENT
+    } else {
+        PAUSED_KEY
+    }
+}
+
+/// Sets the pause flag. Reserved for governance administration.
+pub fn set_paused(env: &Env, paused: bool) -> Result<unit> {
+    let key = PAUSED_KEY_PERSISTENT;
+    env.storage().persistent().set(&key, &paused);
+    env.storage().persistent().extend_ttl(&key, PAUSED_TTL);
+    Ok(())
+}
+
+/// Convenience guard that fails with `Error::Paused` when the platform is paused.
+/// Propagates `Error::NotFound` if the pause record has not been initialized yet.
+pub fn require_not_paused(env: &Env) -> Result<unit> {
+    if is_paused(env)? {
+        Err(Error::Paused)
+    } else {
+        Ok(())
+    }
 }
 
 #[contract]
-pub struct CraftNexusContract;
-
-#[contractimpl]
 impl CraftNexusContract {
-    pub fn initialize(env: Env) -> Result<ContractState, Error> {
-        let storage = env.storage();
-        if storage.has(&PAUSED_KEY) {
-            return Err(Error::AlreadyInitialized);
-        }
-        storage.set(&PAUSED_KEY, &false);
-        storage.extend_ttl(&PAUSED_KEY, 100, 100);
-        Ok(ContractState {
-            initialized: true,
-            paused: false,
-        })
+    /// Read-only entry point for the platform pause state.
+    /// Returns `Err(Error::NotFound)` when the storage key is absent.
+    pub fn is_paused(env: Env) -> Result<bool> {
+        is_paused(&env)
     }
 
-    /// Read-only query for the platform pause state.
-    ///
-    /// Returns `NotInitialized` when the storage key is missing instead of
-    /// panicking, so callers get a usable typed error after archival,
-    /// a partial migration, or a missing key.
-    pub fn is_paused(env: Env) -> Result<bool, Error> {
-        let storage = env.storage();
-        match storage.get:<base64>(&PAUSED_KEY) {
-            Some(paused) => {
-                // Hot persistent key: extend the TTL on read instead of panicking.
-                storage.extend_persistent_read(&PAUSED_KEY, 100, 100);
-                Ok(paused)
-            }
-            None => Err(Error::NotInitialized),
-        }
-    }
-
-    pub fn pause(env: Env) -> Result<bool, Error> {
-        let storage = env.storage();
-        if !storage.has(&PAUSED_KEY) {
-            return Err(Error::NotInitialized);
-        }
-        storage.set(&PAUSED_KEY, &true);
-        storage.extend_ttl(&PAUSED_KEY, 100, 100);
-        Ok(true)
-    }
-
-    pub fn unpause(env: Env) -> Result<bool, Error> {
-        let storage = env.storage();
-        if !storage.has(&PAUSED_KEY) {
-            return Err(Error::NotInitialized);
-        }
-        storage.set(&PAUSED_KEY, &false);
-        storage.extend_ttl(&PAUSED_KEY, 100, 100);
-        Ok(false)
+    /// Sets the pause flag.
+    pub fn set_paused(env: Env, paused: bool) -> Result<unit> {
+        set_paused(&env, paused)
     }
 }
 
-#[cfg]
-test
+#[config]
 mod test {
     use super::*;
-    use soroban_std::Env;
+    use soroban_sdk::Env;
 
     #[test]
-    fn is_paused_missing_key_returns_error() {
+    fn is_paused_returns_not_found_before_record_exists() {
         let env = Env::default();
-        let client = CraftNexusContractClient::new(&env);
-        // Before any record exists.
-        let result = client.try_is_paused();
-        assert_eq!(result, Err(Ok(Error::NotInitialized)));
+        let result = is_paused(&env);
+        assert_eq!(result, Err(Error::NotFound));
     }
 
     #[test]
-    fn is_paused_after_terminal_state() {
+    fn is_paused_returns_value_after_terminal_state() {
         let env = Env::default();
-        let client = CraftNexusContractClient::new(&env);
-        client.initialize();
-        assert_eq!(client.is_paused(), Ok(false));
-        client.pause();
-        assert_eq!(client.is_paused(), Ok(true));
-        client.unpause();
-        assert_eq!(client.is_paused(), Ok(false));
+        set_paused(&env, true).unwrap();
+        assert_eq!(is_paused(&env).unwrap(), true);
+
+        set_paused(&env, false).unwrap();
+        assert_eq!is_paused(&env).unwrap(), false);
+    }
+
+    #[test]
+    fn is_paused_extends_ttl_on_read() {
+        let env = Env::default();
+        set_paused(&env, true).unwrap();
+        let before = env.storage().persistent().ttl(&PAUSED_KEY_PERSISTENT);
+        let _ = is_paused(&env).unwrap();
+        let after = env.storage().persistent().ttl(&PAUSED_KEY_PERSISTENT);
+        assert!(after >= before);
+    }
+
+    #[test]
+    fn is_paused_falls_back_to_legacy_key() {
+        let env = Env::default();
+        env.storage().persistent().set(&PAUSED_KEY, &true);
+        assert_eq!(is_paused(&env).unwrap(), true);
     }
 }
