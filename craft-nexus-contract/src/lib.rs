@@ -13,6 +13,9 @@ extern crate alloc;
 /// Centralised time-boundary policy for the contract.
 pub mod time_policy;
 
+/// Attestation expiry and ledger binding for cross-contract authorization (#1122).
+pub mod attestation;
+
 /// Bounded, overflow-safe oracle-price conversion (Issue #1088).
 pub mod conversion;
 
@@ -383,12 +386,22 @@ pub enum Error {
     /// Archival policy parameters are invalid (zero retention, zero batch size,
     /// or batch size above MAX_ARCHIVAL_COMPACTION_BATCH).
     InvalidArchivalPolicy = 111,
+    /// The cross-contract attestation offered as authorization is past its
+    /// expiry ledger, so it proves a state that is no longer current (#1122).
+    OnboardingAttestationExpired = 112,
+    /// The cross-contract attestation is future-dated: its issuance ledger is
+    /// ahead of the ledger being executed (#1122).
+    OnboardingAttestationNotYetValid = 113,
+    /// The attestation's declared validity window is unusable — zero ledgers
+    /// long, longer than `attestation::MAX_ATTESTATION_VALIDITY_LEDGERS`, or
+    /// overflowing `u32` — so no ledger can ever satisfy it (#1122).
+    InvalidAttestationWindow = 114,
     /// Price oracle update is stale (older than the configured max age or in
     /// the future).
-    PriceOracleStale = 112,
+    PriceOracleStale = 115,
     /// Price oracle update is malformed (empty asset pair, excessive precision,
     /// or confidence outside the configured bounds).
-    PriceOracleInvalid = 113,
+    PriceOracleInvalid = 116,
 }
 
 /// Maps a [`conversion::ConversionError`] onto the contract's own [`Error`]
