@@ -98,6 +98,8 @@ fn test_onboarding_attestation_rejects_forgery_and_replay() {
     client.set_escrow_contract(&escrow_contract);
     let user = Address::generate(&env);
     client.onboard_user(&user, &String::from_str(&env, "attested"), &UserRole::Buyer);
+    let escrow_contract = Address::generate(&env);
+    client.set_escrow_contract(&escrow_contract);
     let operation_id = Bytes::from_slice(&env, b"operation-1");
 
     let attestation = client.get_onboarding_attestation(&user, &operation_id, &escrow_contract);
@@ -121,6 +123,8 @@ fn test_onboarding_attestation_becomes_stale_after_role_change() {
     client.set_escrow_contract(&escrow_contract);
     let user = Address::generate(&env);
     client.onboard_user(&user, &String::from_str(&env, "revision"), &UserRole::Buyer);
+    let escrow_contract = Address::generate(&env);
+    client.set_escrow_contract(&escrow_contract);
     let operation_id = Bytes::from_slice(&env, b"operation-2");
     let attestation = client.get_onboarding_attestation(&user, &operation_id, &escrow_contract);
 
@@ -1842,7 +1846,7 @@ fn test_decay_cap_is_carried_forward() {
 
     set_ledger_time(&env, 2_000_000);
     client.onboard_user(&user, &String::from_str(&env, "decayc"), &UserRole::Artisan);
-    client.update_reputation(&user, &100u32, &0u32);
+    client.update_reputation(&user, &1000u32, &0u32);
 
     // Jump far beyond the per-call cap (64 buckets).
     let elapsed = (MAX_DECAY_INTERVALS_PER_CALL + 10) * interval;
@@ -1850,7 +1854,7 @@ fn test_decay_cap_is_carried_forward() {
 
     let first = client.get_trust_score(&user);
     assert!(first > 0, "capped decay still leaves residual trust");
-    assert!(first < 100, "decay must have reduced the score");
+    assert!(first < 1000, "decay must have reduced the score");
 
     // A second read at the SAME ledger time carries the remaining 10 buckets
     // forward; the score keeps decreasing deterministically.
@@ -3752,7 +3756,7 @@ fn test_verification_limits_do_not_duplicate_queue_records() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #27)")]
+#[should_panic(expected = "Error(Contract, #33)")]
 fn test_attempt_rate_policy_rejects_zero_active_window() {
     let env = Env::default();
     env.mock_all_auths();

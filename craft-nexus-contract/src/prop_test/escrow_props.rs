@@ -19,6 +19,8 @@
 #![cfg(test)]
 extern crate std;
 extern crate alloc;
+extern crate std;
+use std::println;
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
