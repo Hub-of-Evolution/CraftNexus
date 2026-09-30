@@ -16,7 +16,7 @@
 //! | Rate-limit counters on onboarding | Not modelled | Orthogonal to state machine correctness |
 
 extern crate alloc;
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 
 // ── Escrow model ──────────────────────────────────────────────────────────────
 
@@ -918,8 +918,8 @@ mod prop_tests {
 
                 if result.is_err() {
                     prop_assert_eq!(
-                        format!("{:?}", model),
-                        format!("{:?}", before),
+                        alloc::format!("{:?}", model),
+                        alloc::format!("{:?}", before),
                         "failed op {:?} mutated model",
                         op
                     );

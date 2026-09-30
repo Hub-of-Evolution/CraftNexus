@@ -1,9 +1,12 @@
-#![cfg(test)]
-extern crate alloc;
+﻿#![no_std]
+#![allow(clippy::too_many_arguments)]
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
+    testutils::{storage::Persistent as _, Address as _, Events, Ledger},
     token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, TryIntoVal,
 };
 
@@ -46,13 +49,7 @@ fn setup_test(
     // Open mode (None): the #1157 onboarding-attestation integration requires a
     // *registered* onboarding contract; passing an unregistered address would
     // make every privileged call fail. Unit tests use open mode.
-    client.initialize(
-        &platform_wallet,
-        &admin,
-        &arbitrator,
-        &500,
-        &None,
-    );
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None);
 
     // Set min amount to 0 for tests to pass with small amounts
     client.set_min_escrow_amount(&token_contract.address(), &0);
@@ -68,6 +65,67 @@ fn setup_test(
         platform_wallet,
         admin,
     )
+}
+
+fn make_escrow_create_params(
+    buyer: &Address,
+    seller: &Address,
+    token: &Address,
+    amount: i128,
+    order_id: u32,
+) -> EscrowCreateParams {
+    EscrowCreateParams {
+        buyer: buyer.clone(),
+        seller: seller.clone(),
+        token: token.clone(),
+        amount,
+        order_id,
+        release_window: Some(3600),
+        ipfs_hash: None,
+        metadata_hash: None,
+        service_agreement_hash: None,
+    }
+}
+
+#[test]
+fn get_platform_config_refreshes_instance_ttl() {
+    let env = Env::default();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.sequence_number = super::ttl::TTL_EXTENSION - 5_000;
+    });
+    assert_eq!(client.get_platform_config().admin, admin);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.sequence_number = super::ttl::TTL_EXTENSION + 1;
+    });
+    assert_eq!(client.get_platform_config().admin, admin);
+}
+
+#[test]
+fn get_stake_refreshes_active_persistent_record_ttl() {
+    let env = Env::default();
+    let (client, _, artisan, token_id, _, _, _) = setup_test(&env, true);
+    let stake_key = DataKey::ArtisanStake(artisan.clone());
+
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(
+            &stake_key,
+            &ArtisanStakeData {
+                amount: 500,
+                token: token_id,
+            },
+        );
+        env.storage()
+            .persistent()
+            .set_ttl(&stake_key, super::ttl::PERSISTENT_TTL_THRESHOLD - 1);
+    });
+
+    assert_eq!(client.get_stake(&artisan), 500);
+    env.as_contract(&client.address, || {
+        assert!(env.storage().persistent().get_ttl(&stake_key) >= super::ttl::TTL_EXTENSION);
+    });
 }
 
 #[test]
@@ -558,7 +616,10 @@ fn test_escrow_state_diagnostic_flags_pending_orphans() {
 
     let diagnostic = client.diagnose_escrow_state(&1);
     assert!(!diagnostic.is_consistent);
-    assert_eq!(diagnostic.issue, EscrowStateIssue::PendingTransitionUnfinished);
+    assert_eq!(
+        diagnostic.issue,
+        EscrowStateIssue::PendingTransitionUnfinished
+    );
 }
 
 #[test]
@@ -1252,6 +1313,12 @@ fn test_admin_transfer_flow() {
     assert_eq!(config.admin, admin);
     assert_eq!(config.pending_admin, Some(new_admin.clone()));
 
+    let pending_transfer = client.get_pending_admin_transfer().unwrap();
+    assert_eq!(pending_transfer.proposed_admin, new_admin);
+    assert_eq!(pending_transfer.proposer, admin);
+    assert_eq!(pending_transfer.revision, 1);
+    assert!(pending_transfer.expiry > env.ledger().timestamp());
+
     // New admin claims role
     client.claim_admin();
 
@@ -1259,6 +1326,81 @@ fn test_admin_transfer_flow() {
     let config = client.get_platform_config();
     assert_eq!(config.admin, new_admin);
     assert_eq!(config.pending_admin, None);
+    assert_eq!(client.get_pending_admin_transfer(), None);
+}
+
+#[test]
+fn test_unaccepted_roles_never_gain_privileges() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let proposed_admin = Address::generate(&env);
+    client.update_admin(&proposed_admin);
+
+    // Platform config admin remains original admin
+    let config = client.get_platform_config();
+    assert_eq!(config.admin, admin);
+    assert_ne!(config.admin, proposed_admin);
+
+    // Before claim, proposed admin has not gained privileges
+    let pending = client.get_pending_admin_transfer().unwrap();
+    assert_eq!(pending.proposed_admin, proposed_admin);
+
+    // Claim completes activation
+    client.claim_admin();
+    assert_eq!(client.get_platform_config().admin, proposed_admin);
+}
+
+#[test]
+fn test_expired_transfers_cannot_be_accepted() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    let new_admin = Address::generate(&env);
+    // Propose with short 100s window
+    client.update_admin_with_window(&new_admin, &100);
+
+    let pending = client.get_pending_admin_transfer().unwrap();
+    assert_eq!(pending.proposed_admin, new_admin);
+
+    // Advance ledger past expiration (101 seconds)
+    env.ledger().with_mut(|li| {
+        li.timestamp += 101;
+    });
+
+    // View method returns None for expired transfer
+    assert_eq!(client.get_pending_admin_transfer(), None);
+
+    // Claiming expired transfer must fail
+    let res = client.try_claim_admin();
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_old_administrators_cannot_replay_completed_transfer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _admin1) = setup_test(&env, true);
+
+    let admin2 = Address::generate(&env);
+    client.update_admin(&admin2);
+    client.claim_admin();
+
+    // Now admin2 is current admin
+    assert_eq!(client.get_platform_config().admin, admin2);
+
+    // Attempting to claim again without pending proposal fails
+    let res = client.try_claim_admin();
+    assert!(res.is_err());
+
+    // Proposed admin transfer revision counter increments monotonically
+    let admin3 = Address::generate(&env);
+    client.update_admin(&admin3);
+    let pending = client.get_pending_admin_transfer().unwrap();
+    assert_eq!(pending.proposer, admin2);
+    assert_eq!(pending.revision, 2);
 }
 
 #[test]
@@ -1275,6 +1417,7 @@ fn test_admin_transfer_can_be_cancelled() {
     let config = client.get_platform_config();
     assert_eq!(config.admin, admin);
     assert_eq!(config.pending_admin, None);
+    assert_eq!(client.get_pending_admin_transfer(), None);
 }
 
 #[test]
@@ -1443,15 +1586,13 @@ fn test_recover_admin_access_success() {
         env.storage()
             .persistent()
             .set(&DataKey::FallbackAdmin, &admin);
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminRecoveryTime, &(env.ledger().timestamp() + 7 * 24 * 60 * 60));
-        env.storage()
-            .persistent()
-            .set(&DataKey::AdminRecoveryDelay, &(7 * 24 * 60 * 60u64));
     });
 
     let recovered_admin = Address::generate(&env);
+
+    // First call initiates the 7-day time lock and fails.
+    let initial_result = client.try_recover_admin_access(&recovered_admin);
+    assert_admin_recovery_failed(initial_result);
 
     // Advance the ledger past the minimum recovery cooldown.
     env.ledger().with_mut(|li| {
@@ -1579,6 +1720,267 @@ fn test_fee_rounding_custom_bps_025_percent() {
     assert_eq!(client.calculate_fee_for_amount(&1000), 2); // floor(2.5) => 2
     assert_eq!(client.calculate_fee_for_amount(&399), 0); // floor(0.9975) => 0
     assert_eq!(client.calculate_fee_for_amount(&400), 1); // floor(1.0) => 1
+}
+
+// ===== Fee Calculation Boundary Tests =====
+
+#[test]
+fn test_calculate_fee_zero_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    // Zero amount => zero fee and zero net at the default 5% rate.
+    assert_eq!(client.calculate_fee_for_amount(&0), 0);
+    assert_eq!(client.calculate_seller_net_amount(&0), 0);
+}
+
+#[test]
+fn test_calculate_fee_minimum_amount_rounds_down_to_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    // Minimum non-zero amount: 5% of 1 floors to 0; net keeps the unit.
+    assert_eq!(client.calculate_fee_for_amount(&1), 0);
+    assert_eq!(client.calculate_seller_net_amount(&1), 1);
+}
+
+#[test]
+fn test_calculate_fee_at_maximum_fee_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    let platform_wallet = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+
+    // MAX_PLATFORM_FEE_BPS = 1000 (10%) is the deterministic upper bound.
+    client.initialize(&platform_wallet, &admin, &arbitrator, &1000, &None);
+
+    assert_eq!(client.calculate_fee_for_amount(&1000), 100);
+    assert_eq!(client.calculate_fee_for_amount(&10_000), 1_000);
+    assert_eq!(client.calculate_fee_for_amount(&999), 99); // floor(99.9)
+    assert_eq!(client.calculate_seller_net_amount(&1000), 900);
+    assert_eq!(client.calculate_seller_net_amount(&999), 900); // floor(899.1)
+}
+
+#[test]
+fn test_calculate_fee_at_zero_fee_config() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    let platform_wallet = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+
+    // 0 bps is a valid lower-bound configuration: the fee is always zero.
+    client.initialize(&platform_wallet, &admin, &arbitrator, &0, &None);
+
+    assert_eq!(client.calculate_fee_for_amount(&10_000), 0);
+    assert_eq!(client.calculate_seller_net_amount(&10_000), 10_000);
+}
+
+#[test]
+fn test_calculate_fee_near_overflow_max_fee_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    let platform_wallet = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+
+    client.initialize(&platform_wallet, &admin, &arbitrator, &1000, &None);
+
+    // Largest amount whose product with 1000 bps still fits in i128.
+    let amount = i128::MAX / 1000;
+    let fee = client.calculate_fee_for_amount(&amount);
+    assert_eq!(fee, (amount * 1000) / 10_000);
+    assert_eq!(client.calculate_seller_net_amount(&amount), amount - fee);
+}
+
+#[test]
+fn test_calculate_fee_overflow_at_max_fee_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    let platform_wallet = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+
+    client.initialize(&platform_wallet, &admin, &arbitrator, &1000, &None);
+
+    // One unit past the safe product boundary overflows deterministically.
+    let amount = i128::MAX / 1000 + 1;
+    assert_invalid_fee_error(client.try_calculate_fee_for_amount(&amount));
+    assert_invalid_fee_error(client.try_calculate_seller_net_amount(&amount));
+}
+
+#[test]
+fn test_calculate_fee_negative_amount_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    // Negative amounts are rejected before any arithmetic runs.
+    assert_invalid_fee_error(client.try_calculate_fee_for_amount(&-1));
+    assert_invalid_fee_error(client.try_calculate_seller_net_amount(&-1));
+}
+
+#[test]
+fn test_update_platform_fee_lower_boundary_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    client.update_platform_fee(&0);
+    assert_eq!(client.get_platform_fee(), 0);
+    assert_eq!(client.calculate_fee_for_amount(&10_000), 0);
+}
+
+#[test]
+fn test_update_platform_fee_upper_boundary_max() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    client.update_platform_fee(&1000); // MAX_PLATFORM_FEE_BPS
+    assert_eq!(client.get_platform_fee(), 1000);
+    assert_eq!(client.calculate_fee_for_amount(&1000), 100);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #10)")]
+fn test_update_platform_fee_one_bps_above_max_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    // 1001 > MAX_PLATFORM_FEE_BPS (1000) => InvalidFee (#10), deterministically.
+    client.update_platform_fee(&1001);
+}
+
+#[test]
+fn test_initialize_accepts_zero_fee_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    let platform_wallet = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+
+    client.initialize(&platform_wallet, &admin, &arbitrator, &0, &None);
+    assert_eq!(client.get_platform_fee(), 0);
+}
+
+#[test]
+fn test_initialize_accepts_max_fee_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    let platform_wallet = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+
+    client.initialize(&platform_wallet, &admin, &arbitrator, &1000, &None);
+    assert_eq!(client.get_platform_fee(), 1000);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #10)")]
+fn test_initialize_rejects_fee_above_max() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    let platform_wallet = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+
+    client.initialize(&platform_wallet, &admin, &arbitrator, &1001, &None);
+}
+
+#[test]
+fn test_set_artisan_fee_tier_zero_and_max_boundaries() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, seller, _, _, _, _) = setup_test(&env, true);
+
+    client.set_artisan_fee_tier(&seller, &0);
+    assert_eq!(client.get_effective_fee_bps(&seller), 0);
+
+    client.set_artisan_fee_tier(&seller, &1000); // MAX_PLATFORM_FEE_BPS
+    assert_eq!(client.get_effective_fee_bps(&seller), 1000);
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Contract, #10)")]
+fn test_set_artisan_fee_tier_above_max_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, seller, _, _, _, _) = setup_test(&env, true);
+
+    client.set_artisan_fee_tier(&seller, &1001);
+}
+
+#[test]
+fn test_fee_allocation_invariant_at_boundaries() {
+    let env = Env::default();
+
+    // Boundary amounts: zero, minimum, and the largest safe product at max fee.
+    let amounts = [0i128, 1, 999, 10_000, i128::MAX / 1000];
+    let fee_rates = [0u32, 1, 500, 1000];
+
+    for &amount in amounts.iter() {
+        for &fee_bps in fee_rates.iter() {
+            let kinds = [
+                SettlementKind::ReleaseFunds,
+                SettlementKind::FullRefundNoFee,
+                SettlementKind::ExpiredDisputeDeductFromSeller,
+                SettlementKind::ExpiredDisputeDeductFromBuyer,
+                SettlementKind::ExpiredDisputeSplitFee,
+            ];
+            for &kind in kinds.iter() {
+                let allocation =
+                    CraftNexusContract::compute_fee_allocation(&env, amount, fee_bps, kind);
+                assert_eq!(
+                    allocation.platform_fee + allocation.seller_amount + allocation.buyer_amount,
+                    amount,
+                    "allocation must consume the escrow pot exactly at amount={amount} fee_bps={fee_bps} kind={kind:?}"
+                );
+                assert!(
+                    allocation.platform_fee >= 0,
+                    "platform_fee must be non-negative"
+                );
+                assert!(
+                    allocation.seller_amount >= 0,
+                    "seller_amount must be non-negative"
+                );
+                assert!(
+                    allocation.buyer_amount >= 0,
+                    "buyer_amount must be non-negative"
+                );
+            }
+
+            // PartialRefund must be fed a gross split that sums to the pot.
+            let allocation = CraftNexusContract::compute_fee_allocation(
+                &env,
+                amount,
+                fee_bps,
+                SettlementKind::PartialRefund(0, amount),
+            );
+            assert_eq!(
+                allocation.platform_fee + allocation.seller_amount + allocation.buyer_amount,
+                amount
+            );
+        }
+    }
 }
 
 #[test]
@@ -2303,7 +2705,6 @@ fn test_contract_upgrade_unauthorized() {
 }
 
 #[test]
-#[ignore]
 fn test_upgrade_requires_compatibility_manifest() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2317,11 +2718,13 @@ fn test_upgrade_requires_compatibility_manifest() {
     });
 
     let result = client.try_execute_upgrade(&wasm_hash);
-    assert!(matches!(result, Err(Ok(Error::UpgradeCompatibilityMissing))));
+    assert!(matches!(
+        result,
+        Err(Ok(Error::UpgradeCompatibilityMissing))
+    ));
 }
 
 #[test]
-#[ignore]
 fn test_upgrade_manifest_is_recorded_and_consumed() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2347,9 +2750,7 @@ fn test_upgrade_manifest_is_recorded_and_consumed() {
     client.propose_upgrade_wasm(&admin, &wasm_hash);
     client.submit_compat_manifest(&wasm_hash, &manifest);
     assert_eq!(
-        client
-            .get_upgrade_compat_manifest(&wasm_hash)
-            .unwrap(),
+        client.get_upgrade_compat_manifest(&wasm_hash).unwrap(),
         manifest
     );
 
@@ -2358,16 +2759,239 @@ fn test_upgrade_manifest_is_recorded_and_consumed() {
     });
     client.execute_upgrade(&wasm_hash);
 
-    let record = client
-        .get_upgrade_compat_history()
-        .last()
-        .unwrap();
+    let record = client.get_upgrade_compat_history().last().unwrap();
     assert_eq!(record.from_version, 1);
     assert_eq!(record.to_version, 2);
     assert_eq!(record.state_commitment, commitment);
-    assert!(client
-        .get_upgrade_compat_manifest(&wasm_hash)
-        .is_none());
+    assert!(client.get_upgrade_compat_manifest(&wasm_hash).is_none());
+}
+
+// ===== Issue #1140: Upgrade State Commitment =====
+
+#[test]
+fn test_upgrade_state_commitment_persisted_after_execution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
+
+    let commitment = client.get_upgrade_state_commitment();
+    let nonzero = BytesN::from_array(&env, &[1u8; 32]);
+    let manifest = UpgradeCompatibilityManifest {
+        source_version: 1,
+        target_version: 2,
+        state_commitment: commitment.clone(),
+        interface_commitment: nonzero.clone(),
+        authorization_commitment: nonzero.clone(),
+        preconditions_commitment: nonzero.clone(),
+        postconditions_commitment: nonzero.clone(),
+        rollback_commitment: nonzero.clone(),
+        migration_checkpoint: nonzero.clone(),
+        migration_complete: true,
+        manual_records: 0,
+    };
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    client.submit_compat_manifest(&wasm_hash, &manifest);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+
+    // No commitment exists before execution
+    assert!(client.get_upgrade_state_commit(&wasm_hash).is_none());
+
+    client.execute_upgrade(&wasm_hash);
+
+    // Commitment is persisted after execution
+    let commitment_record = client
+        .get_upgrade_state_commit(&wasm_hash)
+        .expect("commitment should exist after execution");
+    assert_eq!(commitment_record.from_version, 1);
+    assert_eq!(commitment_record.to_version, 2);
+    assert_eq!(commitment_record.wasm_hash, wasm_hash);
+    assert_eq!(commitment_record.state_digest, commitment);
+    assert!(
+        commitment_record.immutable,
+        "commitment should be immutable after activation"
+    );
+    assert_ne!(
+        commitment_record.activated_at, 0,
+        "activated_at should be set"
+    );
+    assert_ne!(
+        commitment_record.migration_result_digest,
+        BytesN::from_array(&env, &[0u8; 32]),
+        "migration result digest should not be zero"
+    );
+}
+
+#[test]
+fn test_upgrade_state_commitment_immutable_prevents_reexecution() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
+
+    let commitment = client.get_upgrade_state_commitment();
+    let nonzero = BytesN::from_array(&env, &[1u8; 32]);
+    let manifest = UpgradeCompatibilityManifest {
+        source_version: 1,
+        target_version: 2,
+        state_commitment: commitment.clone(),
+        interface_commitment: nonzero.clone(),
+        authorization_commitment: nonzero.clone(),
+        preconditions_commitment: nonzero.clone(),
+        postconditions_commitment: nonzero.clone(),
+        rollback_commitment: nonzero.clone(),
+        migration_checkpoint: nonzero.clone(),
+        migration_complete: true,
+        manual_records: 0,
+    };
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    client.submit_compat_manifest(&wasm_hash, &manifest);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+
+    client.execute_upgrade(&wasm_hash);
+
+    // Try to execute the same upgrade again after re-proposing. The immutable
+    // commitment must reject execution even though a fresh proposal and
+    // manifest exist, because the WASM hash was already deployed.
+    let commitment2 = client.get_upgrade_state_commitment();
+    let manifest2 = UpgradeCompatibilityManifest {
+        source_version: 2,
+        target_version: 3,
+        state_commitment: commitment2.clone(),
+        interface_commitment: nonzero.clone(),
+        authorization_commitment: nonzero.clone(),
+        preconditions_commitment: nonzero.clone(),
+        postconditions_commitment: nonzero.clone(),
+        rollback_commitment: nonzero.clone(),
+        migration_checkpoint: nonzero.clone(),
+        migration_complete: true,
+        manual_records: 0,
+    };
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    client.submit_compat_manifest(&wasm_hash, &manifest2);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+
+    let result = client.try_execute_upgrade(&wasm_hash);
+    assert_eq!(
+        result.unwrap_err(),
+        Ok(Error::UpgradeAlreadyExecuted),
+        "re-execution should fail with UpgradeAlreadyExecuted after the commitment is immutable"
+    );
+
+    // Verify commitment is still present and immutable
+    let commitment_record = client
+        .get_upgrade_state_commit(&wasm_hash)
+        .expect("commitment should still exist");
+    assert!(
+        commitment_record.immutable,
+        "commitment should remain immutable"
+    );
+}
+
+#[test]
+fn test_upgrade_execution_fails_without_completed_migration_result() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
+
+    let commitment = client.get_upgrade_state_commitment();
+    let nonzero = BytesN::from_array(&env, &[1u8; 32]);
+
+    // Incomplete migration: migration_complete = false
+    let manifest = UpgradeCompatibilityManifest {
+        source_version: 1,
+        target_version: 2,
+        state_commitment: commitment.clone(),
+        interface_commitment: nonzero.clone(),
+        authorization_commitment: nonzero.clone(),
+        preconditions_commitment: nonzero.clone(),
+        postconditions_commitment: nonzero.clone(),
+        rollback_commitment: nonzero.clone(),
+        migration_checkpoint: nonzero.clone(),
+        migration_complete: false,
+        manual_records: 0,
+    };
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    client.submit_compat_manifest(&wasm_hash, &manifest);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+
+    // Execution should fail - migration result is incomplete
+    let result = client.try_execute_upgrade(&wasm_hash);
+    assert!(
+        result.is_err(),
+        "execution should fail when migration is incomplete"
+    );
+
+    // No commitment should be persisted since execution failed
+    assert!(client.get_upgrade_state_commit(&wasm_hash).is_none());
+}
+
+#[test]
+fn test_upgrade_state_commitment_shows_manual_records_incomplete() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let wasm = Bytes::from_array(&env, &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+    let wasm_hash = env.deployer().upload_contract_wasm(wasm);
+
+    let commitment = client.get_upgrade_state_commitment();
+    let nonzero = BytesN::from_array(&env, &[1u8; 32]);
+
+    // Migration complete but has manual records requiring operator intervention
+    let manifest = UpgradeCompatibilityManifest {
+        source_version: 1,
+        target_version: 2,
+        state_commitment: commitment.clone(),
+        interface_commitment: nonzero.clone(),
+        authorization_commitment: nonzero.clone(),
+        preconditions_commitment: nonzero.clone(),
+        postconditions_commitment: nonzero.clone(),
+        rollback_commitment: nonzero.clone(),
+        migration_checkpoint: nonzero.clone(),
+        migration_complete: true,
+        manual_records: 2,
+    };
+
+    client.propose_upgrade_wasm(&admin, &wasm_hash);
+    client.submit_compat_manifest(&wasm_hash, &manifest);
+
+    env.ledger().with_mut(|ledger| {
+        ledger.timestamp += DEFAULT_WASM_UPGRADE_COOLDOWN as u64 + 1;
+    });
+
+    // Execution should fail - migration has unhandled manual records
+    let result = client.try_execute_upgrade(&wasm_hash);
+    assert!(
+        result.is_err(),
+        "execution should fail with manual records pending"
+    );
+
+    // No commitment persisted
+    assert!(client.get_upgrade_state_commit(&wasm_hash).is_none());
 }
 
 #[test]
@@ -2571,9 +3195,12 @@ fn test_duplicate_approval_returns_already_approved() {
 
     client.propose_upgrade_wasm(&admin, &hash);
     let result = client.try_propose_upgrade_wasm(&admin, &hash);
-    assert!(result.is_err());
-    assert!(result.is_err());
+    assert_eq!(result, Err(Ok(Error::AlreadyApproved)));
+    assert_eq!(result, Err(Ok(Error::AlreadyApproved)));
 
+    // Canonical keyed slot and list both record a single approval.
+    assert!(client.has_upgrade_approval(&0, &admin));
+    assert!(!client.has_upgrade_approval(&0, &signer2));
     // Nonce is 0; admin approved once; signer2 has not approved yet.
     assert_eq!(client.get_upgrade_approvals(&0).len(), 1);
     assert!(client.get_upgrade_proposal().is_none());
@@ -2604,6 +3231,65 @@ fn test_unique_signers_only_reach_threshold() {
     let proposal = client.get_upgrade_proposal().expect("proposal missing");
     assert_eq!(proposal.wasm_hash, hash);
     assert_eq!(proposal.proposed_by, signer2);
+}
+
+#[test]
+fn test_upgrade_approval_event_identifies_revision_and_signer() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let signer2 = Address::generate(&env);
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer2.clone());
+    client.set_upgrade_signers(&signers);
+    client.set_upgrade_threshold(&2);
+
+    let hash = BytesN::from_array(&env, &[9u8; 32]);
+    client.propose_upgrade_wasm(&admin, &hash);
+
+    let events = env.events().all();
+    let approval = events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.1
+                == vec![
+                    &env,
+                    Symbol::new(&env, "wasm_upgrade").into_val(&env),
+                    Symbol::new(&env, "UPG_APPR").into_val(&env),
+                ]
+        })
+        .expect("missing UPG_APPR event");
+    let payload: UpgradeApprovalEvent = approval.2.try_into_val(&env).unwrap();
+    assert_eq!(payload.nonce, 0);
+    assert_eq!(payload.signer, admin);
+    assert_eq!(payload.wasm_hash, hash);
+    assert_eq!(payload.approval_count, 1);
+}
+
+#[test]
+fn test_upgrade_approval_count_cannot_exceed_signer_set() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
+
+    let signer2 = Address::generate(&env);
+    let mut signers = Vec::new(&env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer2.clone());
+    client.set_upgrade_signers(&signers);
+    client.set_upgrade_threshold(&2);
+
+    let hash = BytesN::from_array(&env, &[11u8; 32]);
+    client.propose_upgrade_wasm(&admin, &hash);
+    client.propose_upgrade_wasm(&signer2, &hash);
+
+    assert_eq!(client.get_upgrade_approvals(&0).len(), 0);
+    assert!(client.get_upgrade_proposal().is_some());
+    let result = client.try_propose_upgrade_wasm(&admin, &hash);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -2906,7 +3592,6 @@ fn test_stale_upgrade_proposal_cancelled_and_reproposed() {
 /// `execute_upgrade`, preserving from/to version pairs across multiple
 /// upgrades.
 #[test]
-#[ignore]
 fn test_get_upgrade_history_records_each_successful_upgrade() {
     let env = Env::default();
     env.mock_all_auths();
@@ -3477,6 +4162,211 @@ fn test_create_batch_escrow_multi_buyer_unauthorized() {
 }
 
 #[test]
+fn test_create_escrows_batch_success_uses_one_guard_and_advances_id() {
+    let env = Env::default();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &1_000_000);
+
+    let params = vec![
+        &env,
+        make_escrow_create_params(&buyer, &seller, &token_id, 100, 1200),
+    ];
+    let ids = client.create_escrows_batch(&params);
+
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids.get(0), Some(1200));
+    assert_eq!(client.get_escrow(&1200).batch_id, Some(1));
+    assert_eq!(client.get_escrow_count(), 1);
+
+    let next_batch_id: Option<u64> = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "next_batch_id"))
+    });
+    assert_eq!(next_batch_id, Some(2));
+}
+
+#[test]
+fn test_create_escrows_batch_invalid_later_entry_leaves_state_unchanged() {
+    let env = Env::default();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &1_000_000);
+    let token_client = token::Client::new(&env, &token_id);
+    let buyer_balance = token_client.balance(&buyer);
+    let contract_balance = token_client.balance(&client.address);
+    let event_count = env.events().all().len();
+
+    let params = vec![
+        &env,
+        make_escrow_create_params(&buyer, &seller, &token_id, 100, 1201),
+        make_escrow_create_params(&buyer, &seller, &token_id, 0, 1202),
+    ];
+    let result = client.try_create_escrows_batch(&params);
+
+    assert_returned_or_panic_contract_error(result, Error::AmountBelowMinimum);
+    assert_eq!(token_client.balance(&buyer), buyer_balance);
+    assert_eq!(token_client.balance(&client.address), contract_balance);
+    assert_eq!(client.get_escrow_count(), 0);
+    assert!(client.try_get_escrow(&1201).is_err());
+    assert!(client.try_get_escrow(&1202).is_err());
+    assert_eq!(env.events().all().len(), event_count);
+
+    let next_batch_id: Option<u64> = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "next_batch_id"))
+    });
+    assert_eq!(next_batch_id, None);
+}
+
+#[test]
+fn test_create_escrows_batch_transfer_failure_rolls_back_prior_entry() {
+    let env = Env::default();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &150);
+
+    let token_client = token::Client::new(&env, &token_id);
+    let buyer_balance = token_client.balance(&buyer);
+    let contract_balance = token_client.balance(&client.address);
+    let params = vec![
+        &env,
+        make_escrow_create_params(&buyer, &seller, &token_id, 100, 1206),
+        make_escrow_create_params(&buyer, &seller, &token_id, 100, 1207),
+    ];
+
+    assert_returned_or_panic_contract_error(
+        client.try_create_escrows_batch(&params),
+        Error::TokenTransferFailed,
+    );
+    assert_eq!(token_client.balance(&buyer), buyer_balance);
+    assert_eq!(token_client.balance(&client.address), contract_balance);
+    assert_eq!(client.get_escrow_count(), 0);
+    assert!(client.try_get_escrow(&1206).is_err());
+    assert!(client.try_get_escrow(&1207).is_err());
+    let next_batch_id: Option<u64> = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "next_batch_id"))
+    });
+    assert_eq!(next_batch_id, None);
+}
+
+#[test]
+fn test_create_escrows_batch_unauthorized_leaves_state_unchanged() {
+    let env = Env::default();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &1_000_000);
+    let token_client = token::Client::new(&env, &token_id);
+    let buyer_balance = token_client.balance(&buyer);
+    let contract_balance = token_client.balance(&client.address);
+    let params = vec![
+        &env,
+        make_escrow_create_params(&buyer, &seller, &token_id, 100, 1203),
+    ];
+
+    env.set_auths(&[]);
+    assert!(client.try_create_escrows_batch(&params).is_err());
+
+    assert_eq!(token_client.balance(&buyer), buyer_balance);
+    assert_eq!(token_client.balance(&client.address), contract_balance);
+    assert_eq!(client.get_escrow_count(), 0);
+    assert!(client.try_get_escrow(&1203).is_err());
+    let next_batch_id: Option<u64> = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "next_batch_id"))
+    });
+    assert_eq!(next_batch_id, None);
+}
+
+#[test]
+fn test_create_escrows_batch_paused_leaves_state_and_balances_unchanged() {
+    let env = Env::default();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &1_000_000);
+    let token_client = token::Client::new(&env, &token_id);
+    let buyer_balance = token_client.balance(&buyer);
+    let contract_balance = token_client.balance(&client.address);
+    let params = vec![
+        &env,
+        make_escrow_create_params(&buyer, &seller, &token_id, 100, 1204),
+    ];
+
+    env.as_contract(&client.address, || {
+        let mut config: PlatformConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlatformConfig)
+            .unwrap();
+        config.is_paused = true;
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &config);
+    });
+
+    assert_returned_or_panic_contract_error(
+        client.try_create_escrows_batch(&params),
+        Error::ContractPaused,
+    );
+    assert_eq!(token_client.balance(&buyer), buyer_balance);
+    assert_eq!(token_client.balance(&client.address), contract_balance);
+    assert_eq!(client.get_escrow_count(), 0);
+    assert!(client.try_get_escrow(&1204).is_err());
+    let next_batch_id: Option<u64> = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "next_batch_id"))
+    });
+    assert_eq!(next_batch_id, None);
+}
+
+#[test]
+fn test_create_escrows_batch_counter_overflow_rejects_before_mutation() {
+    let env = Env::default();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &1_000_000);
+    let token_client = token::Client::new(&env, &token_id);
+    let buyer_balance = token_client.balance(&buyer);
+    let contract_balance = token_client.balance(&client.address);
+    let params = vec![
+        &env,
+        make_escrow_create_params(&buyer, &seller, &token_id, 100, 1205),
+    ];
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::BuyerEscrowCount(buyer.clone()), &u32::MAX);
+    });
+
+    assert_returned_or_panic_contract_error(
+        client.try_create_escrows_batch(&params),
+        Error::CounterOverflow,
+    );
+    assert_eq!(token_client.balance(&buyer), buyer_balance);
+    assert_eq!(token_client.balance(&client.address), contract_balance);
+    assert_eq!(client.get_escrow_count(), 0);
+    assert!(client.try_get_escrow(&1205).is_err());
+
+    let counts: (Option<u32>, Option<u32>) = env.as_contract(&client.address, || {
+        (
+            env.storage()
+                .persistent()
+                .get(&DataKey::BuyerEscrowCount(buyer.clone())),
+            env.storage().persistent().get(&DataKey::EscrowCount),
+        )
+    });
+    assert_eq!(counts, (Some(u32::MAX), None));
+
+    let next_batch_id: Option<u64> = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "next_batch_id"))
+    });
+    assert_eq!(next_batch_id, None);
+}
+
+#[test]
 fn test_release_batch_funds_success() {
     let env = Env::default();
     env.mock_all_auths();
@@ -3574,7 +4464,6 @@ fn test_release_batch_funds_fails_invalid_state() {
 }
 
 #[test]
-#[should_panic]
 fn test_release_batch_funds_fails_unauthorized() {
     let env = Env::default();
     env.mock_all_auths();
@@ -3588,7 +4477,28 @@ fn test_release_batch_funds_fails_unauthorized() {
     // Try to release with different address
     let unauthorized = Address::generate(&env);
     let order_ids = vec![&env, 100u32];
-    client.release_batch_funds(&1u64, &order_ids, &unauthorized);
+    let result = client.try_release_batch_funds(&1u64, &order_ids, &unauthorized);
+    
+    assert_eq!(result.unwrap_err().unwrap(), crate::Error::Unauthorized);
+}
+
+#[test]
+fn test_release_batch_funds_fails_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1_000_000_000);
+
+    // Create escrow
+    client.create_escrow(&buyer, &seller, &token_id, &100, &100, &None);
+
+    // Pause contract
+    client.set_paused(&true);
+
+    let order_ids = vec![&env, 100u32];
+    let result = client.try_release_batch_funds(&1u64, &order_ids, &buyer);
+    assert_eq!(result.unwrap_err().unwrap(), crate::Error::ContractPaused);
 }
 
 #[test]
@@ -5750,6 +6660,33 @@ fn test_platform_config_ttl_extension_on_read() {
     assert_eq!(config.admin, config_after.admin);
 }
 
+#[test]
+fn test_shared_ttl_refresh_helper_refreshes_active_persistent_entry() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let key = DataKey::Escrow(1);
+
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(&key, &true);
+        super::ttl::refresh_persistent(&env, &key);
+        assert!(
+            env.storage().persistent().get_ttl(&key) >= super::ttl::TTL_EXTENSION
+        );
+    });
+}
+
+#[test]
+fn test_shared_ttl_refresh_helper_does_not_refresh_missing_entry() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let key = DataKey::Escrow(1);
+
+    env.as_contract(&contract_id, || {
+        assert!(!super::ttl::refresh_persistent_if_present(&env, &key));
+        assert!(!env.storage().persistent().has(&key));
+    });
+}
+
 // ===== Issue #656: funding_deadline / cancel_unfunded_escrow / auto_cancel_unfunded =====
 
 /// Helper: create an unfunded escrow and return the escrow struct.
@@ -6783,6 +7720,26 @@ fn assert_panic_contract_error<T>(
     );
 }
 
+fn assert_returned_or_panic_contract_error<T: core::fmt::Debug>(
+    result: Result<
+        Result<T, soroban_sdk::ConversionError>,
+        Result<Error, soroban_sdk::InvokeError>,
+    >,
+    error: Error,
+) {
+    let actual = match &result {
+        Err(Ok(actual)) => Some(actual.clone()),
+        _ => None,
+    };
+    assert_eq!(
+        actual,
+        Some(error),
+        "expected contract error {:?}, got {:?}",
+        error,
+        result
+    );
+}
+
 #[test]
 fn test_partial_refund_cancel_allows_new_proposal_but_not_replay() {
     let env = Env::default();
@@ -7026,7 +7983,10 @@ mod onboarding_state_consistency {
             &1u32,
             &Some(3600u32),
         );
-        assert!(result.is_ok(), "active users should be allowed to create escrow");
+        assert!(
+            result.is_ok(),
+            "active users should be allowed to create escrow"
+        );
     }
 
     // ── Acceptance criterion 2: deactivated profile blocks escrow creation ─
@@ -7214,6 +8174,31 @@ mod onboarding_state_consistency {
         );
         assert_panic_contract_error(result, Error::OnboardingProfileInactive);
     }
+
+    // ── Issue #1064: Audit Token Transfer Results ───────────────────────────
+
+    /// validate_onboarding_state is also invoked by create_unfunded_escrow.
+    /// A deactivated seller must be rejected on that path too.
+    #[test]
+    fn test_onboarding_state_deactivated_blocks_unfunded_escrow() {
+        let env = Env::default();
+        let (escrow, onboarding, buyer, seller, token_id, _token_admin) = setup_wired(&env);
+
+        onboarding.deactivate_profile(&seller);
+
+        let result = escrow.try_create_unfunded_escrow(
+            &1u32,
+            &buyer,
+            &seller,
+            &token_id,
+            &10_000i128,
+            &3600u32,
+            &None,
+            &None,
+            &None,
+        );
+        assert_panic_contract_error(result, Error::OnboardingProfileInactive);
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -7302,7 +8287,7 @@ mod reconciliation_report_tests {
     fn test_extra_funds_no_discrepancy() {
         let env = Env::default();
         let (client, buyer, seller, token_id, token_admin_client, _, _) = setup_test(&env, true);
-        
+
         // Mint excess funds to contract
         let excess_amount = 10_000_000i128;
         token_admin_client.mint(&client.address, &excess_amount);
@@ -7409,6 +8394,7 @@ mod reconciliation_report_tests {
             .query_reconciliation_report(&token_id, &page1.next_cursor, &50);
         assert_eq!(page2.scanned_escrows, 10, "second page should scan 10 escrows");
         assert_eq!(page2.complete, true, "second page should be complete");
+        assert_eq!(page2.expected_locked, 10_000i128);
         assert_eq!(
             page1.expected_locked + page2.expected_locked,
             60_000i128,
@@ -7550,6 +8536,179 @@ mod reconciliation_report_tests {
         assert_eq!(report.complete, true, "should be complete");
         assert_eq!(report.unresolved, false, "should not be unresolved");
     }
+
+    #[test]
+    fn test_query_requires_admin_auth_without_mutating_state() {
+        let env = Env::default();
+        let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
+        env.set_auths(&[]);
+
+        let before_balance = token::Client::new(&env, &token_id).balance(&client.address);
+        let before_progress = env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .get::<DataKey, i128>(&DataKey::ReconciliationProgress(token_id.clone()))
+        });
+
+        let result = client.try_query_reconciliation_report(&token_id, &0, &50);
+
+        assert!(result.is_err(), "missing admin authorization must be rejected");
+        assert_eq!(
+            token::Client::new(&env, &token_id).balance(&client.address),
+            before_balance
+        );
+        assert_eq!(
+            env.as_contract(&client.address, || {
+                env.storage()
+                    .persistent()
+                    .get::<DataKey, i128>(&DataKey::ReconciliationProgress(token_id.clone()))
+            }),
+            before_progress
+        );
+    }
+
+    #[test]
+    fn test_query_rejects_paused_platform_without_mutating_state() {
+        let env = Env::default();
+        let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
+        client.set_paused(&true);
+
+        let before_balance = token::Client::new(&env, &token_id).balance(&client.address);
+        let before_paused = client.is_paused();
+        let result = client.try_query_reconciliation_report(&token_id, &0, &50);
+
+        assert_returned_or_panic_contract_error(result, Error::ContractPaused);
+        assert_eq!(client.is_paused(), before_paused);
+        assert_eq!(
+            token::Client::new(&env, &token_id).balance(&client.address),
+            before_balance
+        );
+    }
+
+    #[test]
+    fn test_query_rejects_recurring_amount_underflow() {
+        let env = Env::default();
+        let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
+
+        env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::RecurringEscrowCount, &1u64);
+            env.storage().persistent().set(
+                &DataKey::RecurringEscrow(1),
+                &RecurringEscrow {
+                    id: 1,
+                    buyer: Address::generate(&env),
+                    artisan: Address::generate(&env),
+                    token: token_id.clone(),
+                    total_amount: 0,
+                    released_amount: 1,
+                    frequency: 1,
+                    duration: 1,
+                    current_cycle: 0,
+                    last_release_time: 0,
+                    is_active: true,
+                },
+            );
+        });
+
+        let result = client.try_query_reconciliation_report(&token_id, &0, &50);
+        assert_returned_or_panic_contract_error(result, Error::CounterUnderflow);
+    }
+
+    #[test]
+    fn test_query_rejects_recurring_amount_overflow() {
+        let env = Env::default();
+        let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
+
+        env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .set(&DataKey::RecurringEscrowCount, &2u64);
+            for (id, amount) in [(1u64, i128::MAX), (2u64, 1i128)] {
+                env.storage().persistent().set(
+                    &DataKey::RecurringEscrow(id),
+                    &RecurringEscrow {
+                        id,
+                        buyer: Address::generate(&env),
+                        artisan: Address::generate(&env),
+                        token: token_id.clone(),
+                        total_amount: amount,
+                        released_amount: 0,
+                        frequency: 1,
+                        duration: 1,
+                        current_cycle: 0,
+                        last_release_time: 0,
+                        is_active: true,
+                    },
+                );
+            }
+        });
+
+        let result = client.try_query_reconciliation_report(&token_id, &0, &50);
+        assert_returned_or_panic_contract_error(result, Error::CounterOverflow);
+    }
+
+    #[test]
+    fn test_update_platform_fee_requires_admin_auth_without_mutating_state() {
+        let env = Env::default();
+        let (client, _, _, _, _, token_id, _) = setup_test(&env, true);
+        env.set_auths(&[]);
+
+        let before_fee = client.get_platform_fee();
+        let before_balance = token::Client::new(&env, &token_id).balance(&client.address);
+        let before_config = client.get_platform_config();
+
+        let result = client.try_update_platform_fee(&123);
+
+        assert!(result.is_err(), "missing admin authorization must be rejected");
+        assert_eq!(client.get_platform_fee(), before_fee);
+        assert_eq!(client.get_platform_config(), before_config);
+        assert_eq!(
+            token::Client::new(&env, &token_id).balance(&client.address),
+            before_balance
+        );
+    }
+
+    #[test]
+    fn test_update_platform_fee_rejects_paused_platform_without_mutating_state() {
+        let env = Env::default();
+        let (client, _, _, _, _, token_id, _) = setup_test(&env, true);
+        client.set_paused(&true);
+
+        let before_fee = client.get_platform_fee();
+        let before_balance = token::Client::new(&env, &token_id).balance(&client.address);
+        let before_paused = client.is_paused();
+
+        let result = client.try_update_platform_fee(&123);
+
+        assert_panic_contract_error(result, Error::ContractPaused);
+        assert_eq!(client.is_paused(), before_paused);
+        assert_eq!(client.get_platform_fee(), before_fee);
+        assert_eq!(
+            token::Client::new(&env, &token_id).balance(&client.address),
+            before_balance
+        );
+    }
+
+    #[test]
+    fn test_update_platform_fee_rejects_invalid_fee_without_mutating_state() {
+        let env = Env::default();
+        let (client, _, _, _, _, token_id, _) = setup_test(&env, true);
+
+        let before_fee = client.get_platform_fee();
+        let before_balance = token::Client::new(&env, &token_id).balance(&client.address);
+
+        // MAX_PLATFORM_FEE_BPS is 1000 (10%); anything above must be rejected.
+        let result = client.try_update_platform_fee(&(MAX_PLATFORM_FEE_BPS + 1));
+
+        assert_panic_contract_error(result, Error::InvalidFee);
+        assert_eq!(client.get_platform_fee(), before_fee);
+        assert_eq!(
+            token::Client::new(&env, &token_id).balance(&client.address),
+            before_balance
+        );
+    }
 }
 
 
@@ -7666,11 +8825,187 @@ fn test_recurring_escrow_cancellation_refunds_unreleased_amount() {
     assert!(!client.get_recurring_escrow(&rec.id).is_active);
 }
 
+
+// ============================================================
+// Issue #1049 – Prevent Recurring Release After Cancellation
+// ============================================================
+
+// ─── Differential Upgrade Compatibility Harness ──────────────────────────────
+//
+// The acceptance gate for a WASM upgrade must prove that representative state
+// and calls behave identically before and after migration. The harness below
+// builds a fixture containing all accepted categories, captures the observable
+// reads/errors/balances/events/invariants, performs the storage-layout
+// migration step, captures again, and fails on any difference.
+
+#[derive(Clone, Debug, PartialEq)]
+struct DifferentialSnapshot {
+    version: u32,
+    platform_fee_bps: u32,
+    paused: bool,
+    escrow_count: u32,
+    total_fees_collected: i128,
+    total_fees_for_token: i128,
+    stake: i128,
+    under_collateralized: bool,
+    admin: Address,
+    arbitrator: Address,
+    active_escrow: Escrow,
+    disputed_escrow: Escrow,
+    migrated_legacy_escrow: Escrow,
+    buyer_escrow_ids: soroban_sdk::Vec<u64>,
+    seller_escrow_ids: soroban_sdk::Vec<u64>,
+    buyer_token_balance: i128,
+    seller_token_balance: i128,
+    platform_token_balance: i128,
+    contract_token_balance: i128,
+    event_count: u32,
+}
+
+fn capture_differential_snapshot(
+    env: &Env,
+    client: &CraftNexusContractClient<'static>,
+    token_client: &token::Client<'static>,
+    token_id: &Address,
+    buyer: &Address,
+    seller: &Address,
+    platform_wallet: &Address,
+    active_id: u32,
+    disputed_id: u32,
+    legacy_id: u32,
+) -> DifferentialSnapshot {
+    let config = client.get_platform_config();
+    DifferentialSnapshot {
+        version: client.get_version(),
+        platform_fee_bps: client.get_platform_fee(),
+        paused: client.is_paused(),
+        escrow_count: client.get_escrow_count(),
+        total_fees_collected: client.get_total_fees_collected(),
+        total_fees_for_token: client.get_total_fees_for_token(token_id),
+        stake: client.get_stake(seller),
+        under_collateralized: client.is_account_under_collateralized(seller),
+        admin: config.admin.clone(),
+        arbitrator: config.arbitrator.clone(),
+        active_escrow: client.get_escrow(&active_id),
+        disputed_escrow: client.get_escrow(&disputed_id),
+        migrated_legacy_escrow: client.get_escrow(&legacy_id),
+        buyer_escrow_ids: client.get_escrows_by_buyer(buyer, &0, &100, &false),
+        seller_escrow_ids: client.get_escrows_by_seller(seller, &0, &100, &false),
+        buyer_token_balance: token_client.balance(buyer),
+        seller_token_balance: token_client.balance(seller),
+        platform_token_balance: token_client.balance(platform_wallet),
+        contract_token_balance: token_client.balance(&client.address),
+        event_count: env.events().all().len() as u32,
+    }
+}
+
 #[test]
 fn test_get_settlement_receipt_safe_when_missing_and_after_terminal_state() {
     let env = Env::default();
     env.mock_all_auths();
-    let (client, buyer, seller, token_id, token_admin, _, admin) = setup_test(&env, true);
+    env.budget().reset_unlimited();
+
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    let buyer = Address::generate(&env);
+    let seller = Address::generate(&env);
+    let platform_wallet = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let arbitrator = Address::generate(&env);
+
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_id = token_contract.address();
+    let token_admin_client = token::StellarAssetClient::new(&env, &token_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let total_supply = 200_000_000i128;
+
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None::<Address>);
+    client.set_min_escrow_amount(&token_id, &0);
+    client.set_min_release_window(&1);
+    client.set_evidence_challenge_window(&0);
+
+    token_admin_client.mint(&buyer, &100_000_000);
+    token_admin_client.mint(&seller, &100_000_000);
+
+    // Stakes (legacy artisan profile coverage).
+    client.stake_tokens(&seller, &token_id, &10_000_000);
+    assert_eq!(client.get_stake(&seller), 10_000_000);
+
+    // Active and disputed escrows.
+    client.create_escrow(&buyer, &seller, &token_id, &1_000_000, &1, &Some(3600));
+    client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &2, &Some(3600));
+    client.dispute_escrow(&2, &Symbol::new(&env, "Differential"), &buyer);
+
+    // Legacy escrow state that must survive migration.
+    let legacy = LegacyEscrow {
+        id: 3,
+        buyer: buyer.clone(),
+        seller: seller.clone(),
+        token: token_id.clone(),
+        amount: 123,
+        status: EscrowStatus::Active,
+        release_window: 50,
+        created_at: 10,
+        ipfs_hash: None,
+        metadata_hash: None,
+        dispute_reason: None,
+        dispute_initiated_at: None,
+    };
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&(ESCROW, 3u32), &legacy);
+    });
+
+    // Recurring balance fixture.
+    let recurring =
+        client.create_recurring_escrow(&buyer, &seller, &token_id, &1_000_000, &3600, &2);
+    env.ledger().with_mut(|li| li.timestamp += 3601);
+    client.release_next_cycle(&recurring.id);
+
+    // Paused state.
+    client.set_admin_action_threshold(&1);
+    client.set_admin_action_timelock_delay(&0);
+    let action = client.propose_admin_action(&admin, &AdminActionKind::PausePlatform(true));
+    client.execute_admin_action(&action.id);
+    assert!(client.is_paused());
+
+    let before = capture_differential_snapshot(
+        &env,
+        &client,
+        &token_client,
+        &token_id,
+        &buyer,
+        &seller,
+        &platform_wallet,
+        1,
+        2,
+        3,
+    );
+
+    // Simulate a storage-layout upgrade boundary.
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::StorageLayoutVersion);
+    });
+
+    let migrated = client.migrate_storage_layout();
+    assert_eq!(migrated, CURRENT_STORAGE_LAYOUT_VERSION);
+
+      let after = capture_differential_snapshot(
+        &env,
+        &client,
+        &token_client,
+        &token_id,
+        &buyer,
+        &seller,
+        &platform_wallet,
+        1,
+        2,
+        3,
+    );
+
+    assert_eq!(before, after);
 
     // 1. Missing storage key on an order that never existed -> safely returns None without trapping
     assert_eq!(client.get_settlement_receipt(&9999), None);
@@ -7692,3 +9027,127 @@ fn test_get_settlement_receipt_safe_when_missing_and_after_terminal_state() {
     assert_eq!(receipt.path, SettlementPath::ArbitratedPartial);
 }
 
+// ─── accept_partial_refund hardening (Issue: Harden accept_partial_refund) ───
+//
+// `accept_partial_refund` moves value out of a disputed escrow, so every
+// rejection path must leave storage and token balances untouched. The tests
+// below pin the specific `Error` variant raised for the main rejected inputs
+// and assert that no state mutation occurred.
+
+#[test]
+fn test_accept_partial_refund_unauthorized_caller_leaves_state_unchanged() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &10_000_000);
+    let token_client = token::Client::new(&env, &token_id);
+
+    // Fund an escrow and open a dispute, then propose a partial refund.
+    client.create_escrow(&buyer, &seller, &token_id, &1_000_000, &1, &Some(3600));
+    client.dispute_escrow(&1, &Symbol::new(&env, "PartialRefund"), &buyer);
+    client.propose_partial_refund(&1, &250_000, &buyer);
+
+    let escrow_before = client.get_escrow(&1);
+    let buyer_balance_before = token_client.balance(&buyer);
+    let seller_balance_before = token_client.balance(&seller);
+    let contract_balance_before = token_client.balance(&client.address);
+
+    // Drop all authorizations so the caller is unauthenticated.
+    env.set_auths(&[]);
+
+    let result = client.try_accept_partial_refund(&1);
+    assert_panic_contract_error(result, Error::Unauthorized);
+
+    // Storage and balances must be byte-for-byte identical after rejection.
+    assert_eq!(client.get_escrow(&1), escrow_before);
+    assert_eq!(token_client.balance(&buyer), buyer_balance_before);
+    assert_eq!(token_client.balance(&seller), seller_balance_before);
+    assert_eq!(token_client.balance(&client.address), contract_balance_before);
+}
+
+#[test]
+fn test_accept_partial_refund_rejected_while_paused_leaves_state_unchanged() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &10_000_000);
+    let token_client = token::Client::new(&env, &token_id);
+
+    client.create_escrow(&buyer, &seller, &token_id, &1_000_000, &1, &Some(3600));
+    client.dispute_escrow(&1, &Symbol::new(&env, "PartialRefund"), &buyer);
+    client.propose_partial_refund(&1, &250_000, &buyer);
+
+    let escrow_before = client.get_escrow(&1);
+    let buyer_balance_before = token_client.balance(&buyer);
+    let seller_balance_before = token_client.balance(&seller);
+    let contract_balance_before = token_client.balance(&client.address);
+
+    // Pause the platform through the admin path.
+    client.set_paused(&true);
+    assert!(client.is_paused());
+
+    let result = client.try_accept_partial_refund(&1);
+    assert_panic_contract_error(result, Error::ContractPaused);
+
+    // Pause state itself is unchanged and no value moved.
+    assert!(client.is_paused());
+    assert_eq!(client.get_escrow(&1), escrow_before);
+    assert_eq!(token_client.balance(&buyer), buyer_balance_before);
+    assert_eq!(token_client.balance(&seller), seller_balance_before);
+    assert_eq!(token_client.balance(&client.address), contract_balance_before);
+}
+
+#[test]
+fn test_accept_partial_refund_missing_proposal_returns_proposal_not_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &10_000_000);
+    let token_client = token::Client::new(&env, &token_id);
+
+    client.create_escrow(&buyer, &seller, &token_id, &1_000_000, &1, &Some(3600));
+    client.dispute_escrow(&1, &Symbol::new(&env, "PartialRefund"), &buyer);
+    // Deliberately do NOT propose a partial refund.
+
+    let escrow_before = client.get_escrow(&1);
+    let buyer_balance_before = token_client.balance(&buyer);
+    let seller_balance_before = token_client.balance(&seller);
+    let contract_balance_before = token_client.balance(&client.address);
+
+    let result = client.try_accept_partial_refund(&1);
+    assert_panic_contract_error(result, Error::ProposalNotFound);
+
+    assert_eq!(client.get_escrow(&1), escrow_before);
+    assert_eq!(token_client.balance(&buyer), buyer_balance_before);
+    assert_eq!(token_client.balance(&seller), seller_balance_before);
+    assert_eq!(token_client.balance(&client.address), contract_balance_before);
+}
+
+#[test]
+fn test_accept_partial_refund_rejected_when_not_in_dispute() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &10_000_000);
+    let token_client = token::Client::new(&env, &token_id);
+
+    // Escrow is Active, not Disputed.
+    client.create_escrow(&buyer, &seller, &token_id, &1_000_000, &1, &Some(3600));
+
+    let escrow_before = client.get_escrow(&1);
+    let buyer_balance_before = token_client.balance(&buyer);
+    let seller_balance_before = token_client.balance(&seller);
+    let contract_balance_before = token_client.balance(&client.address);
+
+    let result = client.try_accept_partial_refund(&1);
+    assert_panic_contract_error(result, Error::NotInDispute);
+
+    assert_eq!(client.get_escrow(&1), escrow_before);
+    assert_eq!(token_client.balance(&buyer), buyer_balance_before);
+    assert_eq!(token_client.balance(&seller), seller_balance_before);
+    assert_eq!(token_client.balance(&client.address), contract_balance_before);
+}

@@ -309,3 +309,6 @@ fn test_reactivate_profile_after_username_claimed_by_another() {
     // User A attempts reactivation — must panic because username is taken
     onboarding.reactivate_profile(&user_a);
 }
+
+// ===== Issue: Token Identity Checks =====
+
