@@ -6702,12 +6702,18 @@ impl CraftNexusContract {
     }
 
     fn get_stored_escrow(env: &Env, order_id: u32) -> Escrow {
+        Self::try_get_stored_escrow(env, order_id)
+            .unwrap_or_else(|error| env.panic_with_error(error))
+    }
+
+    /// Load and normalise an escrow, returning the existing error for an absent key.
+    fn try_get_stored_escrow(env: &Env, order_id: u32) -> Result<Escrow, Error> {
         let key = (ESCROW, order_id);
         let stored: Val = env
             .storage()
             .persistent()
             .get(&key)
-            .unwrap_or_else(|| env.panic_with_error(crate::Error::EscrowNotFound));
+            .ok_or(Error::EscrowNotFound)?;
         let map = Map::<Symbol, Val>::try_from_val(env, &stored).expect("");
         let version_key = Symbol::new(env, "version");
 
@@ -6727,10 +6733,10 @@ impl CraftNexusContract {
                 Self::escrow_from_without_batch(env, previous)
             };
             if escrow.version < CURRENT_ESCROW_VERSION {
-                return Self::upgrade_escrow(env, order_id, escrow);
+                return Ok(Self::upgrade_escrow(env, order_id, escrow));
             }
-            Self::extend_persistent(env, &key);
-            return escrow;
+            Self::extend_persistent_read(env, &key);
+            return Ok(escrow);
         }
 
         let legacy = LegacyEscrow::try_from_val(env, &stored).expect("");
@@ -6763,7 +6769,7 @@ impl CraftNexusContract {
         };
         env.storage().persistent().set(&key, &upgraded);
         Self::extend_persistent(env, &key);
-        upgraded
+        Ok(upgraded)
     }
 
     /// Reject duplicate escrow identifiers (#1027).
@@ -7323,14 +7329,16 @@ impl CraftNexusContract {
     /// `dispute_escalation_window` so deployments that never call
     /// `set_escalation_checkpoints` keep their current tier-1 behaviour (#941).
     fn escalation_checkpoints(env: &Env, config: &PlatformConfig) -> EscalationCheckpoints {
-        env.storage()
-            .persistent()
-            .get(&DataKey::EscalationCheckpoints)
-            .unwrap_or(EscalationCheckpoints {
-                party_checkpoint: config.dispute_escalation_window,
-                moderator_checkpoint: DEFAULT_MODERATOR_ESCALATION_CHECKPOINT,
-                admin_checkpoint: DEFAULT_ADMIN_ESCALATION_CHECKPOINT,
-            })
+        let key = DataKey::EscalationCheckpoints;
+        let checkpoints: Option<EscalationCheckpoints> = env.storage().persistent().get(&key);
+        if checkpoints.is_some() {
+            Self::extend_persistent_read(env, &key);
+        }
+        checkpoints.unwrap_or(EscalationCheckpoints {
+            party_checkpoint: config.dispute_escalation_window,
+            moderator_checkpoint: DEFAULT_MODERATOR_ESCALATION_CHECKPOINT,
+            admin_checkpoint: DEFAULT_ADMIN_ESCALATION_CHECKPOINT,
+        })
     }
 
     /// Normalise the checkpoint offsets into absolute timestamps for one dispute.
@@ -7385,10 +7393,18 @@ impl CraftNexusContract {
     /// The escalation ladder state recorded on-chain, or the implicit starting
     /// state for a dispute that has never been escalated.
     fn recorded_escalation_tier(env: &Env, order_id: u32) -> EscalationTier {
-        env.storage()
+        let key = DataKey::DisputeEscalationState(order_id);
+        match env
+            .storage()
             .persistent()
-            .get::<_, DisputeEscalationState>(&DataKey::DisputeEscalationState(order_id))
-            .map_or(EscalationTier::Assigned, |state| state.tier)
+            .get::<_, DisputeEscalationState>(&key)
+        {
+            Some(state) => {
+                Self::extend_persistent_read(env, &key);
+                state.tier
+            }
+            None => EscalationTier::Assigned,
+        }
     }
 
     /// Explicit escalation permission matrix (#1080).
@@ -10292,16 +10308,28 @@ impl CraftNexusContract {
     /// finalized, and the settlement a timeout would deterministically produce.
     ///
     /// # Errors
+    /// * [`Error::EscrowNotFound`] if the escrow storage key is absent.
+    /// * [`Error::PlatformNotInitialized`] if platform configuration is absent.
+    /// * [`Error::CorruptedPlatformConfig`] if platform configuration cannot be decoded.
     /// * [`Error::InvalidEscrowState`] if the escrow is not `Disputed` or has no
     ///   `dispute_initiated_at` timestamp.
     pub fn get_dispute_escalation_status(
         env: Env,
         order_id: u32,
     ) -> Result<DisputeEscalationStatus, Error> {
-        let escrow = Self::get_stored_escrow(&env, order_id);
+        let escrow = Self::try_get_stored_escrow(&env, order_id)?;
         Self::assert_disputed_for_policy(&escrow)?;
 
-        let config = Self::get_platform_config_internal(&env);
+        let stored: Val = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlatformConfig)
+            .ok_or(Error::PlatformNotInitialized)?;
+        let config = PlatformConfig::try_from_val(&env, &stored)
+            .map_err(|_| Error::CorruptedPlatformConfig)?;
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTENSION);
         let schedule = Self::escalation_schedule(&env, &escrow, &config)?;
         let now = env.ledger().timestamp();
         let current_tier = Self::tier_at(now, &schedule);
