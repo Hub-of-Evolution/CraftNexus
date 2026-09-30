@@ -8127,3 +8127,90 @@ fn test_differential_upgrade_compatibility_representative_fixture() {
         total_supply
     );
 }
+
+// ============================================================
+// Issue #1389 – Harden compact_archival_records failure and auth paths
+// ============================================================
+
+#[test]
+fn test_compact_archival_records_unauthorized() {
+    let env = Env::default();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &1_000_000, &1, &None);
+    client.release_funds(&1);
+    client.archive_terminal_escrow(&1);
+
+    let initial_summary = client.get_archival_summary(&1);
+    assert!(initial_summary.is_some());
+    let initial_cursor = client.get_archival_compaction_cursor();
+    let token = token::Client::new(&env, &token_id);
+    let initial_buyer_bal = token.balance(&buyer);
+    let initial_seller_bal = token.balance(&seller);
+
+    // Call without auth mocks as an unauthorized caller
+    env.mock_auths(&[]);
+    let res = client.try_compact_archival_records(&0, &10);
+    assert!(res.is_err());
+
+    // Verify state & balances unchanged
+    assert_eq!(client.get_archival_summary(&1), initial_summary);
+    assert_eq!(client.get_archival_compaction_cursor(), initial_cursor);
+    assert_eq!(token.balance(&buyer), initial_buyer_bal);
+    assert_eq!(token.balance(&seller), initial_seller_bal);
+}
+
+#[test]
+fn test_compact_archival_records_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &1_000_000, &1, &None);
+    client.release_funds(&1);
+    client.archive_terminal_escrow(&1);
+
+    let initial_summary = client.get_archival_summary(&1);
+    assert!(initial_summary.is_some());
+    let initial_cursor = client.get_archival_compaction_cursor();
+    let token = token::Client::new(&env, &token_id);
+    let initial_buyer_bal = token.balance(&buyer);
+    let initial_seller_bal = token.balance(&seller);
+
+    // Pause contract
+    client.set_paused(&true);
+
+    let res = client.try_compact_archival_records(&0, &10);
+    assert_eq!(res.unwrap_err(), Ok(Error::ContractPaused));
+
+    // Verify state & balances unchanged
+    assert_eq!(client.get_archival_summary(&1), initial_summary);
+    assert_eq!(client.get_archival_compaction_cursor(), initial_cursor);
+    assert_eq!(token.balance(&buyer), initial_buyer_bal);
+    assert_eq!(token.balance(&seller), initial_seller_bal);
+}
+
+#[test]
+fn test_compact_archival_records_overflow_cursor() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &1_000_000, &1, &None);
+    client.release_funds(&1);
+    client.archive_terminal_escrow(&1);
+
+    let initial_summary = client.get_archival_summary(&1);
+    let initial_cursor = client.get_archival_compaction_cursor();
+
+    // Passing cursor <= total and limit that causes cursor + limit to overflow u32
+    let res = client.try_compact_archival_records(&1, &u32::MAX);
+    assert_eq!(res.unwrap_err(), Ok(Error::CounterOverflow));
+
+    // Verify state unchanged
+    assert_eq!(client.get_archival_summary(&1), initial_summary);
+    assert_eq!(client.get_archival_compaction_cursor(), initial_cursor);
+}
