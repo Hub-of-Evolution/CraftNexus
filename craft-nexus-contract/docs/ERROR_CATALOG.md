@@ -74,15 +74,29 @@ This document catalogs all public contract errors, their meanings, triggering co
 ---
 
 #### Error 23: ReleaseWindowTooShort
-**Description**: The release window is below the platform-configured minimum.
+**Description**: The release window is below the platform-configured minimum, or an admin attempted to persist a release-window configuration whose bounds are zero.
 
 **Triggering Conditions**:
-- `release_window < min_release_window`
+- `release_window < min_release_window` (escrow creation)
+- `set_min_release_window(0)` — a zero-second minimum is impossible
+- `set_max_release_window(0)` — a zero-second maximum is impossible
+- `set_max_release_window(max)` where `max < min_release_window` — the bounds are inverted
+- `propose_admin_action` / `execute_admin_action` with an equivalent invalid `SetMinReleaseWindow` / `SetMaxReleaseWindow` configuration
 
 **Suggested Client Action**:
 1. Query minimum release window: `get_min_release_window()`
 2. Increase the release window to meet or exceed the minimum
 3. Consider using a longer window for buyer protection
+
+> **Configuration validation (#1032).** Release-window configuration is
+> validated *before* it is persisted, in every change path (direct setters,
+> multi-sig proposal, and multi-sig execution). A configuration is rejected
+> when the bounds are zero, inverted (`min > max`), above the absolute safety
+> ceiling (`365 days`), or when the minimum outlives the maximum dispute
+> duration (`get_max_dispute_duration()`). Inverted bounds and an over-long
+> maximum are surfaced as [`Error 7: ReleaseWindowTooLong`]; committed escrows
+> always keep the release window they were created with, and configuration
+> changes are never applied retroactively.
 
 ---
 
