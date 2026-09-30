@@ -8826,6 +8826,7 @@ impl CraftNexusContract {
     pub fn update_arbitrator(env: Env, new_arbitrator: Address) {
         let mut config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
+        Self::check_not_paused(&env);
 
         let old_arbitrator = config.arbitrator.clone();
         let old_revision = env
