@@ -146,3 +146,33 @@ fn test_get_stake_cooldown_readable_after_terminal_stake_state() {
     // must still return the configured value rather than an error.
     assert_eq!(client.get_stake_cooldown(), COOLDOWN);
 }
+
+#[test]
+fn test_get_artisan_stake_data_missing_key() {
+    let (_env, client, _, artisan, _token) = setup_env();
+
+    // Before any stake record exists, the call must not trap.
+    let result = client.try_get_artisan_stake_data(&artisan);
+    assert!(
+        result.is_err(),
+        "get_artisan_stake_data should return an error when the key is absent"
+    );
+}
+
+#[test]
+fn test_get_artisan_stake_data_after_terminal_state() {
+    let (env, client, _, artisan, token) = setup_env();
+
+    client.stake_tokens(&artisan, &token.address, &1000);
+
+    // Advance past the cooldown and fully unstake to reach a terminal state.
+    env.ledger().set_timestamp(env.ledger().timestamp() + (86400 * 7) + 1);
+    client.unstake_tokens(&artisan, &token.address);
+
+    // After the terminal state, the call must not trap and should return an error.
+    let result = client.try_get_artisan_stake_data(&artisan);
+    assert!(
+        result.is_err(),
+        "get_artisan_stake_data should return an error after the terminal state"
+    );
+}
