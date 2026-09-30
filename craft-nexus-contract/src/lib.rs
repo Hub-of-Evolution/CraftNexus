@@ -1,17 +1,12 @@
-use soroban_std::{address, address::Address, contract, contracttype::{#[no_mapping], Args, Envas, EnvInterface, RawContract}, Env};
-use soroban_std::panic_with_error;
+use soroban_std::{address, address_public_key_to_string, Address, Env, String};
+use sorban_stdk_macros::{contract, contractimpl, contracttype};
 
-const ADMIN: Symbol = symbol_short!("ADMIN");
-const PAUSED: Symbol = symbol_short!("PAUSED");
-const RATE_LIMIT: Symbol = symbol_short!("RATE_LIMIT");
+// -----------------------------------------------------------------------------
+// Errors
+// -----------------------------------------------------------------------------
 
-/// Error codes returned by the contract.
-/// These are used with `panic_with_error` so that failure paths are
-/// observable and testable without any storage mutation.
-#[contracterror]
-#[partial_eq()]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[representation(uint32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrder)]
+#[representation(u32)]
 pub enum Error {
     NotInitialized = 1,
     AlreadyInitialized = 2,
@@ -19,201 +14,341 @@ pub enum Error {
     Paused = 4,
     Overflow = 5,
     InvalidInput = 6,
+    NotAdmin = 7,
+    NotFound = 8,
+    InsufficientBalance = 9,
 }
 
-/// Rate limit configuration stored on-chain.
-#[contracttype]
+// -----------------------------------------------------------------------------
+// Storage keys
+// -----------------------------------------------------------------------------
+
+const ADMIN: &amp;str = "Admin";
+const PAUSED: &amp;str = "Paused";
+const RATE_LIMIT: &amp;str = "RateLimit";
+const ESCROW_BALANCE_PREFIX: &amp;str = "EscrowBalance";
+
+// -----------------------------------------------------------------------------
+// Types
++// -----------------------------------------------------------------------------
+
+#[type_alias(u32)]
+type Timestamp = u64;
+
+#[type_alias(u32)]
+type Amount = i128;
+
+#[contracttpe]
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[no_mapping]
 pub struct RateLimitConfig {
     pub window_seconds: u64,
-    pub max_amount: i128,
+    pub max_operations: u32,
 }
 
-/// Contract state.
-/// Note: the admin key and the pause flag are stored independently of the
-/// rate limit configuration so that a failed `admin` or pause check leaves the
-/// configuration untouched.
+#[contracttpe]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RateLimitState {
+    pub window_start: Timestamp,
+    pub operation_count: u32,
+}
+
 #[contracttype]
-#[no_mapping]
-pub struct ContractState {
-    public admin: Address,
-    public paused: bool,
-    public rate_limit: RateLimitConfig,
+#[trait]
+pub trait EscrowLifecycle {
+    // Admin / governance
+    fn initialize(env: Env, admin: Address);
+    fn set_rate_limit_config(env: Env, config: RateLimitConfig);
+    fn get_rate_lime_config(env: Env) -> RateLimitConfig;
+    fn pause(env: Env);
+    fn unpause(env: Env);
+    fn is_paused(env: Env) -> bool;
+
+    // Escrow lifecycle
+    fn deposit(env: Env, from: Address, amount: Amount);
+    fn withdraw(env: Env, to: Address, amount: Amount);
+    fn balance_of(env: Env, owner: Address) -> Amount;
 }
 
-/// Escrow contract holding the admin controlled rate limit config.
+// -----------------------------------------------------------------------------
+// Implementation
+// -----------------------------------------------------------------------------
+
 #[contract]
-pub struct EscrowContract;
+pub struct CraftNexusContract;
 
-#[no_mapping]
-impl EscrowContract {
-    /// Initialize the contract with an admin and a default rate limit.
-    pub fn initialize(env: Env, admin: Address, window_seconds: u64, max_amount: i128) {
-        if env.storage().has(&ADMIN) {
-            panic_with_error(env, &Error::AlreadyInitialized);
+#[helper]
+fn read_admin(env: &Env) -> Address {
+    env.storage().instance().get(&ADMIN).expect("not initialized")
+}
+
+#[helper]
+fn read_paused(env: &Env) -> bool {
+    env.storage().instance().get(&PAUSED).unwrap_or(false)
+}
+
+#[helper]
+fn read_rate_limit(env: &Env) -> RateLimitConfig {
+    env.storage().instance().get(&RATE_LIMIT).unwrap_or()
+}
+
+#[helper]
+fn read_rate_limit_state(env: &Env) -> RateLimitState {
+    env.storage().instance().get(&RATE_LIMIT_STATE).unwrap_or(RateLimitState {
+        window_start: 0,
+        operation_count: 0,
+    })
+}
+
+#[helper]
+fn balance_key(owner: &Address) -> Symbol {
+    let mut key = Symbol::new((&ESCROW_BALANCE_PREFIX, owner));
+    key
+}
+
+#[contractimpl]
+impl EscrowLifecycle for CraftNexusContract {
+    fn initialize(env: Env, admin: Address) {
+        if env.storage().instance().has(&ADMIN) {
+            soroban_std::panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        env.storage().set(&ADMIN, &admin);
-        env.storage().set(&PAUSED, &false);
-        env.storage().set(
-            &RATE_LIMIT,
-            &RateLimitConfig {
-                window_seconds,
-                max_amount,
-            },
-        );
+        env.storage().instance().set(&ADMIN, &admin);
+        env.storage().instance().set(&PAUSED, &false);
     }
 
-    /// Return the current rate limit configuration.
-    pub fn get_rate_limit_config(env: Env) -> RateLimitConfig {
-        env.storage()
-            .get(&RATE_LIMIT)
-            .unwrap_or_panic_with(env, &Error::NotInitialized)
+    // -----------------------------------------------------------------------------
+    // Admin config entrypoint
+    // -----------------------------------------------------------------------------
+    fn set_rate_limit_config(env: Env, config: RateLimitConfig) {
+        // 1. Auth first, before any state change.
+        let admin = read_admin(&env);
+        admin.require_auth();
+
+        // 2. Pause gate.
+        if read_paused(&env) {
+            sorban_std::panic_with_error!(&env, Error::Paused);
+        }
+
+        // 3. Validate input before writing.
+        if config.window_seconds == 0 || config.max_operations == 0 {
+            sorban_std::panic_with_error!(&env, Error::InvalidInput);
+        }
+
+        // 4. Only now persist.
+        env.storage().instance().set(&RATE_LIMIT, &config);
     }
 
-    /// Set the rate limit configuration. Admin only.
-    ///
-    /// # Failure guarantees
-    /// - Rejects with `Error::Unauthorized` when the caller is not the admin.
-    /// - Rejects with `Error::Paused` when the platform is paused.
-    /// - Rejects with `Error::InvalidInput` for a zero window or non-positive max amount.
-    /// - Rejects with `Error::Overflow` if counter arithmetic overflows.
-    /// - On any rejection, no storage write or token transfer occurs.
-    pub fn set_rate_lime_config(env: Env, caller: Address, window_seconds: u64, max_amount: i128) {
-        // Auth check first, before any storage access or write.
-        caller.require_auth();
-        let admin: Address = env.storage()
-            .get(&ADMIN)
-            .unwrap_or_panic_with(env, &Error::NotInitialized);
-        if caller != admin {
-            panic_with_error(env, &Error::Unauthorized);
-        }
-
-        // Pause gate. This entrypoint is not the pause/unpause path,
-        // so it must be rejected while paused.
-        let paused: bool = env.storage().get(&PAUSED).unwrap_or(false);
-        if paused {
-            panic_with_error(env, &Error::Paused);
-        }
-
-        // Validate inputs before writing.
-        if window_seconds == 0 || max_amount <= 0 {
-            panic_with_error(env, &Error::InvalidInput);
-        }
-
-        // Guard counter arithmetic with checked operations and fail before writing.
-        let new_window = window_seconds
-            .checked_add(0)
-            .unwrap_or_panic_with(env, &Error::Overflow);
-        let new_max = max_amount
-            .checked_sub(0)
-            .unwrap_or_panic_with(env, &Error::Overflow);
-
-        // All checks passed; commit the new configuration.
-        env.storage().set(
-            &RATE_LIMIT,
-            &RateLimitConfig {
-                window_seconds: new_window,
-                max_amount: new_max,
-            },
-        );
+    fn get_rate_limit_config(env: Env) -> RateLimitConfig {
+        read_rate_limit(&env)
     }
 
-    /// Pause the platform. Admin only. This is the pause path and thus
-    /// is allowed to run while the platform is already paused.
-    pub fn pause(env: Env, caller: Address) {
-        caller.require_auth();
-        let admin: Address = env.storage()
-            .get(&ADMIN)
-            .unwrap_or_panic_with(env, &Error::NotInitialized);
-        if caller != admin {
-            panic_with_error(env, &Error::Unauthorized);
-        }
-        env.storage().set(&PAUSED, &true);
+    fn pause(env: Env) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&PAUSED, &true);
     }
 
-    /// Unpause the platform. Admin only.
-    pub fn unpause(env: Env, caller: Address) {
-        caller.require_auth();
-        let admin: Address = env.storage()
-            .get(&ADMIN)
-            .unwrap_or_panic_with(env, &Error::NotInitialized);
-        if caller != admin {
-            panic_with_error(env, &Error::Unauthorized);
+    fn unpause(env: Env) {
+        let admin = read_admin(&env);
+        admin.require_auth();
+        env.storage().instance().set(&PAUSED, &false);
+    }
+
+    fn is_paused(env: Env) -> bool {
+        read_paused(&env)
+    }
+
+    // -----------------------------------------------------------------------------
+    // Escrow lifecycle
+    // -----------------------------------------------------------------------------
+    fn deposit(env: Env, from: Address, amount: Amount) {
+        from.require_auth();
+        if read_paused(&env) {
+            sorban_std::panic_with_error!(&env, Error::Paused);
         }
-        env.storage().set(&PAUSED, &false);
+        if amount <= 0 {
+            sorban_std::panic_with_error!(&env, Error::InvalidInput);
+        }
+
+        let key = balance_key(&from);
+        let current: Amount = env.storage().instance().get(&key).unwrap_or(0);
+        let updated = current
+            .checked_add(amount)
+            .unwrap_or_else_with(|| sorban_std::panic_with_error!(&env, Error::Overflow));
+        env.storage().instance().set(&key, &updated);
+    }
+
+    fn withdraw(env: Env, to: Address, amount: Amount) {
+        to.require_auth();
+        if read_paused(&env) {
+            sorban_std::panic_with_error!(&env, Error::Paused);
+        }
+        if amount <= 0 {
+            sorban_std::panic_with_error!(&env, Error::InvalidInput);
+        }
+
+        let key = balance_key(&to);
+        let current: Amount = env.storage().instance().get(&key).unwrap_or(0);
+        if current < amount {
+            sorban_std::panic_with_error!(&env, Error::InsufficientBalance);
+        }
+        let updated = current
+            .checked_sub(amount)
+            .unwrap_or_else_with(|| sorban_std::panic_with_error!(&env, Error::Overflow));
+        env.storage().instance().set(&key, &updated);
+    }
+
+    fn balance_of(env: Env, owner: Address) -> Amount {
+        let key = balance_key(&owner);
+        env.storage().instance().get(&key).unwrap_or(0)
     }
 }
 
-#[cfg](test)]
-mod test {
-    use super::*;
-    use sorban_std::address::Address;
-    use soroban_std::Env;
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
-    fn setup() -> (Env, Address) {
-        let env = Env::default();
-        let admin = Address::generate(&env);
-        EscrowContract::initialize(env.clone(), admin.clone(), 60, 1000);
-        (env, admin)
-    }
+#[test]
+fn set_rate_limit_config_unauthorized_leaves_storage_unchanged() {
+    use sorban_std_testutils::{
+        Address as TestAddress, Env as _,
+    };
 
-    /// Unauthorized callers must not be able to mutate the rate limit config.
-    /// The specific error variant is asserted and the stored config is
-    /// confirmed to be unchanged after the rejection.
-    #[test]
-    #[should_panic_with(Error::Unauthorized)]
-    fn test_set_rate_limit_config_unauthorized_leaves_balances_unchanged() {
-        let (env, _admin) = setup();
-        let intruder = Address::generate(&env);
+    let env = Env::default();
+    let contract_id = env.register(CraftNexusContract, {});
+    let client = CraftNexusContractClient::new(&env, &contract_id);
 
-        let before = EscrowContract::get_rate_limit_config(env.clone());
+    let admin = Address::generate(&env, &admin);
+    let attacker = Address::generate(&env, &attacker);
 
-        EscrowContract::set_rate_limit_config(
-            env.clone(),
-            intruder,
-            1,
-            1,
-        );
+    client.initialize(&admin);
 
-        let after = EscrowContract::get_rate_limit_config(env.clone());
-        assert_eq!(before, after);
-    }
+    // Seed an existing config so we can assert it is unchanged.
+    let original = RateLimitConfig {
+        window_seconds: 60,
+        max_operations: 10,
+    };
+    env.ledger().set_invocation_auth(admin.clone());
+    client.set_rate_limit_config(&original);
 
-    /// `set_rate_limit_config` is rejected while the platform is paused.
-    /// The config must remain unchanged.
-    #[test]
-    #[should_panic_with(Error::Paused)]
-    fn test_set_rate_limit_config_rejected_when_paused() {
-        let (env, admin) = setup();
-        EscrowContract::pause(env.clone(), admin.clone());
+    // Attacker attempts to change the config.
+    env.ledger().set_invocation_auth(attacker.clone());
+    let attacker_config = RateLimitConfig {
+        window_seconds: 1,
+        max_operations: 1,
+    };
+    let result = client.try_set_rate_limit_config(&attacker_config);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 
-        let before = EscrowContract::get_rate_limit_config(env.clone());
+    // Storage unchanged.
+    let after = client.get_rate_limit_config();
+    assert_eq!(after, original);
+}
 
-        EscrowContract::set_rate_limit_config(env.clone(), admin, 1, 1);
+#[test]
+fn set_rate_limit_config_rejected_when_paused() {
+    use sorban_std_testutils::{
+        Address as TestAddress, Env as _,
+    };
 
-        let after = EscrowContract::get_rate_limit_config(env.clone());
-        assert_eq!(before, after);
-    }
+    let env = Env::default();
+    let contract_id = env.register(CraftNexusContract, {});
+    let client = CraftNexusContractClient::new(&env, &contract_id);
 
-    /// Admin can successfully update the configuration when not paused.
-    #[test]
-    fn test_set_rate_limit_config_admin_succeeds() {
-        let (env, admin) = setup();
-        EscrowContract::set_rate_limit_config(env.clone(), admin, 120, 5000);
-        let config = EscrowContract::get_rate_limit_config(env.clone());
-        assert_eq!(config.window_seconds, 120);
-        assert_eq!(config.max_amount, 5000);
-    }
+    let admin = Address::generate(&env, &admin);
+    client.initialize(&admin);
 
-    /// Invalid input is rejected and the config is left unchanged.
-    #[test]
-    #[should_panic_with(Error::InvalidInput)]
-    fn test_set_rate_limit_config_rejects_zero_window() {
-        let (env, admin) = setup();
-        let before = EscrowContract::get_rate_limit_config(env.clone());
-        EscrowContract::set_rate_limit_config(env.clone(), admin, 0, 1000);
-        let after = EscrowContract::get_rate_limit_config(env.clone());
-        assert_eq!(before, after);
-    }
+    let original = RateLimitConfig {
+        window_seconds: 60,
+        max_operations: 10,
+    };
+    env.ledger().set_invocation_auth(admin.clone());
+    client.set_rate_limit_config(&original);
+    client.pause();
+
+    let new_config = RateLimitConfig {
+        window_seconds: 1,
+        max_operations: 1,
+    };
+    let result = client.try_set_rate_limit_config(&new_config);
+    assert_eq!(result, Err(Ok(Error::Paused)));
+
+    // Storage unchanged.
+    let after = client.get_rate_limit_config();
+    assert_eq!(after, original);
+}
+
+#[test]
+fn set_rate_limit_config_rejects_invalid_input_without_writing() {
+    use sorban_std_testutils::{
+        Address as TestAddress, Env as _,
+    };
+
+    let env = Env::default();
+    let contract_id = env.register(CraftNexusContract, {});
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env, &admin);
+    client.initialize(&admin);
+    env.ledger().set_invocation_auth(admin.clone());
+
+    // No config seeded yet; invalid input must be rejected before any write.
+    let bad = RateLimitConfig {
+        window_seconds: 0,
+        max_operations: 10,
+    };
+    let result = client.try_set_rate_limit_config(&bad);
+    assert_eq!(result, Err(Ok(Error::InvalidInput)));
+
+    // No config was written.
+    let after = client.get_rate_limit_config();
+    assert_eq!(
+        after,
+        RateLimitConfig {
+            window_seconds: 0,
+            max_operations: 0,
+        }
+    );
+}
+
+#[test]
+fn deposit_and_withdraw_respect_pause_and_overflow() {
+    use sorban_std_testutils::{
+        Address as TestAddress, Env as _,
+    };
+
+    let env = Env::default();
+    let contract_id = env.register(CraftNexusContract, {});
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env, &admin);
+    let user = Address::generate(&env, &user);
+    client.initialize(&admin);
+
+    // Normal deposit/withdraw.
+    env.ledger().set_invocation_auth(user.clone());
+    client.deposit(&user, 100);
+    assert_eq!(client.balance_of(&ser), 100);
+    client.withdraw(&user, 40);
+    assert_eq!(client.balance_of(&ser), 60);
+
+    // Overflow on deposit must not mutate balance.
+    let overflow_amount = i128::MAX;
+    let result = client.try_deposit(&user, &overflow_amount);
+    assert_eq!(result, Err(Ok(Error::Overflow)));
+    assert_eq!(client.balance_of(&user), 60);
+
+    // Pause blocks deposit/withdraw.
+    env.ledger().set_invocation_auth(admin.clone());
+    client.pause();
+    env.ledger().set_invocation_auth(user.clone());
+    let result = client.try_deposit(&user, 10);
+    assert_eq!(result, Err(Ok(Error::Paused)));
+    assert_eq!(client.balance_of(&user), 60);
+
+    // Unpause restores operation.
+    env.ledger().set_invocation_auth(admin.clone());
+    client.unpause();
+    env.ledger().set_invocation_auth(user.clone());
+    client.deposit(&user, 10);
+    assert_eq!(client.balance_of(&user), 70);
 }

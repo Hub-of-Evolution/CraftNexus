@@ -1,0 +1,24 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "fix/issue-1360-make-get-liquidation-record-safe-when-storage",
+    "fix/issue-1361-make-get-liquidation-record-count-safe-when",
+    "main",
+    "origin",
+    "security/issue-1318-harden-set-rate-limit-config-failure-and-auth"
+  ],
+  "parent": {
+    "fix/issue-1360-make-get-liquidation-record-safe-when-storage": "main",
+    "fix/issue-1361-make-get-liquidation-record-count-safe-when": "main",
+    "main": null,
+    "origin": "main",
+    "security/issue-1318-harden-set-rate-limit-config-failure-and-auth": "main"
+  },
+  "order": [
+    "main",
+    "fix/issue-1360-make-get-liquidation-record-safe-when-storage",
+    "fix/issue-1361-make-get-liquidation-record-count-safe-when",
+    "origin",
+    "security/issue-1318-harden-set-rate-limit-config-failure-and-auth"
+  ]
+}
