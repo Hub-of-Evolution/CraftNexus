@@ -315,6 +315,12 @@ fn test_trigger_liquidation_capped_at_deficit() {
     // Status should be Liquidated
     let status = client.get_liquidation_status(&seller);
     assert_eq!(status, LiquidationStatus::Liquidated);
+
+    // Reading the policy after a terminal liquidation state must not trap and
+    // must return the persisted (non-default) policy.
+    let policy = client.get_liquidation_policy();
+    assert_eq!(policy.max_seizure_bps, 5000);
+    assert_eq!(policy.grace_period_secs, 0);
 }
 
 #[test]

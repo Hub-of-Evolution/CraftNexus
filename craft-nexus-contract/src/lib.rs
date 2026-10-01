@@ -12525,15 +12525,24 @@ impl CraftNexusContract {
     // ─── Liquidation / Collateral Health (#1111) ────────────────────────────
 
     /// Return the default or persisted liquidation policy.
+    ///
+    /// Reads never trap when the config key is missing (archival, a partial
+    /// migration, or a first-ever read). A missing key yields the documented
+    /// default policy, and hot persistent keys get their TTL extended via
+    /// `extend_persistent_read` on the read path.
     fn get_liquidation_policy_internal(env: &Env) -> LiquidationPolicyData {
-        env.storage()
-            .persistent()
-            .get(&DataKey::LiquidationPolicyConfig)
-            .unwrap_or(LiquidationPolicyData {
+        let key = DataKey::LiquidationPolicyConfig;
+        match env.storage().persistent().get(&key) {
+            Some(policy) => {
+                Self::extend_persistent_read(env, &key);
+                policy
+            }
+            None => LiquidationPolicyData {
                 max_seizure_bps: DEFAULT_LIQUIDATION_MAX_SEIZURE_BPS,
                 grace_period_secs: DEFAULT_LIQUIDATION_GRACE_PERIOD,
                 enabled: true,
-            })
+            },
+        }
     }
 
     /// Evaluate an artisan's collateral health deterministically at the
