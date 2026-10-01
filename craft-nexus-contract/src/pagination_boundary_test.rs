@@ -216,6 +216,26 @@ fn test_iterative_pagination_out_of_range_returns_empty() {
 }
 
 #[test]
+fn test_iterative_pagination_missing_storage_returns_empty() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    let result = client.try_get_all_escrow_ids_iterative(&0, &10);
+    assert!(matches!(result, Ok(Ok(ids)) if ids.is_empty()));
+}
+
+#[test]
+fn test_iterative_pagination_overflowing_page_offset_returns_empty() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    let result = client.try_get_all_escrow_ids_iterative(&u32::MAX, &20);
+    assert!(matches!(result, Ok(Ok(ids)) if ids.is_empty()));
+}
+
+#[test]
 fn test_iterative_pagination_deterministic_across_repeated_calls() {
     let env = Env::default();
     let (client, _, buyer, seller, _, _, token_id) = setup_pagination_test(&env);

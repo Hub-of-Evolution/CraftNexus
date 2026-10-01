@@ -301,7 +301,7 @@ This document catalogs all public contract errors, their meanings, triggering co
 **Suggested Client Action**:
 1. Read the current final deadline: `get_max_dispute_duration()`
 2. Submit strictly increasing offsets, all below that value
-3. Verify with `get_escalation_checkpoints()`
+3. Verify with `get_escalation_checkpoints()`; it returns `None` if no explicit schedule is stored.
 
 ---
 
