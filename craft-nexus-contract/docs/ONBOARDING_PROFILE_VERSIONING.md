@@ -210,6 +210,55 @@ Located in `src/onboarding.rs`.
 - No separate storage key needed
 - Migration happens in-place on first read
 
+## Canonical Onboarding State Digest (#1119)
+
+### Overview
+Marketplace authorization and client integrations require a coherent, tamper-evident digest of onboarding authorization state rather than reading individual fields independently. The canonical onboarding state digest binds the entire authorization state into a single SHA-256 hash.
+
+### Digest Purpose
+- **Coherent State:** Eliminates race conditions and field desynchronization across cross-contract calls.
+- **Tamper-Evident:** Any state modification changes the digest.
+- **Deterministic:** Identical onboarding states always yield the exact same SHA-256 digest.
+
+### Documented Digest Fields and Canonical Field Order
+The digest incorporates exactly 6 onboarding state fields in the following fixed, deterministic order:
+
+1. `account` (`Address`): Length-prefixed string representation of the account address (4-byte big-endian u32 length followed by ASCII bytes).
+2. `profile_version` (`u32`): 4-byte big-endian integer schema version (`CURRENT_USER_PROFILE_VERSION`).
+3. `role` (`UserRole`): 1-byte unsigned integer discriminant (`UserRole as u8`).
+4. `verification` (`bool`): 1-byte unsigned integer (`1` for verified, `0` otherwise).
+5. `activation` (`ProfileStatus`): 1-byte unsigned integer discriminant (`ProfileStatus as u8`: 0 = Active, 1 = Deactivated, 2 = UnderReview, 3 = Flagged).
+6. `revision` (`u64`): 8-byte big-endian integer monotonic state revision (`UserStateRevision`).
+
+### Serialization Rules & Domain Tag
+- **Domain Tag:** Prepend ASCII byte string `b"CRAFTNEXUS_ONBOARDING_DIGEST_V1"`.
+- **Algorithm:** SHA-256 (`env.crypto().sha256(&payload)`).
+- **Output Type:** `BytesN<32>`.
+
+```text
+digest = SHA256(
+    b"CRAFTNEXUS_ONBOARDING_DIGEST_V1" ||
+    u32_be(len(account)) || account_ascii_bytes ||
+    u32_be(profile_version) ||
+    u8(role) ||
+    u8(is_verified ? 1 : 0) ||
+    u8(profile_status) ||
+    u64_be(state_revision)
+)
+```
+
+### Revision Semantics & When the Revision Changes
+- The revision (`UserStateRevision`) is a monotonic counter initialized to `1`.
+- Every authorized state mutation (role update, verification transition, profile deactivation, reactivation, username change, or Sybil review outcome) increments the user's revision counter exactly once and updates the digest.
+- Read-only queries, failed transactions, or non-state-changing operations do not increment the revision.
+
+### Obtaining and Reproducing the Digest
+- On-chain contracts and off-chain clients obtain the current digest by invoking the read-only contract method:
+  ```rust
+  pub fn get_onboarding_digest(env: Env, user: Address) -> BytesN<32>
+  ```
+- External client integrations can reproduce and verify the digest off-chain using the exact canonical encoding rules described above.
+
 ## Testing
 
 The implementation includes regression tests verifying:

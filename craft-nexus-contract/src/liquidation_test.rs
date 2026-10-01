@@ -156,7 +156,11 @@ fn test_set_and_get_liquidation_policy() {
     env.mock_all_auths();
     let (client, _buyer, _seller, _token_id, _token_admin) = setup_test(&env, true);
 
-    // Default policy
+    env.storage()
+        .persistent()
+        .remove(&DataKey::LiquidationPolicyConfig);
+
+    // Missing storage returns the default policy.
     let policy = client.get_liquidation_policy();
     assert!(policy.enabled);
     assert_eq!(policy.max_seizure_bps, 5000);
