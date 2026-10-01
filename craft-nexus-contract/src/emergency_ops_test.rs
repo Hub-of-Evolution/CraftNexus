@@ -146,6 +146,18 @@ fn test_reconciliation_is_bounded_and_blocks_unresolved_sweep() {
 }
 
 #[test]
+fn test_get_reconciliation_report_handles_missing_and_completed_report() {
+    let (_env, client, _buyer, _seller, token, _token_admin, _wallet, _admin) =
+        setup_emergency_env();
+
+    assert_eq!(client.get_reconciliation_report(&token), None);
+
+    let report = client.reconcile_token(&token, &0, &1).unwrap();
+    assert!(report.complete);
+    assert_eq!(client.get_reconciliation_report(&token), Some(report));
+}
+
+#[test]
 fn test_repair_plan_requires_approval_and_is_idempotent() {
     let (env, client, buyer, seller, token, token_admin, wallet, admin) =
         setup_emergency_env();
@@ -186,6 +198,44 @@ fn test_repair_plan_requires_approval_and_is_idempotent() {
     assert!(res2.is_ok());
 
     assert_eq!(client.sweep_unallocated_funds(&token, &wallet), 25_000);
+}
+
+#[test]
+fn test_reconciliation_repair_rejected_while_paused_without_state_changes() {
+    let (env, client, buyer, seller, token, token_admin, wallet, _admin) =
+        setup_emergency_env();
+
+    token_admin.mint(&buyer, &500_000);
+    client.create_escrow(&buyer, &seller, &token, &100_000, &1, &Some(3600));
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalLocked(token.clone()), &200_000i128);
+    });
+    client.reconcile_token(&token, &0, &1).unwrap();
+    client.set_paused(&true);
+
+    let token_client = token::Client::new(&env, &token);
+    let buyer_balance = token_client.balance(&buyer);
+    let contract_balance = token_client.balance(&client.address);
+    let wallet_balance = token_client.balance(&wallet);
+    let result = client.try_propose_reconciliation_repair(&token);
+
+    assert!(matches!(result, Err(Ok(Error::ContractPaused))));
+    assert_eq!(token_client.balance(&buyer), buyer_balance);
+    assert_eq!(token_client.balance(&client.address), contract_balance);
+    assert_eq!(token_client.balance(&wallet), wallet_balance);
+    assert!(client.get_reconciliation_repair_plan(&1).is_none());
+    env.as_contract(&client.address, || {
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKey::AllocatedResidualBalance(token.clone())));
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&DataKey::NextReconciliationRepairPlanId));
+    });
 }
 
 #[test]
