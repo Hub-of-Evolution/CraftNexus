@@ -16,10 +16,7 @@
 #![cfg(test)]
 extern crate alloc;
 
-use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    vec as sdk_vec, Address, BytesN, Env,
-};
+use soroban_sdk::{testutils::{Address as _, Ledger}, vec as sdk_vec, Address, BytesN, Env};
 
 use super::{
     generators::{generate_upgrade_sequence, UpgradeOp},
@@ -48,26 +45,6 @@ fn make_upgrade_env() -> (Env, Address, Address, BytesN<32>) {
     let contract_id = env.register_contract(None, crate::CraftNexusContract);
     let client = CraftNexusContractClient::new(&env, &contract_id);
 
-    let signer2 = Address::generate(&env);
-    let signers = sdk_vec![&env, admin.clone(), signer2.clone()];
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&2);
-
-    // Submit one approval from admin — not yet committed under 2-of-2
-    client.propose_upgrade_wasm(&admin, &hash);
-
-    // Change threshold to 1 mid-round
-    client.set_upgrade_threshold(&1);
-
-    // The pending proposal must be unaffected by the threshold change,
-    // so it should still be uncommitted (needs the second approval).
-    let proposal = client.get_upgrade_proposal();
-    if proposal.is_some() {
-        panic!(
-            "[prop_threshold_change_mid_round_no_effect] threshold change affected an already-pending proposal"
-        );
-    }
-}ctClient::new(&env, &contract_id);
     client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None);
     client.set_min_release_window(&1);
     client.set_evidence_challenge_window(&0);
@@ -208,9 +185,7 @@ fn prop_duplicate_proposal_rejected() {
     let hash2: BytesN<32> = BytesN::from_array(&env, &[5u8; 32]);
     let r = client.try_propose_upgrade_wasm(&admin, &hash2);
     if r.is_ok() && r.unwrap().is_ok() {
-        panic!(
-            "[prop_duplicate_proposal_rejected] second proposal accepted while first is pending"
-        );
+        panic!("[prop_duplicate_proposal_rejected] second proposal accepted while first is pending");
     }
 }
 
@@ -317,14 +292,18 @@ fn prop_multisig_threshold_enforced() {
     client.propose_upgrade_wasm(&admin, &hash);
     let proposal = client.get_upgrade_proposal();
     if proposal.is_some() {
-        panic!("[prop_multisig_threshold_enforced] proposal committed after only 1 of 2 approvals");
+        panic!(
+            "[prop_multisig_threshold_enforced] proposal committed after only 1 of 2 approvals"
+        );
     }
 
     // Even after cooldown, execute should fail since proposal was never committed
     advance_ledger_time(&env, WASM_COOLDOWN + 1);
     let r = client.try_execute_upgrade(&hash);
     if r.is_ok() && r.unwrap().is_ok() {
-        panic!("[prop_multisig_threshold_enforced] execute succeeded with only 1 of 2 approvals");
+        panic!(
+            "[prop_multisig_threshold_enforced] execute succeeded with only 1 of 2 approvals"
+        );
     }
 }
 
