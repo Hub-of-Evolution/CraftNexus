@@ -8392,11 +8392,18 @@ impl CraftNexusContract {
     /// # Errors
     /// * [`Error::InvalidEscrowState`] if the escrow is not a pending dispute.
     pub fn get_dispute_final_deadline(env: Env, order_id: u32) -> Result<u64, Error> {
-        let escrow = Self::get_stored_escrow(&env, order_id);
-        Self::assert_disputed_for_policy(&escrow)?;
-        let config = Self::get_platform_config_internal(&env);
-        Ok(Self::escalation_schedule(&env, &escrow, &config)?.final_deadline)
-    }
+    // Missing storage returns a typed error instead of trapping the host.
+    let escrow = Self::try_get_stored_escrow(&env, order_id)
+        .ok_or(Error::EscrowNotFound)?;
+    Self::assert_disputed_for_policy(&escrow)?;
+    let config = Self::get_platform_config_internal(&env);
+    Ok(Self::escalation_schedule(&env, &escrow, &config)?.final_deadline)
+}
+
+    fn try_get_stored_escrow(env: &Env, order_id: u32) -> Option<Escrow> {
+    // Same storage read as get_stored_escrow, but WITHOUT .expect() / .unwrap()
+    env.storage().persistent().get(&DataKey::Escrow(order_id))
+}
 
     /// Whether `caller` may escalate `order_id` at the current ledger time (#1080).
     ///
