@@ -1833,152 +1833,6 @@ pub trait OnboardingInterface {
     fn is_user_verified(env: Env, user: Address) -> bool;
 }
 
-<<<<<<< HEAD
-#[contract]
-/// CraftNexus escrow contract.
-///
-/// # Storage model
-/// - Escrows are stored under `(ESCROW, order_id)` as a single compact record.
-/// - Enumeration uses count + indexed keys (e.g. `EscrowCount` +
-///   `GlobalEscrowIdIndexed(i)`) to avoid unbounded `Vec` growth.
-///
-/// # TTL model
-/// - Persistent entries extend TTL on write via `extend_persistent`.
-/// - Hot index reads use `extend_persistent_read` with a lower threshold to
-///   reduce rent-refresh overhead while still preventing accidental expiry.
-///
-/// # Onboarding integration
-/// - The admin can register an onboarding contract address.
-/// - Cross-contract calls are wrapped in `try_invoke_contract` helpers so an
-///   onboarding failure never bricks escrow settlement.
-pub struct CraftNexusContract;
-
-impl CraftNexusContract {
-    pub fn enter_reentry_guard(env: &Env) {
-        if env.storage().temporary().has(&DataKey::ReentryGuard) {
-            env.panic_with_error(crate::Error::ReentryDetected);
-=======
-/// AC4 (simplified): cancel_upgrade_wasm increments the proposal nonce.
-#[test]
-fn test_cancel_increments_proposal_nonce() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let hash = BytesN::from_array(&env, &[13u8; 32]);
-
-    // Commit a proposal (threshold=1, admin is sole signer).
-    client.propose_upgrade_wasm(&admin, &hash);
-    let nonce_before = client.get_upgrade_proposal_nonce();
-    assert_eq!(nonce_before, 0, "nonce starts at 0");
-
-    // Cancel increments the nonce.
-    client.cancel_upgrade_wasm();
-    let nonce_after = client.get_upgrade_proposal_nonce();
-    assert_eq!(nonce_after, 1, "nonce must be 1 after first cancel");
-}
-
-/// Replay protection: after cancel + cooldown, re-proposing the same hash
-/// with the same signers starts a completely new round (nonce=1, empty approvals).
-#[test]
-fn test_repropose_same_hash_starts_fresh_round_after_cancel() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-    signers.push_back(signer2.clone());
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&2);
-
-    let hash = BytesN::from_array(&env, &[14u8; 32]);
-
-    // Round 0: admin approves. Threshold not yet met.
-    // To get a partial approval we need threshold=2; but cancel requires a committed
-    // proposal. Lower threshold to 1 to commit, then cancel.
-    client.set_upgrade_threshold(&1);
-    client.propose_upgrade_wasm(&admin, &hash);
-    // Committed. Cancel it.
-    client.cancel_upgrade_wasm();
-    // Nonce is now 1.
-    assert_eq!(client.get_upgrade_proposal_nonce(), 1);
-
-    // Advance past cooldown.
-    env.ledger().with_mut(|li| {
-        li.timestamp += 7 * 24 * 60 * 60 + 1;
-    });
-
-    // Round 1: admin approves again for the SAME hash.
-    client.set_upgrade_threshold(&2);
-    client.propose_upgrade_wasm(&admin, &hash);
-
-    // Nonce is still 1 (cancel hasn't been called again).
-    assert_eq!(client.get_upgrade_proposal_nonce(), 1);
-
-    // Only 1 approval in round 1 — admin's prior approval from round 0 is NOT counted.
-    assert_eq!(
-        client.get_upgrade_approvals(&1).len(),
-        1,
-        "round 1 must have exactly 1 fresh approval, not carry over from round 0"
-    );
-
-    // Proposal must NOT be committed (threshold=2, only 1 approval so far).
-    assert!(
-        client.get_upgrade_proposal().is_none(),
-        "proposal must not commit with only 1 of 2 required approvals in fresh round"
-    );
-
-    // signer2 approves to complete round 1.
-    client.propose_upgrade_wasm(&signer2, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_some(),
-        "proposal must commit after 2nd approval"
-    );
-}
-
-/// Threshold snapshot: changing threshold mid-round does not affect the current round.
-#[test]
-fn test_threshold_change_mid_round_does_not_affect_current_round() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let (client, _, _, _, _, _, admin) = setup_test(&env, true);
-
-    let signer2 = Address::generate(&env);
-    let signer3 = Address::generate(&env);
-    let mut signers = Vec::new(&env);
-    signers.push_back(admin.clone());
-    signers.push_back(signer2.clone());
-    signers.push_back(signer3.clone());
-    client.set_upgrade_signers(&signers);
-    client.set_upgrade_threshold(&3); // requires all 3
-
-    let hash = BytesN::from_array(&env, &[15u8; 32]);
-
-    // admin approves first — snapshot captures threshold=3.
-    client.propose_upgrade_wasm(&admin, &hash);
-    assert!(client.get_upgrade_proposal().is_none());
-
-    // Admin lowers threshold to 1 after the round has opened.
-    client.set_upgrade_threshold(&1);
-
-    // signer2 approves — with the NEW threshold=1 this would be sufficient,
-    // but the snapshot still requires 3.
-    client.propose_upgrade_wasm(&signer2, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_none(),
-        "proposal must not commit: snapshot threshold is 3, only 2 approvals so far"
-    );
-
-    // Third approval completes the snapshotted requirement.
-    client.propose_upgrade_wasm(&signer3, &hash);
-    assert!(
-        client.get_upgrade_proposal().is_some(),
-        "proposal must commit after 3 of 3 approvals"
-    );
-}
-
 // ============== Batch Operations Tests ==============
 
 #[test]
@@ -3231,7 +3085,6 @@ fn test_migrate_fee_token_configs_migrates_twenty_tokens_and_emits_summary() {
             scanned_tokens: 20,
             migrated_configs: 20,
             skipped_existing: 0,
->>>>>>> 867344c7525c03c89db6e2269239d86e67ad05f3
         }
         env.storage().temporary().set(&DataKey::ReentryGuard, &true);
     }
@@ -3928,22 +3781,6 @@ impl CraftNexusContract {
         })
     }
 
-<<<<<<< HEAD
-    fn authorize_onboarding_state(
-=======
-    let events = env.events().all();
-    let latest_event = events.last().unwrap();
-    let latest_summary: FeeTokenConfigsMigratedEvent = latest_event.2.try_into_val(&env).unwrap();
-    assert_eq!(
-        latest_summary,
-        FeeTokenConfigsMigratedEvent {
-            schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
-            scanned_tokens: 20,
-            migrated_configs: 0,
-            skipped_existing: 20,
-        }
-    );
-}
 
 // ============================================================
 // Issue #111 – Batch Optimization Tests (Additional)
@@ -6394,7 +6231,6 @@ mod onboarding_state_consistency {
     /// Build a fully wired two-contract environment: real OnboardingContract +
     /// CraftNexusContract, with both buyer and seller already onboarded.
     fn setup_wired(
->>>>>>> 867344c7525c03c89db6e2269239d86e67ad05f3
         env: &Env,
         user: &Address,
         operation_id: Bytes,
@@ -6565,7 +6401,6 @@ mod onboarding_state_consistency {
             None => return false,
         };
 
-<<<<<<< HEAD
         let method = Symbol::new(env, "update_active_contracts");
         let args: Vec<Val> = (user.clone(), delta).into_val(env);
 
@@ -6577,20 +6412,6 @@ mod onboarding_state_consistency {
                 false
             }
         }
-=======
-        let result = escrow.try_create_escrow(
-            &buyer,
-            &seller,
-            &token_id,
-            &10_000i128,
-            &1u32,
-            &Some(3600u32),
-        );
-        assert!(
-            result.is_ok(),
-            "active users should be allowed to create escrow"
-        );
->>>>>>> 867344c7525c03c89db6e2269239d86e67ad05f3
     }
 
     /// Safely query the onboarding contract for a single user's canonical state.
@@ -6940,305 +6761,6 @@ mod onboarding_state_consistency {
         Ok(())
     }
 
-<<<<<<< HEAD
-    /// Remove a token from the platform whitelist (admin only).
-    ///
-    /// Uses individual key-value pairs for scalability. Removes the specific
-    /// token entry and updates the count. If the resulting whitelist is empty,
-    /// whitelist enforcement is automatically disabled (all tokens permitted again).
-    pub fn remove_token_from_whitelist(env: Env, token: Address) {
-        let config = Self::get_platform_config_internal(&env);
-        config.admin.require_auth();
-
-        Self::migrate_legacy_whitelisted_tokens(&env);
-        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
-
-        if env.storage().persistent().has(&token_key) {
-            env.storage().persistent().remove(&token_key);
-            let count = Self::get_whitelist_count(&env);
-            if count > 0 {
-                Self::set_whitelist_count(&env, count - 1);
-            }
-        }
-    }
-
-    /// Check whether a specific token is on the whitelist.
-    ///
-    /// Returns `true` if the token is explicitly whitelisted, OR if the whitelist
-    /// is empty (enforcement not yet active). Uses individual key lookups for
-    /// scalability instead of loading the entire whitelist Map.
-    pub fn is_token_whitelisted(env: Env, token: Address) -> bool {
-        Self::migrate_legacy_whitelisted_tokens(&env);
-        let count = Self::get_whitelist_count(&env);
-        if count == 0 {
-            return true;
-        }
-
-        let token_key = DataKey::WhitelistedTokenIndexed(token);
-        let is_whitelisted = env.storage().persistent().has(&token_key);
-        if is_whitelisted {
-            Self::extend_persistent(&env, &token_key);
-        }
-        is_whitelisted
-    }
-
-    /// Internal helper: panics with TokenNotWhitelisted when enforcement is active
-    /// and the token is not on the whitelist.
-    /// NOTE: whitelist enforcement is intentionally performed only during
-    /// escrow creation (and related locking operations). State transitions
-    /// such as `release`, `refund`, or recurring cycle releases MUST NOT
-    /// re-check the whitelist to avoid locking funds for escrows created
-    /// before whitelist changes. Keep this helper private and call it only
-    /// in creation-time validation paths.
-    fn check_token_whitelisted(env: &Env, token: &Address) {
-        Self::migrate_legacy_whitelisted_tokens(env);
-        let count = Self::get_whitelist_count(env);
-        if count == 0 {
-            return;
-        }
-
-        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
-        if !env.storage().persistent().has(&token_key) {
-            env.panic_with_error(crate::Error::TokenNotWhitelisted);
-        }
-    }
-
-    /// Get the count of whitelisted tokens.
-    ///
-    /// Returns 0 if no tokens are whitelisted (enforcement disabled).
-    /// This is more efficient than loading all tokens when only the count is needed.
-    pub fn get_whitelisted_token_count(env: Env) -> u32 {
-        Self::migrate_legacy_whitelisted_tokens(&env);
-        Self::get_whitelist_count(&env)
-    }
-
-    /// Migrate legacy whitelist storage to individual key-value pairs.
-    ///
-    /// This function reads the old WhitelistedTokens Map and converts each entry
-    /// to individual WhitelistedTokenIndexed keys. Should be called once during
-    /// contract upgrade to migrate existing data.
-    pub fn migrate_whitelist_storage(env: Env) -> u32 {
-        let config = Self::get_platform_config_internal(&env);
-        config.admin.require_auth();
-
-        let legacy_key = DataKey::WhitelistedTokens;
-
-        // Check if legacy storage exists
-        if !env.storage().persistent().has(&legacy_key) {
-            return 0; // Nothing to migrate
-        }
-
-        let legacy_whitelist: Map<Address, bool> = env
-            .storage()
-            .persistent()
-            .get(&legacy_key)
-            .unwrap_or(Map::new(&env));
-
-        let mut migrated_count = 0u32;
-
-        // Migrate each token to individual storage
-        let keys = legacy_whitelist.keys();
-        for i in 0..keys.len() {
-            if let Some(token) = keys.get(i) {
-                if let Some(is_whitelisted) = legacy_whitelist.get(token.clone()) {
-                    if is_whitelisted {
-                        let token_key = DataKey::WhitelistedTokenIndexed(token);
-                        env.storage().persistent().set(&token_key, &true);
-                        Self::extend_persistent(&env, &token_key);
-                        migrated_count += 1;
-                    }
-                }
-            }
-        }
-
-        // Update count
-        if migrated_count > 0 {
-            let count_key = DataKey::WhitelistedTokenCount;
-            env.storage().persistent().set(&count_key, &migrated_count);
-            Self::extend_persistent(&env, &count_key);
-        }
-
-        // Remove legacy storage
-        env.storage().persistent().remove(&legacy_key);
-
-        migrated_count
-    }
-
-    /// Migrate legacy ArtisanStakeQueue Vec storage to individual indexed entries.
-    ///
-    /// This function reads the old ArtisanStakeQueue Vec and converts each entry
-    /// to individual ArtisanStakeQueueIndexed keys. Should be called once during
-    /// contract upgrade to migrate existing data.
-    pub fn migrate_artisan_stake_queue(env: Env, artisan: Address) -> u32 {
-        let config = Self::get_platform_config_internal(&env);
-        config.admin.require_auth();
-
-        let legacy_key = DataKey::ArtisanStakeQueue(artisan.clone());
-
-        // Check if legacy storage exists
-        if !env.storage().persistent().has(&legacy_key) {
-            return 0; // Nothing to migrate
-        }
-
-        let legacy_queue: soroban_sdk::Vec<StakeDeposit> = env
-            .storage()
-            .persistent()
-            .get(&legacy_key)
-            .unwrap_or(soroban_sdk::Vec::new(&env));
-
-        let queue_len = legacy_queue.len();
-        if queue_len == 0 {
-            // Remove empty legacy queue
-            env.storage().persistent().remove(&legacy_key);
-            return 0;
-        }
-
-        // Migrate each deposit to individual indexed storage
-        for i in 0..queue_len {
-            if let Some(deposit) = legacy_queue.get(i) {
-                let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
-                env.storage().persistent().set(&deposit_key, &deposit);
-                Self::extend_persistent(&env, &deposit_key);
-            }
-        }
-
-        // Set count
-        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
-        env.storage().persistent().set(&count_key, &queue_len);
-        Self::extend_persistent(&env, &count_key);
-
-        // Remove legacy storage
-        env.storage().persistent().remove(&legacy_key);
-
-        queue_len
-    }
-
-    /// Migrate legacy artisan stake records from split `ArtisanStake` (i128) +
-    /// `ArtisanStakeToken` (Address) storage to the unified `ArtisanStakeData`
-    /// struct (#1034).
-    ///
-    /// This function is idempotent: it returns 0 if the record is already in
-    /// the new format. Should be called lazily during stake reads or writes
-    /// so existing artisan balances are preserved across contract upgrades.
-    pub fn migrate_legacy_artisan_stake(env: Env, artisan: Address) -> u32 {
-        let stake_key = DataKey::ArtisanStake(artisan.clone());
-        let token_key = DataKey::ArtisanStakeToken(artisan.clone());
-
-        if !env.storage().persistent().has(&token_key) {
-            return 0;
-        }
-
-        let old_amount: Option<i128> = env.storage().persistent().get(&stake_key);
-        let old_token: Option<Address> = env.storage().persistent().get(&token_key);
-
-        if let (Some(amount), Some(token)) = (old_amount, old_token) {
-            let new_stake = ArtisanStakeData { amount, token };
-            env.storage().persistent().set(&stake_key, &new_stake);
-            Self::extend_persistent(&env, &stake_key);
-            env.storage().persistent().remove(&token_key);
-            return 1;
-        }
-
-        0
-    }
-
-    /// Get the count of stake deposits in an artisan's queue.
-    ///
-    /// Returns 0 if no deposits exist. This is more efficient than loading
-    /// all deposits when only the count is needed.
-    pub fn get_artisan_stake_queue_count(env: Env, artisan: Address) -> u32 {
-        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
-        env.storage().persistent().get(&count_key).unwrap_or(0)
-    }
-
-    /// Get paginated stake deposits for an artisan (admin/debug helper).
-    ///
-    /// Returns up to `limit` deposits starting from `offset`. Useful for
-    /// inspecting queue state without loading the entire queue.
-    pub fn get_artisan_stake_deposits(
-        env: Env,
-        artisan: Address,
-        offset: u32,
-        limit: u32,
-    ) -> Result<soroban_sdk::Vec<StakeDeposit>, Error> {
-        let limit = pagination_validation::validate_limit(
-            limit,
-            pagination_validation::MAX_ADMIN_PAGE_SIZE,
-        )?;
-        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
-        let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-
-        // Return empty if offset is past the end
-        if offset >= total_count {
-            return Ok(soroban_sdk::Vec::new(&env));
-        }
-
-        let mut deposits = soroban_sdk::Vec::new(&env);
-        let end = core::cmp::min(offset + limit, total_count);
-
-        for i in offset..end {
-            let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
-            if let Some(deposit) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, StakeDeposit>(&deposit_key)
-            {
-                deposits.push_back(deposit);
-            }
-        }
-
-        Ok(deposits)
-    }
-
-    fn assert_dispute_actor_permissions(
-        env: &Env,
-        config: &PlatformConfig,
-        escrow: &Escrow,
-        caller: &Address,
-        transition: DisputeTransition,
-    ) -> Result<(), Error> {
-        match transition {
-            DisputeTransition::Initiate
-            | DisputeTransition::SubmitEvidence
-            | DisputeTransition::Escalate
-            | DisputeTransition::ProposeRefund => {
-                if *caller != escrow.buyer && *caller != escrow.seller {
-                    return Err(Error::Unauthorized);
-                }
-            }
-            DisputeTransition::AcceptRefund(proposer) => {
-                // Must be the counterparty to the proposer
-                if proposer == escrow.buyer && *caller != escrow.seller {
-                    return Err(Error::Unauthorized);
-                }
-                if proposer == escrow.seller && *caller != escrow.buyer {
-                    return Err(Error::Unauthorized);
-                }
-                if *caller != escrow.buyer && *caller != escrow.seller {
-                    return Err(Error::Unauthorized);
-                }
-            }
-            DisputeTransition::CancelRefund(proposer) => {
-                // Must be the proposer
-                if *caller != proposer {
-                    return Err(Error::Unauthorized);
-                }
-            }
-            DisputeTransition::ResolveArbitrated => {
-                let is_privileged = *caller == config.admin
-                    || *caller == config.arbitrator
-                    || Some(caller.clone()) == config.moderator;
-                if !is_privileged {
-                    return Err(Error::Unauthorized);
-                }
-                if *caller != config.admin && Self::arbitrator_on_blacklist(env, caller) {
-                    return Err(Error::ArbitratorBlacklisted);
-                }
-            }
-        }
-        Ok(())
-    }
-=======
     // ── Issue #1064: Audit Token Transfer Results ───────────────────────────
 
     /// Failed transfers leave financial state unchanged and return TokenTransferFailed.
@@ -7268,14 +6790,6 @@ mod onboarding_state_consistency {
         assert!(get_result.is_err());
     }
 }
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Reconciliation Report Query Tests (Issue #1073)
-// ──────────────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod reconciliation_report_tests {
-    use super::*;
 
     /// Test 1: Empty state returns zero discrepancy
     /// When no escrows or stakes exist, the report should show all zeros with no unresolved flag.
@@ -7811,9 +7325,9 @@ fn test_recurring_escrow_cancellation_refunds_balance() {
     // Cancel the remainder of the escrow
     client.cancel_recurring_escrow(&rec.id);
 
-    // Buyer balance after cancellation should be exactly the remaining unreleased funds (5_000_000)
+// Buyer balance after cancellation should be exactly the remaining unreleased funds (5_000_000)
     assert_eq!(token_client.balance(&buyer), 5_000_000);
->>>>>>> 867344c7525c03c89db6e2269239d86e67ad05f3
+}
 }
 
 // ─── Differential Upgrade Compatibility Harness ──────────────────────────────
