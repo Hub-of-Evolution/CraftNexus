@@ -14,6 +14,32 @@ trait Error {
     fn message(&Self) -> String;
 }
 
+#[cfg(test)]
+mod admin_idempotency_test;
+#[cfg(test)]
+mod arbitration_escalation_test;
+#[cfg(test)]
+mod dispute_escalation_timeout_test;
+#[cfg(test)]
+mod enhanced_features_test;
+#[cfg(test)]
+mod event_snapshot_test;
+#[cfg(test)]
+mod expired_dispute_fee_test;
+#[cfg(test)]
+mod liquidation_test;
+#[cfg(test)]
+mod min_release_window_test;
+#[cfg(test)]
+mod pagination_boundary_test;
+#[cfg(test)]
+mod diagnostic_scan_test;
+#[cfg(test)]
+mod test_approve_reconciliation_repair_auth;
+#[cfg(test)]
+mod differential_upgrade_compatibility_test {
+    use super::*;
+
 pub struct NotInitialized;
 
 impl Error for NotInitialized {
@@ -3687,13 +3713,9 @@ impl CraftNexusContract {
         }
     }
 
-    fn apply_reconciliation_repair(env: &Env, plan_id: u64) -> Result<(), Error> {
-        let key = DataKey::ReconciliationRepairPlan(plan_id);
-        let mut plan: ReconciliationRepairPlan = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(Error::RepairPlanNotFound)?;
+/// allocation.platform_fee + allocation.seller_amount + allocation.buyer_amount
+    ///     == escrow_amount
+    ///
 
         // Applying a plan twice is harmless (returns Ok(()))
         if plan.applied
