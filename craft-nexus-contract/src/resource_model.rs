@@ -14,7 +14,7 @@
 //! length payload, footprint writes, TTL extends, and emitted events). Before
 //! a continuation chunk is allowed to mutate any escrow we sum the estimates
 //! for that chunk and compare them against an admin-configurable ceiling. If
-//! the chunk is over budget we reject it with [`crate::Error::ResourceLimitExceeded`]
+//! the chunk is over budget we reject it with [`crate::Error::BatchLimitExceeded`]
 //! **before** any state change, so the job cursor and all balances remain
 //! untouched. The caller may then retry with a smaller chunk or raise the
 //! budget.
@@ -35,6 +35,8 @@
 //!    adds a pre-flight gating step; it never changes chunking semantics.
 
 use crate::{EscrowCreateParams, Error};
+#[cfg(test)]
+use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Env, Vec};
 
 // ---------------------------------------------------------------------------
@@ -152,7 +154,7 @@ pub fn estimate_create_chunk(
 /// [`estimate_create_chunk`] first). `budget` is the admin-configured ceiling,
 /// falling back to [`DEFAULT_CONTINUATION_CPU_BUDGET`] when `None`.
 ///
-/// Returns `Ok(())` when the chunk fits and `Err(Error::ResourceLimitExceeded)`
+/// Returns `Ok(())` when the chunk fits and `Err(Error::BatchLimitExceeded)`
 /// when it does not. Callers must invoke this **before** any state mutation.
 pub fn ensure_chunk_within_budget(
     estimate: &BatchResourceEstimate,
@@ -162,7 +164,7 @@ pub fn ensure_chunk_within_budget(
     if estimate.fits_within_cpu_budget(budget) {
         Ok(())
     } else {
-        Err(Error::ResourceLimitExceeded)
+        Err(Error::BatchLimitExceeded)
     }
 }
 
@@ -173,6 +175,7 @@ pub fn ensure_chunk_within_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
 
     #[test]
     fn estimate_uses_worst_case_cid_clamped_to_max() {
@@ -199,7 +202,7 @@ mod tests {
         let mut params = Vec::new(&env);
         // Longest valid base32lower CID (~100 chars) models the worst-case
         // realistic record size for a full work-limit chunk.
-        let cid = format!("b{}", "a".repeat(99));
+        let cid = alloc::format!("b{}", "a".repeat(99));
         for i in 0..5u32 {
             params.push_back(EscrowCreateParams {
                 buyer: soroban_sdk::Address::generate(&env),
@@ -238,7 +241,7 @@ mod tests {
         let tiny_budget = est.est_cpu_insns / 2;
         assert_eq!(
             ensure_chunk_within_budget(&est, Some(tiny_budget)),
-            Err(Error::ResourceLimitExceeded)
+            Err(Error::BatchLimitExceeded)
         );
     }
 }
