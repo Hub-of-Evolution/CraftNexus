@@ -1,139 +1,100 @@
-use soroban_std::{address, contract, contractimpl, contracttype, symbol_short};
-use sorban_std::stroktype;
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr,
+    Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
+};
 
-const MAX_DISPUTING_DURATION_KEY: symbol_short!("MaxDipDur");
+const READ_TTL_THRESHOLD: u32 = 100;
+const TTL_EXTENSION: u32 = 1000;
+const DEFAULT_LIQUIDATION_MAX_SEIZURE_BPS: u32 = 5_000;
+const DEFAULT_LIQUIDATION_GRACE_PERIOD: u64 = 2 * 24 * 60 * 60;
 
-const DEFAULT_MAx_DISPUTE_DURATION: u64 = 60; // 60 seconds
-
-/// Error types for the craft-nexus contract.
-const ERROR_NOT_INITIALIZED: u32 = 1;
-const ERROR_INVALID_DURATION: u32 = 2;
-
-trait Error {
-    fn; code(&Self) -> u32;
-    fn message(&Self) -> String;
-}
-
-pub struct NotInitialized;
-
-impl Error for NotInitialized {
-    fn code(&Self) -> u32 {
-        ERROR_NOT_INITIALIZED
-    }
-    fn message(&Self) -> String {
-        String::from_str(\"max dispute duration not initialized\")
-    }
-}
-
-pub struct InvalidDuration;
-
-impl Error for InvalidDuration {
-    fn code(&Self) -> u32 {
-        ERROR_INVALID_DURATION
-    }
-    fn message(&Self) -> String {
-        String::from_str(\"invalid max dispute duration\")
-    }
-}
-
-#[derive(Clone, Debug, Eq,PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContractError {
     NotInitialized,
-    InvalidDuration,
 }
 
 pub type Result<T> = core::result::Result<T, ContractError>;
 
-/// Storage key for the maximum dispute duration.
-pub fn max_dispute_duration_key() -> symbol_short {
-    MAX_DISPUTE_DURATION_KEY
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct LiquidationPolicyData {
+    pub max_seizure_bps: u32,
+    pub grace_period_secs: u64,
+    pub enabled: bool,
 }
 
-/// Returns the current maximum dispute duration in seconds.
+fn liquidation_policy_key() -> Symbol {
+    symbol_short!("LiqPol")
+}
+
+#[inline(always)]
+fn extend_persistent_read(env: &Env, key: &impl IntoVal<Env, Val>) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
+}
+
+/// Read-only getter: return the current liquidation policy.
 ///
-/// Returns `Err(ContractError::NotInitialized)` when the key is absent,
-/// e.g. after archival or a partial migration. This function must never trap.
-pub fn get_max_dispute_duration(env: &Env) -> Result<u64> {
-    let key = max_dispute_duration_key();
-    // Use extend_persistent_read to avoid panicking on hot persistent keys.
-    env.extend_persistent_read(&key);
-    match env.storage().persistent().get::|_|>(&key) {
-        Some(duration) => {
-            if duration == 0 {
-                Err(ContractError::InvalidDuration)
-            } else {
-                Ok(duration)
-            }
-        }
+/// Returns `Err(ContractError::NotInitialized)` when the persistent key is
+/// absent after archival, a partial migration, or any other terminal cleanup.
+/// This getter must never trap on a missing key.
+pub fn get_liquidation_policy(env: &Env) -> Result<LiquidationPolicyData> {
+    let key = liquidation_policy_key();
+    extend_persistent_read(env, &key);
+    match env
+        .storage()
+        .persistent()
+        .get::<Symbol, LiquidationPolicyData>(&key)
+    {
+        Some(policy) => Ok(policy),
         None => Err(ContractError::NotInitialized),
     }
-
-/// Sets the maximum dispute duration in seconds.
-pub fn set_max_dispute_duration(env: &Env, duration: u64) -> Result<u64> {
-    if duration == 0 {
-        return Err(ContractError::InvalidDuration);
-    }
-    let key = max_dispute_duration_key();
-    env.storage().persistent().set(&key, &duration);
-    env.extend_persistent_read(&key);
-    Ok(duration)
 }
 
-/// Clears the max dispute duration, modeling a terminal state or archival.
-pub fn clear_max_dispute_duration(env: &Env) {
-    let key = max_dispute_duration_key();
+pub fn set_liquidation_policy(env: &Env, policy: &LiquidationPolicyData) {
+    let key = liquidation_policy_key();
+    env.storage().persistent().set(&key, policy);
+    extend_persistent_read(env, &key);
+}
+
+pub fn clear_liquidation_policy(env: &Env) {
+    let key = liquidation_policy_key();
     env.storage().persistent().remove(&key);
 }
 
-#[contract]
-pub struct CraftNexusContract;
-
-#[impl]
-pub impl CraftNexusContract {
-    pub fn get_max_dispute_duration(env: &Env) -> Result<u64> {
-        get_max_dispute_duration(env)
-    }
-
-    pub fn set_max_dispute_duration(env: &Env, duration: u64) -> Result<u64> {
-        set_max_dispute_duration(env, duration)
-    }
-
-    pub fn clear_max_dispute_duration(env: &Env) {
-        clear_max_dispute_duration(env)
-    }
-}
-
-#test
-}
+#[cfg(test)]
 mod tests {
     use super::*;
-    use sorban_std::Env;
+
+    fn default_policy() -> LiquidationPolicyData {
+        LiquidationPolicyData {
+            max_seizure_bps: DEFAULT_LIQUIDATION_MAX_SEIZURE_BPS,
+            grace_period_secs: DEFAULT_LIQUIDATION_GRACE_PERIOD,
+            enabled: true,
+        }
+    }
 
     #[test]
-    fn get_max_dispute_duration_missing_key_returns_error() {
+    fn get_liquidation_policy_missing_key_returns_error() {
         let env = Env::default();
-        let result = get_max_dispute_duration(&env);
+        let result = get_liquidation_policy(&env);
         assert_eq!(result, Err(ContractError::NotInitialized));
     }
 
     #[test]
-    fn get_max_dispute_duration_after_terminal_state_returns_error() {
+    fn get_liquidation_policy_after_terminal_state_returns_error() {
         let env = Env::default();
-        set_max_dispute_duration(&env, 120).unwrap();
-        assert_eq!(get_max_dispute_duration(&env), Ok(120));
-        clear_max_dispute_duration(&env);
-        assert_eq!(
-            get_max_dispute_duration(&env),
-            Err(ContractError::NotInitialized)
-        );
-    }
+        let policy = default_policy();
 
-    #test]
-    fn set_max_dispute_duration_rejects_zero() {
-        let env = Env::default();
+        set_liquidation_policy(&env, &policy);
+        assert_eq!(get_liquidation_policy(&env), Ok(policy));
+
+        clear_liquidation_policy(&env);
         assert_eq!(
-            set_max_dispute_duration(&env, 0),
-            Err(ContractError::InvalidDuration)
+            get_liquidation_policy(&env),
+            Err(ContractError::NotInitialized)
         );
     }
 }
