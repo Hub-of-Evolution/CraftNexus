@@ -1,7 +1,2071 @@
+#![no_std]
+#![allow(clippy::too_many_arguments)]
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr,
-    Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, xdr::ToXdr, Address,
+    Bytes, BytesN, Env, IntoVal, Map, String, Symbol, TryFromVal, Val, Vec,
 };
+extern crate alloc;
+
+/// Centralised time-boundary policy for the contract.
+pub mod time_policy;
+
+/// Attestation expiry and ledger binding for cross-contract authorization (#1122).
+pub mod attestation;
+
+/// Bounded, overflow-safe oracle-price conversion (Issue #1088).
+pub mod conversion;
+
+/// Storage lifecycle, compaction, and TTL-management framework (#920).
+pub mod storage_lifecycle;
+
+#[cfg(test)]
+mod admin_idempotency_test;
+#[cfg(test)]
+mod arbitration_escalation_test;
+#[cfg(test)]
+mod dispute_escalation_timeout_test;
+#[cfg(test)]
+mod enhanced_features_test;
+#[cfg(test)]
+mod event_snapshot_test;
+#[cfg(test)]
+mod expired_dispute_fee_test;
+#[cfg(test)]
+mod liquidation_test;
+#[cfg(test)]
+mod min_release_window_test;
+#[cfg(test)]
+mod pagination_boundary_test;
+#[cfg(test)]
+mod diagnostic_scan_test;
+#[cfg(test)]
+mod differential_upgrade_compatibility_test {
+    use super::*;
+
+    /// Verifies that the public error codes are stable across upgrades.
+    /// ABI compatibility requires that error discriminants never change.
+    #[test]
+    fn error_discriminants_are_stable() {
+        assert_eq!(Error::Unauthorized as u32, 1);
+        assert_eq!(Error::EscrowNotFound as u32, 2);
+        assert_eq!(Error::InvalidEscrowState as u32, 3);
+        assert_eq!(Error::ContractPaused as u32, 15);
+        assert_eq!(Error::InsufficientStake as u32, 17);
+        assert_eq!(Error::RecurringEscrowNotFound as u32, 36);
+        assert_eq!(Error::StorageLayoutMismatch as u32, 48);
+        assert_eq!(Error::UpgradeCompatibilityMissing as u32, 45);
+        assert_eq!(Error::UpgradeCompatibilityInvalid as u32, 46);
+        assert_eq!(Error::UpgradeMigrationIncomplete as u32, 47);
+    }
+}
+
+#[cfg(test)]
+mod prop_test;
+#[cfg(test)]
+mod reentrancy_test;
+#[cfg(test)]
+mod safe_arithmetic_counters_test;
+#[cfg(test)]
+mod scalability_test;
+#[cfg(test)]
+mod stake_cooldown_test; // Add this line
+mod staking;
+#[cfg(test)]
+mod sweep_allowance_test;
+#[cfg(test)]
+mod test;
+#[cfg(test)]
+mod time_boundary_test;
+#[cfg(test)]
+mod token_compatibility_test;
+pub use staking::*; // Or explicitly use the contract struct: pub use staking::StakeContract;
+
+// Onboarding is a separate logical contract; only one `#[contract]` may be linked per WASM
+// artifact. Keep it in this crate for host tests (`cargo test`) but omit from guest builds.
+#[cfg(not(target_family = "wasm"))]
+pub mod onboarding;
+
+/// Centralized pagination input validation (Issue #1022).
+pub mod pagination_validation;
+
+/// Immutable settlement snapshots.
+///
+/// A snapshot captures all balances, fees, roles, and policy values at a single
+/// point in time. Once stored, a snapshot cannot be modified; this guarantees
+/// that dispute or refund decisions are bound to the exact state that existed
+/// when the snapshot was taken. Later configuration changes do not affect a
+/// pending decision because every action is tied to the snapshot revision.
+pub mod settlement_snapshot {
+    use soroban_sdk::{contracttype, symbol_short, Address, Env, Map, Symbol, Val};
+
+    #[contracttype]
+    #[derive(Clone)]
+    pub struct SettlementSnapshot {
+        pub id: u64,
+        pub escrow_id: u64,
+        pub balances: Map<Address, i128>,
+        pub fees: Map<Address, i128>,
+        pub roles: Map<Address, Symbol>,
+        pub policy: Map<Symbol, Val>,
+        pub created_at: u64,
+        pub revision: u64,
+    }
+
+    const SNAPSHOT_PREFIX: Symbol = symbol_short!("snap");
+
+    /// Persists a settlement snapshot and returns its unique snapshot id.
+    /// The snapshot id is also the revision number; newer snapshots always
+    /// have a higher revision, so callers can detect configuration changes.
+    pub fn capture_snapshot(
+        env: &Env,
+        escrow_id: u64,
+        balances: Map<Address, i128>,
+        fees: Map<Address, i128>,
+        roles: Map<Address, Symbol>,
+        policy: Map<Symbol, Val>,
+    ) -> u64 {
+        let mut revision = env
+            .storage()
+            .persistent()
+            .get(&SNAPSHOT_PREFIX)
+            .unwrap_or(None)
+            .unwrap_or(0u64);
+        revision += 1;
+        let snapshot = SettlementSnapshot {
+            id: revision,
+            escrow_id,
+            balances,
+            fees,
+            roles,
+            policy,
+            created_at: env.ledger().timestamp(),
+            revision,
+        };
+        env.storage()
+            .persistent()
+            .set(&(SNAPSHOT_PREFIX, revision), &snapshot);
+        env.storage().persistent().set(&SNAPSHOT_PREFIX, &revision);
+        revision
+    }
+
+    /// Loads a snapshot by id for audit or verification.
+    pub fn get_snapshot(env: &Env, id: u64) -> Option<SettlementSnapshot> {
+        env.storage()
+            .persistent()
+            .get(&(SNAPSHOT_PREFIX, id))
+            .unwrap_or(None)
+    }
+
+    /// Returns the revision of a snapshot, if it exists.
+    pub fn snapshot_revision(env: &Env, id: u64) -> Option<u64> {
+        get_snapshot(env, id).map(|s| s.revision)
+    }
+
+    /// Returns true when the given snapshot id is the latest revision,
+    /// meaning no configuration-changing snapshot has been captured since.
+    pub fn is_current_revision(env: &Env, id: u64) -> bool {
+        match snapshot_revision(env, id) {
+            Some(rev) => {
+                let latest = env
+                    .storage()
+                    .persistent()
+                    .get(&SNAPSHOT_PREFIX)
+                    .unwrap_or(None)
+                    .unwrap_or(0u64);
+                rev == latest
+            }
+            None => false,
+        }
+    }
+}
+/// Resource-aware model for batch-escrow continuations (Issue #1146).
+pub mod resource_model;
+
+/// Error codes grouped by category for off-chain triage.
+///
+/// # Categories
+///
+/// | Range   | Category     | Meaning                                         | Triage                    |
+/// |---------|-------------|-------------------------------------------------|---------------------------|
+/// | 1–9     | Auth/Access | Authorization, ownership, or existence failures | Rollback immediately      |
+/// | 10–19   | State       | Invalid state transitions or preconditions      | Retry after state change  |
+/// | 20–29   | Config      | Operator-configurable limits or misconfig       | Operator must act         |
+/// | 30–39   | Operational | System or cooldown gates                        | Retry after cooldown      |
+/// | 40–42   | Validation  | Input validation failures                       | Fix caller input          |
+///
+/// Use [`is_retryable`] to determine whether an error may succeed on retry.
+
+#[contracterror(export = false)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum Error {
+    // ── Auth / Access (1–9): rollback immediately ──
+    /// The caller is not authorized for this operation. Ensure you are using
+    /// the correct admin, arbitrator, moderator, buyer, or seller address.
+    Unauthorized = 1,
+    EscrowNotFound = 2,
+    InvalidEscrowState = 3,
+    UsernameAlreadyExists = 4,
+    TokenNotWhitelisted = 5,
+    AmountBelowMinimum = 6,
+    ReleaseWindowTooLong = 7,
+    NotInDispute = 8,
+    AlreadyOnboarded = 9,
+    // ── State / Transition (10–19): retry after state change ──
+    /// The fee exceeds the maximum allowed platform fee (MAX_PLATFORM_FEE_BPS,
+    /// currently 10%). Reduce fee_bps and retry.
+    InvalidFee = 10,
+    SameBuyerSeller = 11,
+    PlatformNotInitialized = 12,
+    ReleaseWindowNotElapsed = 13,
+    BatchOperationFailed = 14,
+    ContractPaused = 15,
+    DisputeExpired = 16,
+    InsufficientStake = 17,
+    StakeCooldownActive = 18,
+    InvalidRefundAmount = 19,
+    // ── Config / Resource (20–29): operator must act ──
+    /// Partial refund proposal not found
+    ProposalNotFound = 20,
+    ProposalAlreadyExists = 21,
+    ReentryDetected = 22,
+    ReleaseWindowTooShort = 23,
+    StakeTokenMismatch = 24,
+    InvalidAdminAddress = 25,
+    CorruptedPlatformConfig = 26,
+    StakeQueueFull = 27,
+    AdminRecoveryFailed = 28,
+    BatchLimitExceeded = 29,
+    // ── Operational / Gates (30–39): retry after cooldown ──
+    /// Deprecated function called (no-op for ABI compatibility)
+    DeprecatedFunction = 30,
+    NoPendingAdmin = 31,
+    NoUpgradeProposed = 32,
+    UpgradeCooldownActive = 33,
+    UpgradeProposalExists = 34,
+    InvalidUpgradeHash = 35,
+    RecurringEscrowNotFound = 36,
+    CycleNotReady = 37,
+    RecurringEscrowIdExhausted = 38,
+    OnboardingContractNotSet = 39,
+    // ── Validation (40+): fix caller input ──
+    /// The configured onboarding contract rejected the participant state proof
+    OnboardingAuthorizationFailed = 87,
+    /// Provided metadata hash is invalid
+    InvalidMetadataHash = 40,
+    InvalidIpfsHash = 41,
+    NotAnUpgradeSigner = 42,
+    AlreadyApproved = 43,
+    InvalidTokenDecimals = 44,
+    UpgradeCompatibilityMissing = 45,
+    UpgradeCompatibilityInvalid = 46,
+    UpgradeMigrationIncomplete = 47,
+    StorageLayoutMismatch = 48,
+    AdminActionTerminal = 49,
+    AdminActionNeedsApprovals = 50,
+    AdminActionTimelockActive = 51,
+    NotAnAdminActionSigner = 52,
+    EvidenceExpired = 53,
+    EvidenceAlreadyUsed = 54,
+    InvalidDisputeSession = 55,
+    /// Contract does not implement the supported token interface.
+    UnsupportedToken = 56,
+    /// The requested continuation size is outside the scheduler bound.
+    InvalidBatchWorkLimit = 57,
+    BatchJobCancelled = 58,
+    BatchJobNotFound = 59,
+    BatchJobUnauthorized = 60,
+    BatchJobCompleted = 61,
+    PaginationLimitZero = 80,
+    PaginationCursorInvalid = 81,
+    /// Platform wallet cannot be the contract address.
+    InvalidPlatformWallet = 62,
+    InvalidServiceAgreementHash = 63,
+    ChallengeWindowActive = 64,
+    ArbitratorBlacklisted = 65,
+    InvalidDisputeAction = 66,
+    EscalationWindowActive = 67,
+    ArbitratorDeadlineExceeded = 68,
+    SettlementAlreadyFinalized = 69,
+    EmergencyAccountingInvariant = 70,
+    ReconciliationRequired = 71,
+    RepairPlanNotFound = 72,
+    RepairPlanTerminal = 73,
+    RepairPlanPreconditionFailed = 74,
+    OnboardingProfileNotFound = 75,
+    OnboardingProfileInactive = 76,
+    OnboardingRoleMismatch = 77,
+    OnboardingProfileStale = 78,
+    /// The user's verification status has been revoked or is not current.
+    OnboardingVerificationRevoked = 80,
+    /// An escrow with this order ID already exists. Duplicate escrow
+    /// identifiers are rejected so a retry (or a conflicting external
+    /// reference) can never overwrite an existing escrow's state.
+    EscrowAlreadyExists = 83,
+    /// Counter addition overflowed the maximum representable integer (#1028).
+    CounterOverflow = 84,
+    /// Counter subtraction underflowed below zero (#1028).
+    CounterUnderflow = 85,
+    /// Requested WASM upgrade cooldown is below `MIN_WASM_UPGRADE_COOLDOWN`,
+    /// which would let the mandatory review window be bypassed (#1062).
+    UpgradeCooldownTooShort = 86,
+    /// A batch continuation cursor does not match the persisted job: it was
+    /// minted for a different operation type, or its revision is ahead of the
+    /// job's committed checkpoint (a fabricated / future cursor). A cursor whose
+    /// revision is *behind* the checkpoint is not an error — it is treated as a
+    /// harmless idempotent replay (#1075/#1076).
+    BatchCursorMismatch = 88,
+    /// Proposed dispute-escalation checkpoints are not strictly increasing, or
+    /// the last checkpoint is not strictly before the final dispute deadline
+    /// (`max_dispute_duration`) (#1080).
+    InvalidEscalationPolicy = 89,
+    /// An emergency operation (recovery, sweep, upgrade, pause) is already in progress;
+    /// no other emergency operation can execute concurrently (#1072).
+    EmergencyOpInProgress = 90,
+    /// An active dispute, recurring escrow, or pending upgrade exists that blocks
+    /// the requested emergency operation from starting (#1072).
+    EmergencyConflictActive = 91,
+    // ─── Liquidation / collateral health (#1111) ────────────────────────────────
+    /// The artisan's stake health is healthy; no liquidation action is permitted.
+    StakeHealthHealthy = 92,
+    /// Liquidation is not enabled in the current platform policy.
+    LiquidationDisabled = 93,
+    /// The grace period after under-collateralization has not yet elapsed.
+    LiquidationGracePeriodActive = 94,
+    /// The requested seizure amount exceeds the deficit or policy cap.
+    LiquidationSeizureExceedsCap = 95,
+    /// No liquidation record exists with the given ID.
+    LiquidationNotFound = 96,
+    /// The liquidation record is already cured; no further cure is needed.
+    LiquidationAlreadyCured = 97,
+    /// The artisan is not in a liquidation-eligible or liquidated state.
+    NotLiquidationEligible = 98,
+    /// Pending admin role transfer has expired and cannot be accepted.
+    TransferExpired = 99,
+    /// The upgrade was already executed and its state commitment is immutable.
+    /// Re-execution with the same WASM hash is not permitted (#1140).
+    UpgradeAlreadyExecuted = 100,
+    /// The caller supplied an admin revision that does not match the current
+    /// monotonic revision; the request is stale and no mutation was applied (#1071).
+    StaleAdminRevision = 101,
+    /// This admin mutation was already applied at the supplied revision.
+    /// Replaying it is a no-op failure: storage is unchanged (#1071).
+    AdminActionAlreadyApplied = 102,
+    /// Token transfer failed after state validation.
+    TokenTransferFailed = 103,
+    /// Idempotency record exists for a different operation or parameter hash.
+    IdempotencyMismatch = 104,
+    /// An oracle-driven currency conversion produced a negative amount,
+    /// price, or liquidity input (#1088).
+    ConversionNegativeInput = 105,
+    /// An oracle-driven currency conversion used a decimals value outside
+    /// the supported range (#1088).
+    ConversionUnsupportedDecimals = 106,
+    /// An oracle-driven currency conversion overflowed `i128` arithmetic
+    /// (#1088).
+    ConversionOverflow = 107,
+    /// The oracle quote's reported liquidity is below the configured
+    /// minimum; the conversion is rejected rather than settled against a
+    /// thin book (#1088).
+    ConversionInsufficientLiquidity = 108,
+    /// The oracle quote moved further from the trusted reference price than
+    /// the configured maximum movement allows (#1088).
+    ConversionExcessiveMovement = 109,
+    /// A strictly positive conversion input produced a zero output, which
+    /// would silently destroy value; rejected instead of settling for zero
+    /// (#1088).
+    ConversionOutputUnderflow = 110,
+    /// Archival policy parameters are invalid (zero retention, zero batch size,
+    /// or batch size above MAX_ARCHIVAL_COMPACTION_BATCH).
+    InvalidArchivalPolicy = 111,
+    /// The cross-contract attestation offered as authorization is past its
+    /// expiry ledger, so it proves a state that is no longer current (#1122).
+    OnboardingAttestationExpired = 112,
+    /// The cross-contract attestation is future-dated: its issuance ledger is
+    /// ahead of the ledger being executed (#1122).
+    OnboardingAttestationNotYetValid = 113,
+    /// The attestation's declared validity window is unusable — zero ledgers
+    /// long, longer than `attestation::MAX_ATTESTATION_VALIDITY_LEDGERS`, or
+    /// overflowing `u32` — so no ledger can ever satisfy it (#1122).
+    InvalidAttestationWindow = 114,
+}
+
+/// Maps a [`conversion::ConversionError`] onto the contract's own [`Error`]
+/// enum so settlement paths that call into [`conversion::convert_amount`] or
+/// [`conversion::convert_amount_ceiling`] can propagate a single, ABI-stable
+/// error type to callers.
+impl From<conversion::ConversionError> for Error {
+    fn from(err: conversion::ConversionError) -> Self {
+        match err {
+            conversion::ConversionError::NegativeInput => Error::ConversionNegativeInput,
+            conversion::ConversionError::UnsupportedDecimals => {
+                Error::ConversionUnsupportedDecimals
+            }
+            conversion::ConversionError::Overflow => Error::ConversionOverflow,
+            conversion::ConversionError::InsufficientLiquidity => {
+                Error::ConversionInsufficientLiquidity
+            }
+            conversion::ConversionError::ExcessiveMovement => Error::ConversionExcessiveMovement,
+            conversion::ConversionError::OutputUnderflow => Error::ConversionOutputUnderflow,
+        }
+    }
+}
+
+/// Maps an [`attestation::AttestationError`] onto the contract's own [`Error`]
+/// enum, following the same ABI-stability rule as the `conversion` mapping
+/// above: freshness failures keep their own discriminants so callers can tell
+/// "stale evidence" apart from "wrong instance", while every other rejection
+/// collapses onto the single authorization failure code (#1122).
+impl From<attestation::AttestationError> for Error {
+    fn from(err: attestation::AttestationError) -> Self {
+        match err {
+            attestation::AttestationError::Expired => Error::OnboardingAttestationExpired,
+            attestation::AttestationError::NotYetIssued => {
+                Error::OnboardingAttestationNotYetValid
+            }
+            attestation::AttestationError::ZeroValidityWindow
+            | attestation::AttestationError::ValidityWindowTooLong
+            | attestation::AttestationError::LedgerWindowOverflow => {
+                Error::InvalidAttestationWindow
+            }
+            attestation::AttestationError::ForeignContractInstance
+            | attestation::AttestationError::OperationNonceMismatch => {
+                Error::OnboardingAuthorizationFailed
+            }
+        }
+    }
+}
+
+#[must_use]
+pub fn is_retryable(error: Error) -> bool {
+    matches!(
+        error,
+        Error::InvalidEscrowState
+            | Error::ReleaseWindowNotElapsed
+            | Error::ContractPaused
+            | Error::DisputeExpired
+            | Error::StakeCooldownActive
+            | Error::ReentryDetected
+            | Error::StakeQueueFull
+            | Error::UpgradeCooldownActive
+            | Error::CycleNotReady
+            | Error::BatchLimitExceeded
+            | Error::ChallengeWindowActive
+            | Error::EscalationWindowActive
+            | Error::ArbitratorDeadlineExceeded
+    )
+}
+
+const ESCROW: Symbol = symbol_short!("ESCROW");
+const PLATFORM_FEE: Symbol = symbol_short!("PLAT_FEE");
+const PLATFORM_WALLET: Symbol = symbol_short!("PLAT_WAL");
+const ONBOARD_CALL_FAILED: Symbol = symbol_short!("OB_FAIL");
+
+const BASE58_BTC_CHARSET: [bool; 256] = {
+    let mut chars = [false; 256];
+
+    let mut i = b'1' as usize;
+    while i <= b'9' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'A' as usize;
+    while i <= b'H' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'J' as usize;
+    while i <= b'N' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'P' as usize;
+    while i <= b'Z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'a' as usize;
+    while i <= b'k' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'm' as usize;
+    while i <= b'z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    chars
+};
+
+/// Storage lifecycle, compaction, and TTL-management framework (#920).
+pub use storage_lifecycle::{
+    CompactionReport, StorageRetentionPolicy, DEFAULT_RETAINED_AUDIT_ENTRIES,
+    DEFAULT_RETAINED_EMERGENCY_HISTORY, DEFAULT_RETAINED_STAKE_HISTORY,
+    DEFAULT_RETAINED_UPGRADE_HISTORY,
+};
+const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
+
+/// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
+const TTL_THRESHOLD: u32 = 10_000;
+/// Lower TTL threshold used for hot index reads to reduce the cost of frequent
+/// TTL refresh calls (Issue #533).
+const READ_TTL_THRESHOLD: u32 = 1_000;
+/// Standard TTL extension for persistent storage (approx 30 days)
+const TTL_EXTENSION: u32 = 518_400;
+
+// Default configuration constants (can be overridden via PlatformConfig)
+// Re-exported from the centralised time_policy module for single source of truth.
+/// Default grace period for WASM upgrades (7 days in seconds)
+const DEFAULT_WASM_UPGRADE_COOLDOWN: u32 = time_policy::WASM_UPGRADE_COOLDOWN as u32;
+/// Minimum enforceable WASM upgrade cooldown (1 day in seconds) (#1062).
+///
+/// `execute_upgrade` correctly rejects execution before `upgrade_at`, but that
+/// review window is only meaningful if it cannot be trivially shortened. Without
+/// a floor here, a single admin call to `set_wasm_upgrade_cooldown(0)` right
+/// before proposing an upgrade would let it execute immediately, defeating the
+/// whole point of the timelock.
+const MIN_WASM_UPGRADE_COOLDOWN: u32 = 24 * 60 * 60;
+/// Minimum time (seconds) that must elapse after a cancel_upgrade_wasm call
+/// before propose_upgrade_wasm is accepted again (Issue #618).
+/// Prevents the cancel-and-repropose pattern that resets the review window.
+const CANCEL_REPROPOSE_COOLDOWN: u64 = time_policy::CANCEL_REPROPOSE_COOLDOWN;
+
+/// Default maximum duration a dispute can remain open before it can be force-resolved (30 days in seconds)
+const DEFAULT_MAX_DISPUTE_DURATION: u32 = time_policy::MAX_DISPUTE_DURATION as u32;
+
+/// Default cooldown period after staking before tokens can be unstaked (7 days in seconds)
+const DEFAULT_STAKE_COOLDOWN: u32 = time_policy::STAKE_COOLDOWN as u32;
+
+/// Default minimum release window to prevent "flash" auto-releases (1 day in seconds)
+const DEFAULT_MIN_RELEASE_WINDOW: u32 = time_policy::MIN_RELEASE_WINDOW as u32;
+/// Absolute safety ceiling for admin-configurable max release window (365 days).
+const ABSOLUTE_MAX_RELEASE_WINDOW: u32 = time_policy::ABSOLUTE_MAX_RELEASE_WINDOW as u32;
+
+/// Default evidence expiry / retention window (7 days in seconds) (#927)
+const DEFAULT_EVIDENCE_EXPIRY_WINDOW: u64 = time_policy::EVIDENCE_EXPIRY_WINDOW;
+/// Schema version stamped on every persisted [`DisputeEvidence`] record (#1077).
+///
+/// Bump this whenever the structured evidence layout changes so indexers can
+/// branch on `DisputeEvidence.version` (and the `dispute_evidence`/`submitted`
+/// event's version field) without inferring the shape from field presence.
+const EVIDENCE_SCHEMA_VERSION: u32 = 1;
+/// Default challenge period window before a dispute can be resolved (1 day in seconds) (#942)
+const DEFAULT_EVIDENCE_CHALLENGE_WINDOW: u32 = time_policy::EVIDENCE_CHALLENGE_WINDOW as u32;
+/// Default dispute escalation window (3 days in seconds) (#941)
+const DEFAULT_DISPUTE_ESCALATION_WINDOW: u32 = time_policy::DISPUTE_ESCALATION_WINDOW as u32;
+/// Default moderator-review escalation checkpoint (7 days in seconds) (#1080)
+const DEFAULT_MODERATOR_ESCALATION_CHECKPOINT: u32 =
+    time_policy::MODERATOR_ESCALATION_CHECKPOINT as u32;
+/// Default admin-review escalation checkpoint (14 days in seconds) (#1080)
+const DEFAULT_ADMIN_ESCALATION_CHECKPOINT: u32 = time_policy::ADMIN_ESCALATION_CHECKPOINT as u32;
+/// Default rate limit max calls per window (#943)
+const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 5;
+/// Default rate limit window (1 hour in seconds) (#943)
+const DEFAULT_RATE_LIMIT_WINDOW: u32 = time_policy::RATE_LIMIT_WINDOW as u32;
+// ─── Liquidation / collateral health (#1111) ────────────────────────────────
+/// Default maximum fraction of the deficit that may be seized in a single
+/// liquidation call, expressed in basis points (10_000 = 100%).
+const DEFAULT_LIQUIDATION_MAX_SEIZURE_BPS: u32 = 5000; // 50%
+/// Default grace period (seconds) after under-collateralization before
+/// an artisan may be flagged as LiquidationEligible.
+const DEFAULT_LIQUIDATION_GRACE_PERIOD: u64 = 2 * 24 * 60 * 60; // 2 days
+/// Maximum liquidation record history retained.
+const MAX_LIQUIDATION_HISTORY: u32 = 256;
+
+/// Maximum platform fee in basis points (10000 = 100%)
+const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
+const MAX_TOTAL_RELEASE_WINDOW: u32 = time_policy::MAX_TOTAL_RELEASE_WINDOW as u32;
+const CURRENT_ESCROW_VERSION: u32 = 4;
+/// Current version for all lifecycle event payload schemas.
+///
+/// Compatibility rules:
+/// - Keep field ordering deterministic and append-only within a version.
+/// - Increment this value when adding, removing, renaming, or reordering fields.
+/// - Consumers must branch on `schema_version` before decoding payload fields.
+pub const LIFECYCLE_EVENT_SCHEMA_VERSION: u32 = 1;
+/// Explicit storage layout version for persisted contract state.
+///
+/// New deployments initialize this to `CURRENT_STORAGE_LAYOUT_VERSION`; legacy
+/// deployments without the key must run `migrate_storage_layout` before any
+/// WASM upgrade can be executed.
+const CURRENT_STORAGE_LAYOUT_VERSION: u32 = 1;
+/// Maximum number of escrows per batch operation (Issue #111)
+// Conservative batch size to avoid exceeding instruction/read-write limits
+// observed on Soroban testnets. Reduced from 100 to 20 (Issue #198).
+const MAX_BATCH_SIZE: u32 = 20;
+/// Maximum number of escrows a scheduled continuation may process.
+const MAX_SCHEDULED_BATCH_WORK: u32 = 5;
+const MAX_PAGE_SIZE: u32 = 100;
+/// Timeout for unfunded escrows before they can be cancelled (24 hours) (#213)
+const UNFUNDED_CANCEL_TIMEOUT: u64 = time_policy::UNFUNDED_CANCEL_TIMEOUT;
+/// Hard ceiling for `NextRecurringEscrowId` (Issue #233).
+///
+/// `u64::MAX` is reserved as a sentinel so the allocator can detect an
+/// exhausted ID space without wrapping. At the realistic peak rate of
+/// one new recurring escrow per ledger this cap is far beyond any
+/// practical deployment lifetime, but the explicit bound lets us fail
+/// fast with `Error::RecurringEscrowIdExhausted` instead of silently
+/// colliding with an existing entry.
+const MAX_RECURRING_ESCROW_ID: u64 = u64::MAX - 1;
+/// Deterministic fee policy version. Bump when fee allocation formulas change.
+const FEE_POLICY_VERSION: u32 = 1;
+/// Schema version for the observability snapshot returned by
+/// `get_observability_snapshot`. Bump when adding or reordering fields so
+/// off-chain dashboards never misread a historical snapshot.
+const OBSERVABILITY_SNAPSHOT_VERSION: u32 = 1;
+/// Persistent key for the admin-controlled observability reset epoch.
+const OBSERVABILITY_RESET_EPOCH: Symbol = symbol_short!("OBS_EPOC");
+/// Maximum number of upgrade records retained in `UpgradeHistory`. Older
+/// records are dropped FIFO once the cap is reached. Sized so a contract
+/// upgraded twice a year for ~16 years still has full visibility.
+const MAX_UPGRADE_HISTORY: u32 = 32;
+/// Default retention window for immutable archival summaries (90 days).
+const DEFAULT_ARCHIVAL_RETENTION_WINDOW: u64 = 90 * 24 * 60 * 60;
+/// Default number of archive index entries scanned per compaction step.
+const DEFAULT_ARCHIVAL_COMPACTION_BATCH: u32 = 25;
+/// Upper bound for one archival maintenance step (migration or compaction).
+const MAX_ARCHIVAL_COMPACTION_BATCH: u32 = 50;
+
+/// Symbol topics emitted alongside `UpgradeProposalEvent`.
+const UPGRADE_PROPOSED: Symbol = symbol_short!("UPG_PROP");
+const UPGRADE_APPROVED: Symbol = symbol_short!("UPG_APPR");
+const UPGRADE_CANCELLED: Symbol = symbol_short!("UPG_CANC");
+const UPGRADE_EXECUTED: Symbol = symbol_short!("UPG_EXEC");
+/// Maximum number of stake history entries per artisan (bounded queue to prevent storage bloat) (#237)
+const MAX_STAKE_HISTORY_SIZE: u32 = 100;
+/// Threshold at which to trigger automatic pruning of old stake history entries (#237)
+const STAKE_HISTORY_PRUNE_THRESHOLD: u32 = 80;
+/// Maximum number of stake deposits per artisan queue (bounded to prevent storage bloat)
+const MAX_STAKE_QUEUE_SIZE: u32 = 50;
+/// Threshold at which to trigger automatic pruning of matured stake deposits
+const STAKE_QUEUE_PRUNE_THRESHOLD: u32 = 40;
+/// Time lock period before admin recovery is allowed (7 days) (#240)
+const ADMIN_RECOVERY_DELAY: u64 = time_policy::ADMIN_RECOVERY_DELAY;
+/// Minimum allowed admin recovery cooldown. Deploys attempting to set a
+/// shorter window (including zero) will be rejected during recovery.
+const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = time_policy::MIN_ADMIN_RECOVERY_COOLDOWN;
+/// Default timelock delay for pending critical admin actions (24 hours).
+const DEFAULT_ADMIN_ACTION_TIMELOCK_DELAY: u64 = time_policy::ADMIN_ACTION_TIMELOCK_DELAY;
+/// Default bounded expiration window for two-step admin transfers (7 days).
+const DEFAULT_ADMIN_TRANSFER_WINDOW: u64 = time_policy::ADMIN_TRANSFER_WINDOW;
+
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum DisputeTransition {
+    Initiate,
+    SubmitEvidence,
+    Escalate,
+    ProposeRefund,
+    AcceptRefund(Address), // address of the proposer
+    CancelRefund(Address), // address of the proposer
+    ResolveArbitrated,
+}
+
+/// The kind of critical admin action that requires multi-sig approval
+/// and timelock enforcement.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum AdminActionKind {
+    PausePlatform(bool),
+    SetPlatformFee(u32),
+    SetPlatformWallet(Address),
+    SetWasmUpgradeCooldown(u32),
+    SetMinStakeRequired(i128),
+    SweepUnallocatedFunds(Address, Address),
+    ExecuteUpgrade(BytesN<32>),
+    SetMaxDisputeDuration(u32),
+    SetStakeCooldown(u32),
+    SetArtisanFeeTier(Address, u32),
+    SetModerator(Address),
+    SetMinEscrowAmount(Address, i128),
+    SetMaxReleaseWindow(u32),
+    SetMinReleaseWindow(u32),
+    SetOnboardingContract(Address),
+    SetExpiredDisputePolicy(ExpiredDisputeFeePolicy),
+    ApplyReconciliationRepair(u64),
+}
+
+/// A pending critical admin action proposal that requires multi-sig
+/// approvals and a timelock before execution.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct AdminActionProposal {
+    pub id: u64,
+    pub kind: AdminActionKind,
+    pub proposer: Address,
+    pub approvals: Vec<Address>,
+    pub threshold: u32,
+    pub signers: Vec<Address>,
+    pub created_at: u64,
+    pub ready_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+    /// Revision consumed when this action executed. Zero until execution.
+    pub applied_revision: u32,
+}
+
+/// Storage keys for the admin action proposal system.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum AdminActionDataKey {
+    NextAdminActionId,
+    AdminAction(u64),
+    AdminActionSigners,
+    AdminActionThreshold,
+    AdminActionTimelockDelay,
+}
+
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum DataKey {
+    Escrow(u32),
+    /// DEPRECATED: Legacy vector-based storage. Kept for backward compatibility.
+    /// New implementations should use BuyerEscrowIndexed instead.
+    BuyerEscrows(Address),
+    /// DEPRECATED: Legacy vector-based storage. Kept for backward compatibility.
+    /// New implementations should use SellerEscrowIndexed instead.
+    SellerEscrows(Address),
+    MinEscrowAmount(Address),
+    TotalFees(Address),
+    FeeTokenIndex,
+    FeeTokenConfig(Address),
+    ContractVersion,
+    /// Platform configuration storage key
+    PlatformConfig,
+    /// Explicit storage layout version for persisted state.
+    StorageLayoutVersion,
+    /// Custom fee tier for an artisan (basis points)
+    ArtisanFeeTier(Address),
+    /// Staked token amount and asset for an artisan
+    ArtisanStake(Address),
+    /// DEPRECATED legacy storage: Token address backing an artisan's staked balance.
+    ///
+    /// Replaced by [`ArtisanStake::token`] in [`ArtisanStakeData`]. Kept for
+    /// lazy migration of pre-v2 stake records during contract upgrades.
+    ArtisanStakeToken(Address),
+    StakeCooldownEnd(Address),
+    /// DEPRECATED single-cooldown timestamp for an artisan.
+    ///
+    /// Active stake/unstake logic uses [`DataKey::ArtisanStakeQueue`]; this
+    /// key is **never read** by any code path in the live contract and
+    /// cannot influence cooldown decisions. It is updated alongside the
+    /// queue (set to the latest `cooldown_end`) purely so older read-only
+    /// clients still see a meaningful value. Once a queue is fully
+    /// drained the key is removed in `unstake_tokens`.
+    ///
+    ///
+    /// Per-deposit stake queue for an artisan. Each entry represents an
+    /// individual deposit and its cooldown end timestamp. This allows
+    /// accurate tracking of staking timeframes when multiple deposits
+    /// are made at different times.
+    ArtisanStakeQueue(Address),
+    /// Count of entries in the artisan stake queue (for bounds checking)
+    ArtisanStakeQueueCount(Address),
+    /// Indexed storage of stake deposits (Address, index) -> StakeDeposit
+    ArtisanStakeQueueIndexed(Address, u32),
+    /// Partial refund proposal for a disputed order
+    PartialRefundProposal(u32),
+    /// Monotonic revision counter for partial refund proposals
+    PartialRefundNonce(u32),
+    /// Terminal settlement receipt; presence means the dispute is finalized.
+    SettlementReceipt(u32),
+    /// Blacklisted arbitrator address
+    ArbitratorBlacklist(Address),
+    /// Count of currently open disputes
+    ActiveDisputeCount,
+    /// Cumulative funded escrow volume
+    TotalVolume,
+    /// Re-entrancy guard key
+    ReentryGuard,
+    /// Pending admin address for two-step transfer
+    PendingAdmin,
+    /// Monotonic revision counter for two-step admin transfer proposals
+    AdminTransferRevision,
+    /// Proposal for contract WASM upgrade
+    WasmUpgradeProposal,
+    /// Configurable maximum release window (in seconds)
+    MaxReleaseWindow,
+    /// Address of the deployed onboarding contract for cross-contract reputation calls
+    OnboardingContractAddress,
+    /// DEPRECATED legacy storage: Map of whitelisted token addresses (Address -> bool).
+    /// New code stores each token as an individual key-value pair.
+    WhitelistedTokens,
+    /// Individual whitelisted token entry (Address -> bool)
+    WhitelistedTokenIndexed(Address),
+    /// Count of whitelisted tokens for efficient enumeration.
+    WhitelistedTokenCount,
+    /// DEPRECATED: Legacy monolithic Vec of all escrow order IDs.
+    /// New writes use [`DataKey::GlobalEscrowIdIndexed`] (#515). Kept for
+    /// lazy migration on the next index update or paginated read.
+    AllEscrowIds,
+    /// Total count of escrows ever created; O(1) length for indexed enumeration
+    EscrowCount,
+    /// Indexed global escrow order ID by creation sequence (#515).
+    /// Each entry stores one `u32` order ID, avoiding Vec rewrites on batch create.
+    GlobalEscrowIdIndexed(u32),
+    /// Fallback admin address for recovery if primary admin storage is corrupted (#240)
+    FallbackAdmin,
+    /// Timestamp when admin recovery mechanism becomes available (time-lock safety).
+    /// Stored as a compact `u64` ledger timestamp (#431 / key index #30).
+    AdminRecoveryTime,
+    /// The configured delay (seconds) that was recorded when the recovery time
+    /// was initiated. Used to validate that a minimum cooldown was respected.
+    AdminRecoveryDelay,
+    /// Historical record of stake changes per artisan (bounded queue for audit trail) (#237)
+    StakeHistory(Address),
+    /// Count of entries in the stake history queue (bounds checking)
+    StakeHistoryCount(Address),
+    /// Timestamp when an artisan's stake was last modified (for maintenance checks)
+    StakeLastModified(Address),
+    /// Number of fund-movement audit entries for a given actor/account.
+    FundAuditCount(Address),
+    /// Indexed fund-movement audit entry for an actor/account.
+    FundAuditIndexed(Address, u32),
+    /// Indexed storage of a buyer's escrow ID by position
+    BuyerEscrowIndexed(Address, u32),
+    /// Indexed storage of a seller's escrow ID by position
+    SellerEscrowIndexed(Address, u32),
+    /// Count of a buyer's escrows
+    BuyerEscrowCount(Address),
+    /// Count of a seller's escrows
+    SellerEscrowCount(Address),
+    /// Total locked funds across all active escrows for a given token address.
+    TotalLocked(Address),
+    /// Total amount of funds currently staked by artisans for a token address.
+    TotalStaked(Address),
+    /// Indexed artisan address with a persisted stake record.
+    StakedArtisanIndexed(u32),
+    /// Number of indexed artisan stake records.
+    StakedArtisanCount,
+    /// Latest completed reconciliation result for a token address.
+    ReconciliationReport(Address),
+    /// In-progress reconciliation accumulator for a token address.
+    ReconciliationProgress(Address),
+    /// Repair plan awaiting explicit admin-action approval.
+    ReconciliationRepairPlan(u64),
+    /// Monotonic repair-plan identifier.
+    NextReconciliationRepairPlanId,
+    /// Consumed marker for executed repair plans to ensure double application is harmless
+    ConsumedRepairPlan(u64),
+    /// Cumulative residual balance allocated across repair plans for a token
+    AllocatedResidualBalance(Address),
+    /// Bounded log of completed WASM upgrades. Capped at MAX_UPGRADE_HISTORY
+    UpgradeHistory,
+    /// Compatibility evidence for completed WASM upgrades.
+    UpgradeCompatibilityHistory,
+    /// Key for a recurring escrow by its ID
+    RecurringEscrow(u64),
+    /// ID counter for recurring escrows
+    NextRecurringEscrowId,
+    /// Number of recurring escrow records created.
+    RecurringEscrowCount,
+    /// Persisted resource-aware batch escrow job.
+    BatchEscrowJob(u64),
+    /// Count of currently active (non-released, non-refunded) escrows or recurring escrows for a user address.
+    ActiveObligations(Address),
+    /// Required number of distinct signer approvals before a WASM upgrade proposal is committed.
+    UpgradeThreshold,
+    /// Canonical per-round approval state (signers snapshot, threshold snapshot,
+    /// round nonce, and accumulated approvals).  Replaces the old hash-keyed
+    /// `UpgradeApprovals(BytesN<32>)` to prevent cross-round replay.
+    /// Always stored at index 0; the nonce lives inside the struct.
+    UpgradeApprovalState(u32),
+    /// Ordered list of addresses authorized to co-sign WASM upgrade proposals.
+    UpgradeSigners,
+    /// Ledger timestamp (u64) recorded when the last upgrade proposal was
+    /// cancelled. Used to enforce CANCEL_REPROPOSE_COOLDOWN (Issue #618).
+    LastUpgradeCancelledAt,
+    /// Differential compatibility manifest keyed by the proposed WASM hash.
+    UpgradeCompatibilityManifest(BytesN<32>),
+    /// Immutable upgrade state commitment record keyed by the deployed WASM hash.
+    /// Persists after successful upgrade execution to provide a verifiable,
+    /// tamper-evident record of the migrated state and compatibility evidence.
+    UpgradeStateCommitment(BytesN<32>),
+    /// Structured evidence log for a disputed escrow order (#927)
+    EvidenceLog(u32),
+    /// Submitted evidence hash to prevent reuse across disputes (#927)
+    UsedEvidenceHash(BytesN<32>),
+    /// Escalation record for a dispute (#941)
+    DisputeEscalation(u32),
+    /// Assignment snapshot for a disputed escrow.
+    DisputeAssignment(u32),
+    /// Monotonic revision of the active arbitrator assignment.
+    ArbitratorAssignmentRevision,
+    /// Configurable dispute escalation window in seconds (#941)
+    DisputeEscalationWindow,
+    /// Tiered escalation ladder state for a pending dispute (#1080)
+    DisputeEscalationState(u32),
+    /// Admin-configurable escalation checkpoint schedule (#1080)
+    EscalationCheckpoints,
+    /// Counter for rate-limited calls per address per window (#943)
+    RateLimitCount(Address, u64),
+    /// Platform rate limit configuration (max_calls, window) (#943)
+    RateLimitConfig,
+    /// Bounded evidence challenge window for a disputed order (#942).
+    /// Stores the immutable deadline and closure state so the window
+    /// closes exactly once and finalization is blocked until the deadline.
+    EvidenceChallenge(u32),
+    /// Caller-scoped idempotency record keyed by (caller, operation_key) (#1025)
+    IdempotencyRecord(Address, BytesN<32>),
+    /// Current emergency operation in flight (only one at a time) (#1072)
+    CurrentEmergencyOperation,
+    /// Historical log of completed/failed emergency operations (#1072)
+    EmergencyOperationHistory,
+    /// Count of entries in emergency operation history (#1072)
+    EmergencyOperationHistoryCount,
+    /// Indexed history entry by position (#1072)
+    EmergencyOperationHistoryIndexed(u32),
+    /// Count of currently active recurring escrows for conflict detection (#1072)
+    ActiveRecurringCount,
+    // ─── Liquidation / collateral health (#1111) ────────────────────────────────
+    /// Snapshot of an artisan's collateral health status.
+    StakeHealthSnapshot(Address),
+    /// Current liquidation-eligibility status for an artisan.
+    LiquidationStatus(Address),
+    /// Audit record for a completed liquidation, keyed by liquidation ID.
+    LiquidationRecord(u64),
+    /// Monotonic counter for liquidation IDs.
+    NextLiquidationId,
+    /// Configurable liquidation policy thresholds.
+    LiquidationPolicyConfig,
+    /// Number of liquidation records (for indexed enumeration).
+    LiquidationRecordCount,
+    /// Indexed liquidation record by position.
+    LiquidationRecordIndexed(u32),
+    /// Monotonic admin-mutation revision. Incremented on every successful
+    /// configuration, pause, recovery, or governance write (#1071).
+    AdminRevision,
+    /// SHA-256 fingerprint of the last successfully applied admin mutation.
+    AdminMutationFingerprint,
+    /// Revision that was consumed by the last successful admin mutation.
+    LastAppliedAdminRevision,
+    /// Canonical per-signer upgrade approval keyed by proposal nonce and
+    /// signer address so each signer can count at most once (#1059).
+    UpgradeSignerApproval(u32, Address),
+    /// Configured archival record policy.
+    ArchivalPolicy,
+    /// Immutable archival summary of a terminal escrow, keyed by order ID.
+    ArchivalSummary(u32),
+    /// Monotonic count of archival summaries ever written.
+    ArchivalSummaryCount,
+    /// Indexed order IDs of archival summaries, keyed by archive position.
+    ArchivalSummaryIndexed(u32),
+    /// Next cursor for bounded/resumable archival compaction.
+    ArchivalCompactionCursor,
+}
+
+/// Emergency operation kinds: the four types of critical control operations
+/// that must be serialized to prevent interference (#1072).
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum IdempotencyOp {
+    CreateEscrow = 1,
+    ReleaseFunds = 2,
+    Refund = 3,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct IdempotencyRecord {
+    pub op: IdempotencyOp,
+    pub order_id: u32,
+    pub params_hash: BytesN<32>,
+    pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EmergencyOpKind {
+    /// Admin account recovery via fallback admin
+    AdminRecovery = 0,
+    /// Unallocated fund sweep operation
+    Sweep = 1,
+    /// WASM contract upgrade operation
+    Upgrade = 2,
+    /// Platform pause/unpause operation
+    Pause = 3,
+}
+
+/// Emergency operation execution phases: tracks lifecycle of in-flight operations
+/// to support timeout/force-release and audit trails (#1072).
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EmergencyOpPhase {
+    /// Operation is currently acquiring the lock and performing work
+    Executing = 0,
+    /// Operation completed successfully
+    Completed = 1,
+    /// Operation failed and was aborted (state reset to Idle)
+    Failed = 2,
+}
+
+/// Current emergency operation state: tracks which operation (if any) is in flight,
+/// who initiated it, which phase it's in, and a revision counter for optimistic
+/// concurrency control (#1072).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EmergencyOperation {
+    /// The type of in-flight operation
+    pub kind: EmergencyOpKind,
+    /// The actor who initiated the operation
+    pub actor: Address,
+    /// Current phase (Executing, Completed, or Failed)
+    pub phase: EmergencyOpPhase,
+    /// Operation revision: increments on every state transition (enter/exit/fail)
+    /// Serves as optimistic-concurrency guard and audit trail (#1072)
+    pub revision: u32,
+    /// Timestamp when operation started (in ledger seconds)
+    pub started_at: u64,
+    /// Success flag: true if operation completed successfully
+    pub success: bool,
+    /// Optional: amount affected by operation (e.g., swept funds)
+    pub amount: i128,
+}
+
+/// Policy controlling archival retention and maintenance batching.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArchivalRecordPolicy {
+    pub retention_window: u64,
+    pub compaction_batch_size: u32,
+}
+
+/// Immutable summary of a terminal escrow.
+///
+/// Written once an escrow reaches a terminal state and used for fund
+/// reconstruction after the active escrow record is pruned by historical
+/// maintenance. `finalized_at` is the ledger timestamp when the summary was
+/// created, which also drives the retention window for compaction.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArchivalSummary {
+    pub order_id: u32,
+    pub escrow: Escrow,
+    pub finalized_at: u64,
+}
+
+/// Progress for a bounded archival compaction run.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArchivalCompactionProgress {
+    pub cursor: u32,
+    pub scanned: u32,
+    pub pruned: u32,
+    pub total: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArtisanStakeData {
+    pub amount: i128,
+    pub token: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct StakeDeposit {
+    pub amount: i128,
+    pub cooldown_end: u64,
+}
+
+/// Lifecycle status of an artisan's stake collateral health.
+///
+/// # State machine
+///
+/// ```text
+/// Healthy ──► UnderCollateralized ──► LiquidationEligible ──► Liquidated
+///    ▲                   │                       │               │
+///    │               cure_liquidation()       cure_liquidation() │
+///    └─────────────────┘                       └───────────────┘
+/// ```
+///
+/// An artisan enters `UnderCollateralized` when `evaluate_stake_health`
+/// detects `stake < required_collateral`. After a configurable grace period
+/// (or immediate admin action), the artisan may be promoted to
+/// `LiquidationEligible`, at which point authorized parties may call
+/// `trigger_liquidation`. Curing (topping up stake) always returns to
+/// `Healthy` regardless of prior state.
+#[contracttype(export = false)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum LiquidationStatus {
+    /// Stake meets or exceeds required collateral.
+    Healthy = 0,
+    /// Active obligations exceed staked collateral but no liquidation action yet.
+    UnderCollateralized = 1,
+    /// Admin has flagged the artisan; authorized parties may trigger liquidation.
+    LiquidationEligible = 2,
+    /// Liquidation has been executed; only cure can restore health.
+    Liquidated = 3,
+}
+
+/// Deterministic snapshot of an artisan's collateral health at a specific
+/// ledger timestamp. All fields are derived from on-chain state and the
+/// provided timestamp; no external oracles are consulted.
+///
+/// # Health formula
+///
+/// ```text
+/// required_collateral = active_obligations × min_stake_required
+/// health_ratio        = current_stake / max(required_collateral, 1)
+/// deficit             = max(0, required_collateral − current_stake)
+/// ```
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct StakeHealthSnapshot {
+    /// The artisan address evaluated.
+    pub artisan: Address,
+    /// Ledger timestamp at which this snapshot is valid.
+    pub evaluated_at: u64,
+    /// Current staked amount (i128).
+    pub current_stake: i128,
+    /// Number of active escrow/recurring-escrow obligations.
+    pub active_obligations: u32,
+    /// Required collateral (obligations × min_stake_required).
+    pub required_collateral: i128,
+    /// health_ratio = current_stake / max(required_collateral, 1), scaled by
+    /// 10_000 (100.00% = 10_000). A value of 0 means zero stake.
+    pub health_ratio_bps: u32,
+    /// Deficit amount: max(0, required − current). Zero when healthy.
+    pub deficit: i128,
+    /// Current liquidation lifecycle status.
+    pub status: LiquidationStatus,
+}
+
+/// Configurable policy thresholds for the liquidation subsystem.
+///
+/// Stored under [`DataKey::LiquidationPolicy`] and admin-adjustable via
+/// `set_liquidation_policy`.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct LiquidationPolicyData {
+    /// Maximum fraction of the deficit that may be seized in a single
+    /// liquidation call, expressed in basis points (10_000 = 100%).
+    /// Prevents over-seizure relative to actual harm.
+    pub max_seizure_bps: u32,
+    /// Grace period (seconds) after an artisan becomes under-collateralized
+    /// before they can be flagged as LiquidationEligible.
+    pub grace_period_secs: u64,
+    /// Whether liquidation is enabled at all (admin kill-switch).
+    pub enabled: bool,
+}
+
+/// Audit record for a completed liquidation event.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct LiquidationRecord {
+    /// Monotonically increasing liquidation identifier.
+    pub id: u64,
+    /// The artisan whose stake was partially seized.
+    pub artisan: Address,
+    /// Admin or authorized party that triggered the liquidation.
+    pub liquidator: Address,
+    /// Amount actually seized (≤ deficit, ≤ max_seizure policy).
+    pub seized_amount: i128,
+    /// Ledger timestamp when liquidation executed.
+    pub executed_at: u64,
+    /// The artisan's health_ratio_bps at execution time.
+    pub health_ratio_bps: u32,
+    /// Whether the artisan has since cured (topped up).
+    pub cured: bool,
+    /// Ledger timestamp when cured, or 0 if not yet cured.
+    pub cured_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum RecurringEscrowAction {
+    Created = 0,
+    CycleReleased = 1,
+    Cancelled = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RecurringEscrow {
+    pub id: u64,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub token: Address,
+    pub total_amount: i128,
+    pub released_amount: i128,
+    pub frequency: u64,
+    pub duration: u32,
+    pub current_cycle: u64,
+    pub last_release_time: u64,
+    pub is_active: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RecurringEscrowEvent {
+    pub schema_version: u32,
+    pub id: u64,
+    pub action: RecurringEscrowAction,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
+/// Lifecycle status of an escrow order.
+///
+/// # Live variants
+/// - `Active` — funded (or created) and open for release / refund / dispute
+/// - `Released` — funds sent to the seller
+/// - `Refunded` — funds returned to the buyer
+/// - `Disputed` — dispute opened; awaiting arbitrator resolution
+/// - `Resolved` — dispute resolved (release or refund completed)
+/// - `ReleasePending` / `RefundPending` / `DisputePending` — in-flight
+///  CEI transitions claimed while an external call is outstanding
+///
+/// # Removed legacy variants (issue #706)
+/// `Draft` and `UnderReview` were deprecated in contract version 1.2 and are
+/// **not** part of this enum. Do not reintroduce them — they caused confusion
+/// with the live lifecycle and are unused by every transition path.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformStats {
+    pub total_volume: i128,
+    pub total_escrows: u32,
+    pub active_users: u32,
+    pub whitelist_count: u32,
+}
+
+/// Aggregate, non-sensitive observability snapshot for off-chain monitoring.
+///
+/// Every count is derived with saturating arithmetic and intentionally omits
+/// buyer, seller, arbitrator, and token addresses.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ObservabilitySnapshot {
+    /// Schema version for this snapshot; bump when fields change.
+    pub version: u32,
+    /// Incremented by `reset_observability_metrics` to delineate eras.
+    pub reset_epoch: u64,
+    pub total_escrows: u64,
+    pub total_volume: i128,
+    pub active_disputes: u64,
+    pub staked_artisans: u64,
+    pub total_failures: u64,
+    pub active_jobs: u64,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum EscrowStatus {
+    Active = 0,
+    Released = 1,
+    Refunded = 2,
+    Disputed = 3,
+    Resolved = 4,
+    ReleasePending = 5,
+    RefundPending = 6,
+    DisputePending = 7,
+    /// In-flight exclusive claim while a dispute settlement path executes.
+    SettlementPending = 8,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EscrowStateIssue {
+    None = 0,
+    EscrowNotFound = 1,
+    PendingTransitionUnfinished = 2,
+    MissingDisputeTimestamp = 3,
+    InvalidTerminalState = 4,
+    SettlementReceiptConflict = 5,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowStateDiagnostic {
+    pub order_id: u32,
+    pub status: EscrowStatus,
+    pub is_consistent: bool,
+    pub issue: EscrowStateIssue,
+}
+
+/// Choice of resolution for a disputed escrow.
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum Resolution {
+    /// Release funds to the seller.
+    /// Platform fees ARE collected in this case.
+    ReleaseToSeller = 0,
+    /// Refund funds to the buyer.
+    /// Full amount is returned; platform fees ARE NOT collected.
+    RefundToBuyer = 1,
+}
+
+/// Describes which settlement formula to apply when computing a `FeeAllocation`.
+///
+/// Every terminal settlement path must supply one of these variants so that
+/// `compute_fee_allocation` can deterministically decide how the escrow pot is
+/// split among platform, seller, and buyer.  Adding a new path means adding a
+/// new variant here; all existing invariant tests will catch regressions.
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum SettlementKind {
+    /// Normal release (buyer-approved or auto-release).
+    /// Platform fee deducted from the seller's portion; buyer pays nothing.
+    ReleaseFunds,
+    /// Full refund with no fee (admin-initiated or dispute RefundToBuyer).
+    /// Buyer receives the entire escrow amount; platform collects nothing.
+    FullRefundNoFee,
+    /// Expired-dispute resolution: buyer receives full amount, platform fee
+    /// comes only from the seller's locked pot.
+    ExpiredDisputeDeductFromSeller,
+    /// Expired-dispute resolution: platform fee deducted from the buyer's
+    /// refund; seller receives nothing additional.
+    ExpiredDisputeDeductFromBuyer,
+    /// Expired-dispute resolution: fee split equally between buyer and seller.
+    ExpiredDisputeSplitFee,
+    /// Partial-refund settlement. `refund_gross` and `seller_gross` are the
+    /// gross portions *before* fees, supplied as context fields.
+    PartialRefund(i128, i128),
+}
+
+/// Output of `compute_fee_allocation`.
+///
+/// Every value is non-negative and the three amounts sum exactly to the
+/// original `escrow.amount`, guaranteeing the contract never leaks or
+/// over-pays:
+///
+/// ```text
+/// platform_fee + seller_amount + buyer_amount == escrow_amount
+/// ```
+///
+/// Callers **must** use these three values — and only these three values —
+/// when performing token transfers in any settlement path.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeAllocation {
+    /// Amount transferred to the platform wallet.
+    pub platform_fee: i128,
+    /// Net amount transferred to the seller (artisan).
+    pub seller_amount: i128,
+    /// Net amount transferred back to the buyer.
+    pub buyer_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct Escrow {
+    pub version: u32,
+    pub id: u64,
+    pub batch_id: Option<u64>,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32, // Time in seconds before auto-release
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<Symbol>,
+    pub dispute_initiated_at: Option<u64>,
+    pub funded: bool,
+    /// Ledger timestamp after which any party (or admin) may cancel this escrow
+    /// if it has not yet been funded. Set to created_at + UNFUNDED_CANCEL_TIMEOUT
+    /// for unfunded escrows; None for escrows that were funded at creation (#656).
+    pub funding_deadline: Option<u64>,
+    pub service_agreement_hash: Option<Bytes>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct LegacyEscrow {
+    pub id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<String>,
+    pub dispute_initiated_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct EscrowWithoutBatch {
+    pub version: u32,
+    pub id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<String>,
+    pub dispute_initiated_at: Option<u64>,
+}
+
+/// Escrow format before service_agreement_hash was added (#708).
+/// Used for backward-compatible deserialization during v4→v5 migration.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct EscrowV4 {
+    pub version: u32,
+    pub id: u64,
+    pub batch_id: Option<u64>,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<Symbol>,
+    pub dispute_initiated_at: Option<u64>,
+    pub funded: bool,
+    pub funding_deadline: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EscrowAction {
+    Created = 0,
+    Released = 1,
+    Refunded = 2,
+    Disputed = 3,
+    Resolved = 4,
+    Extended = 5,
+    BatchCreated = 6,
+    BatchReleased = 7,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FundMovementAuditEntry {
+    pub actor: Address,
+    pub amount: i128,
+    pub reason: Symbol,
+    pub timestamp: u64,
+    pub balance_impact: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FundAllocation {
+    pub balance: i128,
+    pub total_locked: i128,
+    pub total_staked: i128,
+    pub unallocated: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReconciliationReport {
+    pub token: Address,
+    pub balance: i128,
+    pub expected_locked: i128,
+    pub expected_staked: i128,
+    pub tracked_locked: i128,
+    pub tracked_staked: i128,
+    pub scanned_escrows: u32,
+    pub next_cursor: u32,
+    pub complete: bool,
+    pub unresolved: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RepairAction {
+    pub action_type: u32,
+    pub target: Option<Address>,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReconciliationRepairPlan {
+    pub id: u64,
+    pub version: u32,
+    pub token: Address,
+    pub expected_locked: i128,
+    pub expected_staked: i128,
+    pub observed_balance: i128,
+    pub observed_tracked_locked: i128,
+    pub observed_tracked_staked: i128,
+    pub discrepancy_digest: BytesN<32>,
+    pub allocated_amount: i128,
+    pub actions: Vec<RepairAction>,
+    pub approvals: Vec<Address>,
+    pub created_at: u64,
+    pub applied: bool,
+    pub cancelled: bool,
+    pub consumed: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowEvent {
+    /// Schema version for this event payload. Increment when fields are added
+    /// or reordered so off-chain indexers can handle multiple schema generations
+    /// without breaking across upgrades. Current version: 1.
+    pub schema_version: u32,
+    pub escrow_id: u64,
+    pub action: EscrowAction,
+    pub buyer: Address,
+    pub seller: Address,
+    /// Monetary fields are emitted as raw integer types (i128/u64). Avoid
+    /// converting integers to strings inside the contract — emit numeric
+    /// values and perform human-friendly formatting off-chain (UI/indexer).
+    pub amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowResolvedEvent {
+    /// Schema version for this event payload. Increment when fields are added
+    /// or reordered so off-chain indexers can handle multiple schema generations
+    /// without breaking across upgrades. Current version: 1.
+    pub schema_version: u32,
+    pub escrow_id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub arbitrator: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReputationUpdateEvent {
+    pub schema_version: u32,
+    pub address: Address,
+    pub successful_delta: u32,
+    pub disputed_delta: u32,
+    pub metrics_sales_delta: u32,
+    pub metrics_amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+/// Tagged union used to carry a single configuration value inside
+/// [`ConfigUpdatedEvent`].
+///
+/// Soroban events must be self-describing for off-chain indexers, but
+/// `PlatformConfig` fields are heterogeneous (counts, monetary amounts,
+/// addresses, and free-form strings). Rather than emit a separate event type
+/// per field — which would bloat the contract's event ABI — every admin
+/// configuration change is normalized into one of these four variants. Indexers
+/// match on the variant tag to recover the underlying Rust type without any
+/// loss of precision (in particular, `I128` monetary values are never
+/// stringified on-chain; see the note on [`EscrowEvent::amount`]).
+///
+/// # Variant mapping
+///
+/// * `U32`     — bounded counters and basis-point fees (e.g. `platform_fee_bps`).
+/// * `I128`    — monetary thresholds such as `min_escrow_amount`.
+/// * `Address` — role and token addresses (e.g. `fee_collector`).
+/// * `String`  — human-readable identifiers that have no compact encoding.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum ConfigValue {
+    U32(u32),
+    I128(i128),
+    Address(Address),
+    String(String),
+}
+
+/// Emitted whenever an admin mutates a single field of the on-chain
+/// `PlatformConfig`.
+///
+/// # Topics
+///
+/// Published under `(symbol "config_updated", symbol field_name)` so indexers
+/// can subscribe to changes of a specific field cheaply. The `field_name` topic
+/// mirrors the `field_name` payload member.
+///
+/// # Preconditions
+///
+/// * The caller must be the current platform admin; the emitting function
+///   asserts `admin.require_auth()` before the storage write, so this event is
+///   only ever observed for an authorized change.
+///
+/// # Storage side-effects
+///
+/// * The corresponding `PlatformConfig` field has already been persisted by the
+///   time this event fires. The event is emitted *after* the storage write,
+///   in keeping with the check-effects-interactions ordering used throughout
+///   the contract.
+///
+/// # Payload
+///
+/// * `field_name` — symbolic name of the mutated field.
+/// * `old_value`  — value held immediately before the write.
+/// * `new_value`  — value persisted by this update.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ConfigUpdatedEvent {
+    pub schema_version: u32,
+    pub field_name: Symbol,
+    pub old_value: ConfigValue,
+    pub new_value: ConfigValue,
+    /// Admin revision consumed by the write that produced this event (#1071).
+    pub revision: u32,
+}
+
+/// Emitted when an artisan's negotiated platform-fee tier is set or changed.
+///
+/// Per-artisan fee tiers let the platform reward high-reputation sellers with a
+/// reduced `fee_bps` (basis points, where `10_000` == 100%). The persisted tier
+/// overrides the global `platform_fee_bps` for that artisan's future escrows.
+///
+/// # Topics
+///
+/// Published under `(symbol "artisan_fee_tier_updated", address artisan)` so a
+/// client can stream the fee history of a single artisan.
+///
+/// # Preconditions
+///
+/// * The caller must be the platform admin (`require_auth`).
+/// * `fee_bps` is validated against `MAX_PLATFORM_FEE_BPS`; an out-of-range
+///   value aborts with [`Error::InvalidFee`] and no event is emitted.
+///
+/// # Storage side-effects
+///
+/// * The artisan's fee-tier ledger entry is written (and its TTL extended)
+///   before this event fires.
+///
+/// # Payload
+///
+/// * `artisan` — address whose fee tier was updated.
+/// * `fee_bps` — the new fee in basis points applied to future escrows.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArtisanFeeTierUpdatedEvent {
+    pub schema_version: u32,
+    pub artisan: Address,
+    pub fee_bps: u32,
+}
+
+/// Emitted when an artisan stakes collateral tokens into the platform.
+///
+/// Staking is a precondition for accepting high-value escrows; the staked
+/// balance backs the artisan's dispute exposure. Token movement obeys the
+/// check-effects-interactions pattern: the artisan's persistent stake balance
+/// is increased and committed *before* the external `token.transfer` callback,
+/// so a malicious token contract cannot re-enter and observe a stale balance.
+///
+/// # Topics
+///
+/// Published under `(symbol "tokens_staked", address artisan)`.
+///
+/// # Preconditions
+///
+/// * `artisan.require_auth()` — only the staker may stake on their own behalf.
+/// * `amount` must be positive and `token` whitelisted.
+///
+/// # Storage side-effects
+///
+/// * The artisan's staked-balance entry is incremented and its TTL extended.
+///
+/// # Payload
+///
+/// * `artisan` — the staking address.
+/// * `token`   — the staked token's contract address.
+/// * `amount`  — raw token amount staked (never stringified on-chain).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct TokensStakedEvent {
+    pub schema_version: u32,
+    pub artisan: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an artisan withdraws previously staked collateral.
+///
+/// # Topics
+///
+/// Published under `(symbol "tokens_unstaked", address artisan)`.
+///
+/// # Preconditions
+///
+/// * `artisan.require_auth()`.
+/// * The stake cooldown must have elapsed, otherwise the call aborts with
+///   [`Error::StakeCooldownActive`] and no event is emitted.
+/// * The withdrawal token must match the original staking token
+///   ([`Error::StakeTokenMismatch`]).
+///
+/// # Storage side-effects
+///
+/// * The artisan's staked-balance entry is decremented *before* the outbound
+///   `token.transfer`, preserving reentrancy safety (the transfer is the final
+///   interaction in the call path).
+///
+/// # Payload
+///
+/// * `artisan` — the withdrawing address.
+/// * `token`   — the unstaked token's contract address.
+/// * `amount`  — raw token amount returned to the artisan.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct TokensUnstakedEvent {
+    pub schema_version: u32,
+    pub artisan: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an order's off-chain metadata is verified against its on-chain
+/// commitment.
+///
+/// The contract stores only a compact hash of an order's metadata (see
+/// [`EscrowMetadata`]); the full document lives off-chain (e.g. IPFS). When a
+/// verifier reveals the document and the contract confirms its hash matches the
+/// stored commitment, this event records the successful verification so
+/// indexers can mark the order's metadata as trusted.
+///
+/// # Topics
+///
+/// Published under `(symbol "metadata_verified", u64 order_id)`.
+///
+/// # Preconditions
+///
+/// * The stored commitment must exist and the revealed content must hash to it,
+///   otherwise the call aborts with [`Error::InvalidMetadataHash`].
+///
+/// # Storage side-effects
+///
+/// * None beyond TTL refresh of the order entry; verification is a read-and-
+///   compare operation that emits this audit event.
+///
+/// # Payload
+///
+/// * `order_id`  — the escrow/order whose metadata was verified.
+/// * `verifier`  — address that submitted the reveal proof.
+/// * `timestamp` — ledger timestamp at verification time.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MetadataVerifiedEvent {
+    pub schema_version: u32,
+    pub order_id: u64,
+    pub verifier: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformPausedEvent {
+    pub schema_version: u32,
+    pub initiator: Address,
+    pub timestamp: u64,
+    /// Admin revision consumed by this pause (#1071).
+    pub revision: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformUnpausedEvent {
+    pub schema_version: u32,
+    pub initiator: Address,
+    pub timestamp: u64,
+    /// Admin revision consumed by this unpause (#1071).
+    pub revision: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowMetadata {
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub service_agreement_hash: Option<Bytes>,
+}
+
+/// Metadata reveal proof for privacy verification (Issue #122)
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MetadataRevealProof {
+    /// The full metadata content (off-chain document)
+    pub content: Bytes,
+    /// Optional secret key for additional verification
+    pub secret: Option<Bytes>,
+}
+
+/// Test-only metadata structure for simplified testing
+#[cfg(test)]
+#[derive(Clone, Eq, PartialEq)]
+pub struct Metadata {
+    pub title: String,
+    pub description: String,
+    pub category: String,
+}
+
+/// Proposal record for a pending WASM upgrade.
+///
+/// `upgrade_at` is the earliest ledger timestamp at which `execute_upgrade` may
+/// run; it equals `proposed_at + wasm_upgrade_cooldown` from `PlatformConfig`.
+/// `proposed_by` records the admin that submitted the proposal — note that the
+/// admin role can rotate via the two-step transfer (`update_admin` /
+/// `claim_admin`), so the value reflects the admin at proposal time, not at
+/// execution time. `execute_upgrade` re-checks the *current* admin's auth, so
+/// rotating admins cannot bypass authorization.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct WasmUpgradeProposal {
+    pub wasm_hash: BytesN<32>,
+    pub upgrade_at: u64,
+    pub proposed_by: Address,
+    pub proposed_at: u64,
+}
+
+/// Lifecycle event emitted whenever a WASM upgrade proposal is created,
+/// replaced, cancelled, or executed. Indexers can use the `action` symbol to
+/// reconstruct the upgrade audit trail without scanning storage.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeProposalEvent {
+    pub schema_version: u32,
+    pub action: Symbol,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+    pub upgrade_at: u64,
+}
+
+/// Emitted for every distinct upgrade-signer approval of a proposal round.
+///
+/// Indexers key on `(nonce, signer)` — the same pair can never appear twice
+/// for a live round because storage is canonicalized under
+/// `DataKey::UpgradeSignerApproval(nonce, signer)` (#1059).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeApprovalEvent {
+    /// Proposal round nonce (revision) this approval belongs to.
+    pub nonce: u32,
+    /// Signer that submitted this approval.
+    pub signer: Address,
+    /// WASM hash being approved.
+    pub wasm_hash: BytesN<32>,
+    pub timestamp: u64,
+    /// Number of distinct approvals recorded after this one was accepted.
+    pub approval_count: u32,
+}
+
+/// On-chain record of a completed WASM upgrade.
+///
+/// One entry is appended to `UpgradeHistory` per successful `execute_upgrade`
+/// call, providing operators and auditors visibility into how the contract
+/// reached its current `ContractVersion`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeRecord {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Additive audit record for compatibility evidence. Kept separate from
+/// `UpgradeRecord` so existing serialized upgrade history remains readable.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeCompatibilityRecord {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub state_commitment: BytesN<32>,
+    pub migration_checkpoint: BytesN<32>,
+    pub timestamp: u64,
+}
+
+/// Immutable upgrade state commitment record. Persists after successful upgrade
+/// execution to provide a verifiable, tamper-evident record of the migrated
+/// state and compatibility evidence. Commitments become immutable once activated.
+///
+/// # Immutability
+///
+/// Once `activated_at` is set and `immutable` is `true`, this record cannot be
+/// modified. Any attempt to re-execute an upgrade with the same `wasm_hash`
+/// will be rejected. This ensures upgrade state commitments are permanent and
+/// cannot be tampered with after activation.
+///
+/// # Fields
+///
+/// - `from_version` / `to_version` — version transition recorded at execution
+/// - `wasm_hash` — the deployed contract code hash
+/// - `state_digest` — SHA-256 of the migrated contract state snapshot
+/// - `migration_result_digest` — SHA-256 of migration outcome evidence
+/// - `admin` — the address that executed the upgrade
+/// - `timestamp` — ledger timestamp when the commitment was created
+/// - `activated_at` — ledger timestamp when the commitment became immutable
+/// - `immutable` — flag indicating if the commitment is locked
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeStateCommitment {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub state_digest: BytesN<32>,
+    pub migration_result_digest: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+    pub activated_at: u64,
+    pub immutable: bool,
+}
+
+/// Evidence produced by an isolated old/new implementation compatibility run.
+/// Hash fields commit to the complete manifest and its test evidence; the
+/// contract deliberately does not trust an uncommitted human-readable report.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeCompatibilityManifest {
+    pub source_version: u32,
+    pub target_version: u32,
+    pub state_commitment: BytesN<32>,
+    pub interface_commitment: BytesN<32>,
+    pub authorization_commitment: BytesN<32>,
+    pub preconditions_commitment: BytesN<32>,
+    pub postconditions_commitment: BytesN<32>,
+    pub rollback_commitment: BytesN<32>,
+    pub migration_checkpoint: BytesN<32>,
+    pub migration_complete: bool,
+    pub manual_records: u32,
+}
+
+/// Stable, representative state used by migration tooling when creating a
+/// differential snapshot. The resulting hash is supplied in the manifest.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeStateSnapshot {
+    pub contract_version: u32,
+    pub escrow_count: u32,
+    pub recurring_escrow_next_id: u64,
+    pub upgrade_threshold: u32,
+    pub paused: bool,
+    pub onboarding_configured: bool,
+}
+
+/// Immutable per-round state for the multi-sig upgrade approval flow.
+///
+/// Written once on the **first** approval call for a given proposal nonce and
+/// never mutated except to append new approvals.  Keyed by
+/// `DataKey::UpgradeApprovalState(nonce)`.
+///
+/// # Security properties
+///
+/// * `signers`   — snapshotted from `UpgradeSigners` (or admin fallback) at
+///   round open.  Subsequent `set_upgrade_signers` calls cannot alter which
+///   addresses are eligible for this round, closing the signer-rotation race.
+///
+/// * `threshold` — snapshotted from `UpgradeThreshold` at round open.
+///   Mid-round `set_upgrade_threshold` calls therefore cannot lower the bar
+///   for the current round.
+///
+/// * `approvals` — grows monotonically as valid signers call
+///   `propose_upgrade_wasm`.  Only addresses present in `signers` may appear
+///   here; duplicates are rejected with `AlreadyApproved`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeApprovalState {
+    /// Monotonically increasing round counter.  Incremented on every
+    /// `cancel_upgrade_wasm` call so that residual state from a prior
+    /// round cannot be replayed in a subsequent round.
+    pub nonce: u32,
+    /// Signer set captured when the round was opened (first approval).
+    pub signers: Vec<Address>,
+    /// Approval threshold captured when the round was opened.
+    pub threshold: u32,
+    /// Addresses that have submitted a valid approval this round.
+    pub approvals: Vec<Address>,
+}
 
 const READ_TTL_THRESHOLD: u32 = 100;
 const TTL_EXTENSION: u32 = 1000;
