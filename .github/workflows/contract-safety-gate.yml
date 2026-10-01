@@ -6,6 +6,14 @@ on:
   workflow_dispatch:
 
 jobs:
+  conflict-marker-gate:
+    name: Committed conflict-marker gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject committed conflict markers
+        run: ./craft-nexus-contract/scripts/check_conflict_markers.sh
+
   safety-gate:
     name: Formal contract safety gate
     runs-on: ubuntu-latest
