@@ -44,6 +44,7 @@ fn make_upgrade_env() -> (Env, Address, Address, BytesN<32>) {
 
     let contract_id = env.register_contract(None, crate::CraftNexusContract);
     let client = CraftNexusContractClient::new(&env, &contract_id);
+
     client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None);
     client.set_min_release_window(&1);
     client.set_evidence_challenge_window(&0);

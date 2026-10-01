@@ -15,7 +15,8 @@ This document covers the security model that governs WASM bytecode upgrades for 
 7. [Admin Key Management](#7-admin-key-management)
 8. [Audit Trail and History](#8-audit-trail-and-history)
 9. [Security Assumptions and Invariants](#9-security-assumptions-and-invariants)
-10. [Quick-Reference CLI Commands](#10-quick-reference-cli-commands)
+10. [Differential Upgrade Compatibility Tests](#10-differential-upgrade-compatibility-tests)
+11. [Quick-Reference CLI Commands](#11-quick-reference-cli-commands)
 
 ---
 
@@ -71,12 +72,13 @@ The upgrade process uses an **M-of-N multi-signature** model:
 
 ### How approval accumulation works
 
-Each signer calls `propose_upgrade_wasm` with the **exact same `new_wasm_hash`**. Approvals for that hash are stored and counted. Two integrity checks enforce correctness:
+Each signer calls `propose_upgrade_wasm` with the **exact same `new_wasm_hash`**. Approvals are stored canonically under `DataKey::UpgradeSignerApproval(nonce, signer)` so each signer can count at most once for a given proposal revision (#1059). Integrity checks:
 
-1. **No duplicate approvals** — if the same address calls again for the same hash, the call returns `Error::AlreadyApproved`. The approval is not counted twice.
-2. **Only current signers count** — when threshold is checked, only approvals from addresses still present in the active UpgradeSigners list are counted. If a signer is removed after approving, their approval is no longer counted toward the threshold. This prevents stale or rotated keys from lingering as an implicit vote.
+1. **No duplicate approvals** — a second call from the same signer returns the stable error `Error::AlreadyApproved`. The keyed slot and the in-round `approvals` vec both reject the duplicate.
+2. **Count cannot exceed the signer set** — after a unique signer is recorded, `approvals.len()` is bounded by the snapshotted `signers` list. Excess approvals are rejected with `AlreadyApproved`.
+3. **Approval events identify revision and signer** — every accepted approval emits `UPG_APPR` (`UpgradeApprovalEvent`) with `nonce`, `signer`, `wasm_hash`, and `approval_count`.
 
-Once the threshold is reached, the proposal is **committed**: the `WasmUpgradeProposal` record is stored on-chain, the approval accumulator is cleared, and the cooldown clock starts. The event `UPG_PROP` is emitted on the `wasm_upgrade` topic.
+Once the threshold is reached, the proposal is **committed**: the `WasmUpgradeProposal` record is stored on-chain, the round accumulator is cleared, and the cooldown clock starts. The event `UPG_PROP` is emitted in addition to the last `UPG_APPR`.
 
 Only **one proposal may be pending at a time**. Attempting to propose while one already exists returns `Error::UpgradeProposalExists`.
 
@@ -166,7 +168,7 @@ stellar contract invoke \
   --paused true
 ```
 
-When `is_paused` is `true`, escrow creation, release, refund initiation, dispute initiation, staking, and recurring cycle releases return `Error::ContractPaused` (code 15). Read-only views remain available. Admin/arbitrator paths needed to *clear* emergency conflicts — dispute resolution, upgrade cancel, fund sweep, and admin recovery — stay reachable while paused. Emits the `platform_paused` event.
+The public read-only `is_paused()` query returns the current pause bit as a boolean. It reads the same `PlatformConfig::is_paused` value used by write guards, requires no authentication, and returns `false` before initialization. When `is_paused` is `true`, escrow creation, release, refund initiation, dispute initiation, staking, and recurring cycle releases return `Error::ContractPaused` (code 15). Read-only views remain available. Admin/arbitrator paths needed to *clear* emergency conflicts — dispute resolution, upgrade cancel, fund sweep, and admin recovery — stay reachable while paused. Emits the `platform_paused` event.
 
 To resume normal operations:
 
@@ -295,7 +297,32 @@ The upgrade model relies on the following assumptions. Violating them weakens th
 
 ---
 
-## 10. Quick-Reference CLI Commands
+## 10. Differential Upgrade Compatibility Tests
+
+Any new WASM artifact proposed for `execute_upgrade` MUST pass the differential compatibility harness before the upgrade gate is considered green. The harness runs the same deterministic scenario suite against the currently deployed implementation (pre-migration) and the candidate WASM artifact (post-migration), then compares:
+
+- Read results for all public view functions
+- Authorization outcomes (admin-only, signer-only, fallback-admin)
+- Error codes and exact revert payloads
+- Emitted events (topics, data, order)
+- Invariants such as upgrade thresholds, counters, and lock state
+
+The differential fixtures represent production state that must survive a migration unchanged:
+
+| Scenario | State Covered |
+|---|---|
+| Legacy profiles | Profile storage, metadata reads after migration |
+| Active escrows | Fund allocations, release/refund sequences |
+| Disputed escrows | Dispute lifecycle, arbitrator authorization paths |
+| Recurring balances | `ActiveRecurringCount`, scheduled cycle state |
+| Stakes | Stake amounts, reward calculations, stake timelocks |
+| Paused state | `is_paused` remains `true` after migration and blocks guarded entrypoints |
+
+The gate fails if any differential check diverges. A passing run MUST record the exact tool version, the deployed WASM hash and `ContractVersion`, the candidate WASM hash, the fixture set identifier, and the emitted event digest so results are reproducible and auditable.
+
+---
+
+## 11. Quick-Reference CLI Commands
 
 All commands target a deployed Soroban contract. Replace placeholders in angle brackets.
 

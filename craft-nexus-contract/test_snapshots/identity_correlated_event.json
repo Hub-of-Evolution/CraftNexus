@@ -1,0 +1,9 @@
+{
+  "struct": "IdentityCorrelatedEvent",
+  "schema_version": 1,
+  "fields": [
+    {"name": "schema_version", "type": "u32"},
+    {"name": "user", "type": "Address"},
+    {"name": "identity_hash", "type": "Bytes"}
+  ]
+}

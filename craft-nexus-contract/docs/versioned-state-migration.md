@@ -44,6 +44,7 @@ an `UpgradeCompatibilityManifest`.
 Submit the manifest with `submit_upgrade_compatibility_manifest`. It must:
 
 - identify the exact source and target contract versions;
+- include reproducible fixture definitions and artifact versions;
 - commit to storage preconditions, postconditions, interface behavior,
   authorization behavior, and rollback limitations;
 - include a resumable migration checkpoint;

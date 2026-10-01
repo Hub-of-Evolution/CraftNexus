@@ -1,0 +1,310 @@
+#![cfg(test)]
+
+use super::*;
+use soroban_sdk::{
+    contract, contractimpl,
+    testutils::{Address as _, Ledger},
+    token, Address, Env,
+};
+
+// ---------------------------------------------------------------------------
+// Test tokens for interface probing
+// ---------------------------------------------------------------------------
+
+pub mod mock_fully_supported {
+    use super::*;
+    #[contract]
+    pub struct FullySupportedToken;
+    
+    #[contractimpl]
+    impl mock_fully_supported::FullySupportedToken {
+        pub fn decimals(_env: Env) -> u32 {
+            7
+        }
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            1_000_000
+        }
+        pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
+    }
+}
+
+pub mod mock_missing_balance {
+    use super::*;
+    #[contract]
+    pub struct MissingBalanceToken;
+    
+    #[contractimpl]
+    impl mock_missing_balance::MissingBalanceToken {
+        pub fn decimals(_env: Env) -> u32 {
+            7
+        }
+        pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
+    }
+}
+
+pub mod mock_missing_transfer {
+    use super::*;
+    #[contract]
+    pub struct MissingTransferToken;
+    
+    #[contractimpl]
+    impl mock_missing_transfer::MissingTransferToken {
+        pub fn decimals(_env: Env) -> u32 {
+            7
+        }
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            1_000_000
+        }
+    }
+}
+
+pub mod mock_malformed_decimals {
+    use super::*;
+    #[contract]
+    pub struct MalformedDecimalsToken;
+    
+    #[contractimpl]
+    impl mock_malformed_decimals::MalformedDecimalsToken {
+        // Returns a value outside the allowed 0..=18 range
+        pub fn decimals(_env: Env) -> u32 {
+            42
+        }
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            0
+        }
+        pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
+    }
+}
+
+// Token that records whether transfer was called and with what amount
+pub mod mock_recording {
+    use super::*;
+    #[contract]
+    pub struct RecordingToken;
+    
+    #[contractimpl]
+    impl mock_recording::RecordingToken {
+        pub fn initialize(env: Env) {
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "transfer_calls"), &0u32);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "last_amount"), &0i128);
+        }
+        pub fn decimals(_env: Env) -> u32 {
+            7
+        }
+        pub fn balance(_env: Env, _id: Address) -> i128 {
+            5_000_000
+        }
+        pub fn transfer(env: Env, _from: Address, _to: Address, amount: i128) {
+            let calls: u32 = env
+                .storage()
+                .instance()
+                .get(&Symbol::new(&env, "transfer_calls"))
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "transfer_calls"), &(calls + 1));
+            env.storage()
+                .instance()
+                .set(&Symbol::new(&env, "last_amount"), &amount);
+        }
+        pub fn get_transfer_calls(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "transfer_calls"))
+                .unwrap_or(0)
+        }
+        pub fn get_last_amount(env: Env) -> i128 {
+            env.storage()
+                .instance()
+                .get(&Symbol::new(&env, "last_amount"))
+                .unwrap_or(0)
+        }
+    }
+}
+
+fn setup_client(env: &Env) -> (CraftNexusContractClient<'_>, Address) {
+    env.mock_all_auths();
+    let admin = Address::generate(env);
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(env, &contract_id);
+    client.initialize(
+        &Address::generate(env),
+        &admin,
+        &Address::generate(env),
+        &500,
+        &None,
+    );
+    (client, contract_id)
+}
+
+#[test]
+fn whitelist_rejects_missing_transfer() {
+    let env = Env::default();
+    let (client, _) = setup_client(&env);
+    let token = env.register_contract(None, mock_missing_transfer::MissingTransferToken);
+    assert_eq!(
+        client.try_whitelist_token(&token),
+        Err(Ok(Error::UnsupportedToken))
+    );
+    assert_eq!(client.get_whitelisted_token_count(), 0);
+}
+
+#[test]
+fn whitelist_rejects_missing_balance() {
+    let env = Env::default();
+    let (client, _) = setup_client(&env);
+    let token = env.register_contract(None, mock_missing_balance::MissingBalanceToken);
+    assert_eq!(
+        client.try_whitelist_token(&token),
+        Err(Ok(Error::UnsupportedToken))
+    );
+    assert_eq!(client.get_whitelisted_token_count(), 0);
+}
+
+#[test]
+fn whitelist_accepts_fully_supported_token() {
+    let env = Env::default();
+    let (client, _) = setup_client(&env);
+    let token = env.register_contract(None, mock_fully_supported::FullySupportedToken);
+    // Should succeed – all three entrypoints exist
+    client.whitelist_token(&token);
+    assert_eq!(client.get_whitelisted_token_count(), 1);
+    assert!(client.is_token_whitelisted(&token));
+}
+
+#[test]
+fn whitelist_rejects_malformed_decimals_via_unsupported_path() {
+    let env = Env::default();
+    let (client, _) = setup_client(&env);
+    let token = env.register_contract(None, mock_malformed_decimals::MalformedDecimalsToken);
+    let result = client.try_whitelist_token(&token);
+    // 42 decimals is outside 0..=18, so InvalidTokenDecimals takes precedence
+    assert_eq!(result, Err(Ok(Error::InvalidTokenDecimals)));
+    assert_eq!(client.get_whitelisted_token_count(), 0);
+}
+
+#[test]
+fn validate_compatibility_does_not_mutate_funds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.budget().reset_unlimited();
+    let (client, contract_id) = setup_client(&env);
+
+    // Use StellarAssetContract (real token) to observe real balances
+    let token_admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_client = token::StellarAssetClient::new(&env, &token.address());
+    let buyer = Address::generate(&env);
+    token_client.mint(&buyer, &10_000);
+    token_client.mint(&contract_id, &5_000);
+
+    let token_balance_before = token::Client::new(&env, &token.address()).balance(&contract_id);
+    let buyer_balance_before = token::Client::new(&env, &token.address()).balance(&buyer);
+
+    // Validation is read-only: should succeed and not move any funds
+    let token_addr = token.address();
+    assert!(client.is_token_supported(&token_addr));
+    client.validate_token_compatibility(&token_addr);
+
+    // Call whitelist_token as well – also must not mutate customer funds beyond
+    // the zero self-transfer (which is internal to validation)
+    client.whitelist_token(&token_addr);
+
+    let token_balance_after = token::Client::new(&env, &token.address()).balance(&contract_id);
+    let buyer_balance_after = token::Client::new(&env, &token.address()).balance(&buyer);
+
+    assert_eq!(
+        token_balance_before, token_balance_after,
+        "validation must not change contract balance"
+    );
+    assert_eq!(
+        buyer_balance_before, buyer_balance_after,
+        "validation must not change customer balance"
+    );
+}
+
+#[test]
+fn validate_compatibility_zero_transfer_probe_is_non_mutating() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_client(&env);
+    let token_id = env.register_contract(None, mock_recording::RecordingToken);
+    mock_recording::RecordingTokenClient::new(&env, &token_id).initialize();
+
+    // Before validation, no transfers recorded
+    assert_eq!(
+        mock_recording::RecordingTokenClient::new(&env, &token_id).get_transfer_calls(),
+        0
+    );
+
+    client.validate_token_compatibility(&token_id);
+
+    // Transfer must have been probed exactly once with amount 0
+    assert_eq!(
+        mock_recording::RecordingTokenClient::new(&env, &token_id).get_transfer_calls(),
+        1
+    );
+    assert_eq!(
+        mock_recording::RecordingTokenClient::new(&env, &token_id).get_last_amount(),
+        0
+    );
+
+    // is_token_supported also probes (should be another call)
+    let supported = client.is_token_supported(&token_id);
+    assert!(supported);
+    assert_eq!(
+        mock_recording::RecordingTokenClient::new(&env, &token_id).get_transfer_calls(),
+        2
+    );
+}
+
+#[test]
+fn is_token_supported_returns_false_for_unsupported() {
+    let env = Env::default();
+    let (client, _) = setup_client(&env);
+    let bad = env.register_contract(None, mock_missing_transfer::MissingTransferToken);
+    let good = env.register_contract(None, mock_fully_supported::FullySupportedToken);
+    assert!(!client.is_token_supported(&bad));
+    assert!(client.is_token_supported(&good));
+}
+
+#[test]
+fn stellar_asset_contract_is_supported() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _) = setup_client(&env);
+    let admin = Address::generate(&env);
+    let token = env.register_stellar_asset_contract_v2(admin);
+    let addr = token.address();
+    // Real Stellar asset should pass all three probes
+    assert!(client.is_token_supported(&addr));
+    client.validate_token_compatibility(&addr);
+    // And whitelisting should succeed
+    client.whitelist_token(&addr);
+    assert!(client.is_token_whitelisted(&addr));
+}
+
+#[contract]
+struct EmptyToken;
+#[contractimpl]
+impl EmptyToken {
+    pub fn ping(_env: Env) {}
+}
+
+#[test]
+fn missing_methods_are_rejected_with_stable_error_not_panic() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _) = setup_client(&env);
+    let empty = env.register_contract(None, EmptyToken);
+    // Must be a stable contract error, not a host panic
+    let result = client.try_validate_token_compatibility(&empty);
+    assert_eq!(result, Err(Ok(Error::UnsupportedToken)));
+    let result2 = client.try_whitelist_token(&empty);
+    assert_eq!(result2, Err(Ok(Error::UnsupportedToken)));
+}

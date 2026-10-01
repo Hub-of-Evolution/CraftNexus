@@ -18,6 +18,7 @@ set -euo pipefail
 #   backup                           Snapshot PlatformConfig; prints the backup id.
 #   list-backups                     List retained PlatformConfig backups.
 #   rollback <backup_id>             Restore PlatformConfig from <backup_id>.
+#   diff-test                        Run differential upgrade compatibility tests.
 #
 # Required environment variables:
 #   CONTRACT_ID   Deployed contract address.
@@ -27,7 +28,7 @@ set -euo pipefail
 NETWORK=${NETWORK:-testnet}
 
 usage() {
-    echo "Usage: $0 <version|check|backup|list-backups|rollback> [args...]"
+    echo "Usage: $0 <version|check|backup|list-backups|rollback|diff-test> [args...]"
     echo ""
     echo "Required env vars: CONTRACT_ID, SOURCE. Optional: NETWORK (default: testnet)."
     exit 1
@@ -107,6 +108,17 @@ case "$COMMAND" in
             -- \
             rollback_platform_config --backup_id "$BACKUP_ID"
         echo "✅ Rollback complete."
+        ;;
+    diff-test)
+        require_env
+        echo "🔬 Running differential upgrade compatibility tests..."
+        stellar contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOURCE" \
+            --network "$NETWORK" \
+            -- \
+            run_differential_upgrade_compatibility_tests
+        echo "✅ Differential upgrade compatibility tests passed."
         ;;
     *)
         usage

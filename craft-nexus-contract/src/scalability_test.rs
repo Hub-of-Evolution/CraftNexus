@@ -207,20 +207,193 @@ fn test_scheduled_batch_progresses_in_bounded_idempotent_chunks() {
     }
 
     let job_id = client.schedule_batch_escrow(&buyer, &params);
-    let first = client.continue_batch_escrow(&job_id, &buyer, &5);
+
+    // The initial cursor reflects the fresh checkpoint (revision 0, index 0).
+    let cursor0 = client.get_batch_cursor(&job_id).unwrap();
+    assert_eq!(cursor0.revision, 0);
+    assert_eq!(cursor0.next_index, 0);
+    assert_eq!(cursor0.op_type, BatchOpType::EscrowCreation);
+
+    let first = client.continue_batch_escrow(&cursor0, &5);
     assert_eq!(first.next_index, 5);
+    assert_eq!(first.revision, 1);
     assert_eq!(first.status, BatchJobStatus::Pending);
     assert_eq!(client.get_escrow(&2_000).batch_id, Some(job_id));
     assert_eq!(client.get_escrow(&2_004).batch_id, Some(job_id));
 
-    let second = client.continue_batch_escrow(&job_id, &buyer, &5);
+    // Continue from the advanced checkpoint to completion.
+    let cursor1 = client.get_batch_cursor(&job_id).unwrap();
+    assert_eq!(cursor1.revision, 1);
+    assert_eq!(cursor1.next_index, 5);
+    let second = client.continue_batch_escrow(&cursor1, &5);
     assert_eq!(second.next_index, 7);
+    assert_eq!(second.revision, 2);
     assert_eq!(second.status, BatchJobStatus::Completed);
     assert_eq!(client.get_escrow(&2_006).batch_id, Some(job_id));
     assert_eq!(client.get_batch_escrow_progress(&job_id).unwrap(), second);
-    assert!(client
-        .try_continue_batch_escrow(&job_id, &buyer, &1)
-        .is_err());
+
+    // #1075 AC2 / #1076 AC2: replaying a stale cursor (its chunk already
+    // committed) is a harmless idempotent no-op returning current progress.
+    let replay_stale = client.continue_batch_escrow(&cursor1, &1);
+    assert_eq!(replay_stale, second);
+
+    // Replaying the terminal cursor is likewise harmless (no error, no work).
+    let terminal_cursor = client.get_batch_cursor(&job_id).unwrap();
+    assert_eq!(terminal_cursor.revision, 2);
+    let replay_completed = client.continue_batch_escrow(&terminal_cursor, &1);
+    assert_eq!(replay_completed, second);
+}
+
+#[test]
+fn test_batch_cursor_is_bound_to_job_account_and_op() {
+    let (env, client, buyer, seller, token, _, _, _) = setup_test();
+    let stranger = Address::generate(&env);
+
+    let mut params = soroban_sdk::Vec::new(&env);
+    for i in 0..3u32 {
+        params.push_back(EscrowCreateParams {
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            token: token.clone(),
+            amount: 1_000,
+            order_id: 4_000 + i,
+            release_window: Some(3_600),
+            ipfs_hash: None,
+            metadata_hash: None,
+            service_agreement_hash: None,
+        });
+    }
+
+    let job_id = client.schedule_batch_escrow(&buyer, &params);
+    let cursor = client.get_batch_cursor(&job_id).unwrap();
+
+    // #1075 AC1: a cursor carrying a different owner cannot drive this job.
+    let foreign_owner = BatchCursor {
+        owner: stranger.clone(),
+        ..cursor.clone()
+    };
+    assert!(
+        matches!(
+            client.try_continue_batch_escrow(&foreign_owner, &5),
+            Err(Ok(Error::BatchJobUnauthorized))
+        ),
+        "foreign-owner cursor must be rejected"
+    );
+
+    // A cursor naming a different job id resolves against that (nonexistent) job.
+    let foreign_job = BatchCursor {
+        job_id: job_id + 999,
+        ..cursor.clone()
+    };
+    assert!(
+        matches!(
+            client.try_continue_batch_escrow(&foreign_job, &5),
+            Err(Ok(Error::BatchJobNotFound))
+        ),
+        "cursor for another job id must not drive this job"
+    );
+
+    // A future / fabricated revision is rejected as a cursor mismatch.
+    let future_rev = BatchCursor {
+        revision: cursor.revision + 1,
+        ..cursor.clone()
+    };
+    assert!(
+        matches!(
+            client.try_continue_batch_escrow(&future_rev, &5),
+            Err(Ok(Error::BatchCursorMismatch))
+        ),
+        "future-revision cursor must be rejected"
+    );
+
+    // A forged resume position at the live revision is rejected.
+    let forged_index = BatchCursor {
+        next_index: cursor.next_index + 1,
+        ..cursor.clone()
+    };
+    assert!(
+        matches!(
+            client.try_continue_batch_escrow(&forged_index, &5),
+            Err(Ok(Error::BatchCursorMismatch))
+        ),
+        "forged resume position must be rejected"
+    );
+
+    // None of the rejected attempts advanced state: the genuine cursor still
+    // drives the job to completion from the original checkpoint.
+    let progress = client.continue_batch_escrow(&cursor, &5);
+    assert_eq!(progress.next_index, 3);
+    assert_eq!(progress.revision, 1);
+    assert_eq!(progress.status, BatchJobStatus::Completed);
+}
+
+/// #1076 AC1 + AC3: a chunk that fails partway rolls back *every* financial
+/// transition it had already applied, and leaves the checkpoint untouched so
+/// recovery resumes from the exact recorded position.
+///
+/// The failure is forced with a genuinely under-funded owner: the first escrow
+/// in the chunk funds successfully (moving tokens into the contract), then the
+/// second escrow's transfer runs the owner out of balance and panics. Soroban's
+/// invocation-level atomicity — documented at the transfer site itself ("a
+/// failed token call rolls back the complete Soroban invocation") — must unwind
+/// the whole chunk as one unit: the already-created escrow, its moved funds, and
+/// any checkpoint advance.
+#[test]
+fn test_failed_chunk_rolls_back_all_financial_transitions() {
+    let (env, client, _buyer, seller, token, _, _, _) = setup_test();
+
+    // A fresh owner funded for exactly one escrow (1_000), not two.
+    let poor_owner = Address::generate(&env);
+    let token_asset = token::StellarAssetClient::new(&env, &token);
+    token_asset.mint(&poor_owner, &1_500);
+
+    let mut params = soroban_sdk::Vec::new(&env);
+    for i in 0..2u32 {
+        params.push_back(EscrowCreateParams {
+            buyer: poor_owner.clone(),
+            seller: seller.clone(),
+            token: token.clone(),
+            amount: 1_000,
+            order_id: 6_000 + i,
+            release_window: Some(3_600),
+            ipfs_hash: None,
+            metadata_hash: None,
+            service_agreement_hash: None,
+        });
+    }
+
+    // Scheduling moves no funds, so it succeeds despite the thin balance.
+    let job_id = client.schedule_batch_escrow(&poor_owner, &params);
+    let cursor = client.get_batch_cursor(&job_id).unwrap();
+
+    let token_client = token::Client::new(&env, &token);
+    assert_eq!(token_client.balance(&poor_owner), 1_500);
+
+    // The single chunk covers both escrows: order 6_000 funds, then order 6_001
+    // cannot, so the whole invocation aborts.
+    let result = client.try_continue_batch_escrow(&cursor, &5);
+    assert!(result.is_err(), "under-funded chunk must fail as a unit");
+
+    // AC1: every financial transition in the failed chunk is rolled back. The
+    // owner's balance is fully restored — the first escrow's funds are not left
+    // locked in the contract.
+    assert_eq!(
+        token_client.balance(&poor_owner),
+        1_500,
+        "partial funding must be reverted on chunk failure"
+    );
+    // Neither escrow persisted, including the one that funded before the abort.
+    assert!(client.try_get_escrow(&6_000).is_err());
+    assert!(client.try_get_escrow(&6_001).is_err());
+
+    // AC3: the checkpoint never advanced, so recovery resumes from the start.
+    let cursor_after = client.get_batch_cursor(&job_id).unwrap();
+    assert_eq!(cursor_after.revision, 0);
+    assert_eq!(cursor_after.next_index, 0);
+    assert_eq!(
+        client.get_batch_escrow_progress(&job_id).unwrap().status,
+        BatchJobStatus::Pending
+    );
 }
 
 #[test]
@@ -931,9 +1104,7 @@ fn test_legacy_artisan_stake_migration_converts_old_format() {
 
     env.as_contract(&client.address, || {
         env.storage().persistent().set(&stake_key, &7_500_000i128);
-        env.storage()
-            .persistent()
-            .set(&token_key, &token);
+        env.storage().persistent().set(&token_key, &token);
     });
 
     // Verify legacy storage exists

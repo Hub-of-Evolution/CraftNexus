@@ -1,8 +1,8 @@
-#`![config(test)]
+#![cfg(test)]
 
 use super::*;
-use soroban_sdk {
-    testutils {Address as _, Events, Ledger},
+use soroban_sdk::{
+    testutils::{Address as _, Events, Ledger},
     token, vec as svec, Address, Env,
 };
 
@@ -76,11 +76,11 @@ fn test_evaluate_stake_health_healthy_no_obligations() {
 
     let snapshot = client.evaluate_stake_health(&seller);
 
-    assert_eq(snapshot.status, LiquidationStatus::Healthy);
-    assert_eq(snapshot.current_stake, 20_000_000);
-    assert_eq(snapshot.active_obligations, 0);
-    assert_eq(snapshot.deficit, 0);
-    assert(snapshot.health_ratio_bps >= 10_000);
+    assert_eq!(snapshot.status, LiquidationStatus::Healthy);
+    assert_eq!(snapshot.current_stake, 20_000_000);
+    assert_eq!(snapshot.active_obligations, 0);
+    assert_eq!(snapshot.deficit, 0);
+    assert!(snapshot.health_ratio_bps >= 10_000);
 }
 
 #[test]
@@ -94,20 +94,20 @@ fn test_evaluate_stake_health_undercollateralized() {
 
     // Stake 5M (below 10M minimum)
     client.set_min_stake_required(&10_000_000);
-    client.stake_tokens(&seller, &token_id, $5_000_000);
+    client.stake_tokens(&seller, &token_id, &5_000_000);
 
     // Create an active obligation
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
 
     let snapshot = client.evaluate_stake_health(&seller);
 
-    assert_eq(snapshot.status, LiquidationStatus::UnderCollateralized);
-    assert_eq(snapshot.current_stake, 5_000_000);
-    assert_eq(snapshot.active_obligations, 1);
-    assert_eq(snapshot.required_collateral, 10_000_000);
-    assert_eq(snapshot.deficit, 5_000_000);
+    assert_eq!(snapshot.status, LiquidationStatus::UnderCollateralized);
+    assert_eq!(snapshot.current_stake, 5_000_000);
+    assert_eq!(snapshot.active_obligations, 1);
+    assert_eq!(snapshot.required_collateral, 10_000_000);
+    assert_eq!(snapshot.deficit, 5_000_000);
     // health_ratio = 5M / 10M = 50% = 5000 bps
-    assert_eq(snapshot.health_ratio_bps, 5000);
+    assert_eq!(snapshot.health_ratio_bps, 5000);
 }
 
 #[test]
@@ -125,8 +125,8 @@ fn test_evaluate_stake_health_returns_persisted_snapshot() {
     let persisted = client.get_stake_health_snapshot(&seller);
     assert!(persisted.is_some());
     let snap = persisted.unwrap();
-    assert_eq(snap.status, LiquidationStatus::Healthy);
-    assert_eq(snap.current_stake, 20_000_000);
+    assert_eq!(snap.status, LiquidationStatus::Healthy);
+    assert_eq!(snap.current_stake, 20_000_000);
 }
 
 #[test]
@@ -137,15 +137,15 @@ fn test_evaluate_stake_health_deterministic() {
 
     token_admin.mint(&seller, &50_000_000);
     client.set_min_stake_required(&10_000_000);
-    client.stake_tokens(&seller, &token_id, $5_000_000);
+    client.stake_tokens(&seller, &token_id, &5_000_000);
 
     // Two evaluations at the same timestamp should return identical results.
     let snap1 = client.evaluate_stake_health(&seller);
     let snap2 = client.evaluate_stake_health(&seller);
 
-    assert_eq(snap1.status, snap2.status);
-    assert_eq(snap1.deficit, snap2.deficit);
-    assert_eq(snap1.health_ratio_bps, snap2.health_ratio_bps);
+    assert_eq!(snap1.status, snap2.status);
+    assert_eq!(snap1.deficit, snap2.deficit);
+    assert_eq!(snap1.health_ratio_bps, snap2.health_ratio_bps);
 }
 
 // ===== Liquidation Policy Tests =====
@@ -158,16 +158,16 @@ fn test_set_and_get_liquidation_policy() {
 
     // Default policy
     let policy = client.get_liquidation_policy();
-    assert(policy.enabled);
-    assert_eq(policy.max_seizure_bps, 5000);
-    assert_eq(policy.grace_period_secs, 2 * 24 * 60 * 60);
+    assert!(policy.enabled);
+    assert_eq!(policy.max_seizure_bps, 5000);
+    assert_eq!(policy.grace_period_secs, 2 * 24 * 60 * 60);
 
     // Update
     client.set_liquidation_policy(&7500, &86400, &false);
     let updated = client.get_liquidation_policy();
-    assert_eq(updated.max_seizure_bps, 7500);
-    assert_eq(updated.grace_period_secs, 86400);
-    assert(!updated.enabled);
+    assert_eq!(updated.max_seizure_bps, 7500);
+    assert_eq!(updated.grace_period_secs, 86400);
+    assert!(!updated.enabled);
 }
 
 // ===== Flag Liquidation Eligible Tests =====
@@ -187,7 +187,7 @@ fn test_flag_liquidation_eligible_requires_admin() {
 
     // Evaluate health to establish under-collateralized state
     let snap = client.evaluate_stake_health(&seller);
-    assert_eq(snap.status, LiquidationStatus::UnderCollateralized);
+    assert_eq!(snap.status, LiquidationStatus::UnderCollateralized);
 
     // Advance past grace period (2 days)
     env.ledger().with_mut(|li| {
@@ -196,13 +196,13 @@ fn test_flag_liquidation_eligible_requires_admin() {
 
     // Re-evaluate at the advanced timestamp so snapshot is current
     let snap2 = client.evaluate_stake_health(&seller);
-    assert_eq(snap2.status, LiquidationStatus::UnderCollateralized);
+    assert_eq!(snap2.status, LiquidationStatus::UnderCollateralized);
 
     // Flag as liquidation-eligible (admin auth is mocked)
     client.flag_liquidation_eligible(&seller);
 
     let status = client.get_liquidation_status(&seller);
-    assert_eq(status, LiquidationStatus::LiquidationEligible);
+    assert_eq!(status, LiquidationStatus::LiquidationEligible);
 }
 
 #[test]
@@ -276,7 +276,7 @@ fn test_flag_liquidation_eligible_enforces_grace_period() {
     client.flag_liquidation_eligible(&seller);
 
     let status = client.get_liquidation_status(&seller);
-    assert_eq(status, LiquidationStatus::LiquidationEligible);
+    assert_eq!(status, LiquidationStatus::LiquidationEligible);
 }
 
 // ===== Trigger Liquidation Tests =====
@@ -306,15 +306,15 @@ fn test_trigger_liquidation_capped_at_deficit() {
     let record = client.trigger_liquidation(&seller);
 
     // Deficit = 10M - 6M = 4M. Max seizure = 4M * 50% = 2M.
-    assert_eq(record.seized_amount, 2_000_000);
+    assert_eq!(record.seized_amount, 2_000_000);
 
     // Verify artisan's stake was reduced
     let remaining_stake = client.get_stake(&seller);
-    assert_eq(remaining_stake, 4_000_000);
+    assert_eq!(remaining_stake, 4_000_000);
 
     // Status should be Liquidated
     let status = client.get_liquidation_status(&seller);
-    assert_eq(status, LiquidationStatus::Liquidated);
+    assert_eq!(status, LiquidationStatus::Liquidated);
 }
 
 #[test]
@@ -377,8 +377,8 @@ fn test_trigger_liquidation_records_are_auditable() {
     let record = client.trigger_liquidation(&seller);
 
     // Record should be auditable with a recorded timestamp and amount.
-    assert(record.seized_amount > 0);
-    assert(record.timestamp > 0);
+    assert!(record.seized_amount > 0);
+    assert!(record.timestamp > 0);
 }
 
 // ===== Missing-Key Safety Tests =====
@@ -392,7 +392,7 @@ fn test_get_liquidation_status_missing_key_returns_default() {
     // No liquidation record exists for this artisan yet.
     // The getter must not trap and must return the default Healthy variant.
     let status = client.get_liquidation_status(&seller);
-    assert_eq(status, LiquidationStatus::Healthy);
+    assert_eq!(status, LiquidationStatus::Healthy);
 }
 
 #[test]
@@ -417,5 +417,5 @@ fn test_get_liquidation_status_after_terminal_state() {
 
     // Status must be readable and report the terminal Liquidated variant.
     let status = client.get_liquidation_status(&seller);
-    assert_eq(status, LiquidationStatus::Liquidated);
+    assert_eq!(status, LiquidationStatus::Liquidated);
 }

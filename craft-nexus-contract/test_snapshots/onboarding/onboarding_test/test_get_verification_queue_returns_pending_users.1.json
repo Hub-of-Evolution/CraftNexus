@@ -1232,10 +1232,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "VerificationLastAttempt"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  "symbol": "VerificationQueueCount"
                 }
               ]
             },
@@ -1252,16 +1249,13 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "VerificationLastAttempt"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                      "symbol": "VerificationQueueCount"
                     }
                   ]
                 },
                 "durability": "persistent",
                 "val": {
-                  "u64": 0
+                  "u32": 1
                 }
               }
             },

@@ -1,6 +1,8 @@
 {
   "struct": "UpgradeProposalEvent",
+  "schema_version": 1,
   "fields": [
+    {"name": "schema_version", "type": "u32"},
     {"name": "action", "type": "Symbol"},
     {"name": "wasm_hash", "type": "BytesN<32>"},
     {"name": "admin", "type": "Address"},

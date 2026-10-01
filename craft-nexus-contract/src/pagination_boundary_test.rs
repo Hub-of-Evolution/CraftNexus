@@ -216,6 +216,26 @@ fn test_iterative_pagination_out_of_range_returns_empty() {
 }
 
 #[test]
+fn test_iterative_pagination_missing_storage_returns_empty() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    let result = client.try_get_all_escrow_ids_iterative(&0, &10);
+    assert!(matches!(result, Ok(Ok(ids)) if ids.is_empty()));
+}
+
+#[test]
+fn test_iterative_pagination_overflowing_page_offset_returns_empty() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    let result = client.try_get_all_escrow_ids_iterative(&u32::MAX, &20);
+    assert!(matches!(result, Ok(Ok(ids)) if ids.is_empty()));
+}
+
+#[test]
 fn test_iterative_pagination_deterministic_across_repeated_calls() {
     let env = Env::default();
     let (client, _, buyer, seller, _, _, token_id) = setup_pagination_test(&env);
@@ -342,7 +362,16 @@ fn test_continue_batch_zero_work_limit_returns_limit_zero_error() {
     let env = Env::default();
     let (client, _, buyer, _, _, _, _) = setup_pagination_test(&env);
 
-    let result = client.try_continue_batch_escrow(&0, &buyer, &0);
+    // The work-limit bound is validated before the job is loaded, so a
+    // placeholder cursor exercises the zero-limit guard deterministically.
+    let cursor = BatchCursor {
+        job_id: 0,
+        owner: buyer.clone(),
+        op_type: BatchOpType::EscrowCreation,
+        revision: 0,
+        next_index: 0,
+    };
+    let result = client.try_continue_batch_escrow(&cursor, &0);
     assert!(
         matches!(result, Err(Ok(Error::PaginationLimitZero))),
         "expected PaginationLimitZero"
@@ -354,7 +383,14 @@ fn test_continue_batch_oversized_work_limit_returns_batch_work_error() {
     let env = Env::default();
     let (client, _, buyer, _, _, _, _) = setup_pagination_test(&env);
 
-    let result = client.try_continue_batch_escrow(&0, &buyer, &10);
+    let cursor = BatchCursor {
+        job_id: 0,
+        owner: buyer.clone(),
+        op_type: BatchOpType::EscrowCreation,
+        revision: 0,
+        next_index: 0,
+    };
+    let result = client.try_continue_batch_escrow(&cursor, &10);
     assert!(
         matches!(result, Err(Ok(Error::InvalidBatchWorkLimit))),
         "expected InvalidBatchWorkLimit"
