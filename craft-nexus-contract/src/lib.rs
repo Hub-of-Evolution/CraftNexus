@@ -14,7 +14,31 @@ trait Error {
     fn message(&Self) -> String;
 }
 
-pub struct NotInitialized;
+#[cfg(test)]
+mod admin_idempotency_test;
+#[cfg(test)]
+mod arbitration_escalation_test;
+#[cfg(test)]
+mod dispute_escalation_timeout_test;
+#[cfg(test)]
+mod enhanced_features_test;
+#[cfg(test)]
+mod event_snapshot_test;
+#[cfg(test)]
+mod expired_dispute_fee_test;
+#[cfg(test)]
+mod liquidation_test;
+#[cfg(test)]
+mod min_release_window_test;
+#[cfg(test)]
+mod pagination_boundary_test;
+#[cfg(test)]
+mod diagnostic_scan_test;
+#[cfg(test)]
+mod test_archival_compaction_cursor_missing_storage;
+#[cfg(test)]
+mod differential_upgrade_compatibility_test {
+    use super::*;
 
 impl Error for NotInitialized {
     fn code(&Self) -> u32 {
@@ -3687,13 +3711,80 @@ impl CraftNexusContract {
         }
     }
 
-    fn apply_reconciliation_repair(env: &Env, plan_id: u64) -> Result<(), Error> {
+fn apply_reconciliation_repair(env: &Env, plan_id: u64) -> Result<(), Error> {
         let key = DataKey::ReconciliationRepairPlan(plan_id);
         let mut plan: ReconciliationRepairPlan = env
             .storage()
             .persistent()
             .get(&key)
             .ok_or(Error::RepairPlanNotFound)?;
+
+        // Applying a plan twice is harmless (returns Ok(()))
+        if plan.applied
+            || plan.consumed
+            || env
+                .storage()
+                .persistent()
+                .has(&DataKey::ConsumedRepairPlan(plan_id))
+        {
+            return Ok(());
+        }
+
+        if plan.cancelled {
+            return Err(Error::RepairPlanTerminal);
+        }
+
+        let report: ReconciliationReport = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ReconciliationReport(plan.token.clone()))
+            .ok_or(Error::ReconciliationRequired)?;
+
+        let current_digest = Self::compute_reconciliation_digest(
+            env,
+            &plan.token,
+            report.expected_locked,
+            report.expected_staked,
+            report.balance,
+            report.tracked_locked,
+            report.tracked_staked,
+        );
+
+        // Repairs are blocked when the expected state digest changes
+        if current_digest != plan.discrepancy_digest {
+            return Err(Error::RepairPlanPreconditionFailed);
+        }
+
+        let allocation = Self::fund_allocation(env, &plan.token);
+        if allocation.balance != plan.observed_balance
+            || allocation.total_locked != plan.observed_tracked_locked
+            || allocation.total_staked != plan.observed_tracked_staked
+            || allocation.balance < plan.expected_locked + plan.expected_staked
+        {
+            return Err(Error::RepairPlanPreconditionFailed);
+        }
+
+        env.storage().persistent().set(
+            &DataKey::TotalLocked(plan.token.clone()),
+            &plan.expected_locked,
+        );
+        env.storage().persistent().set(
+            &DataKey::TotalStaked(plan.token.clone()),
+            &plan.expected_staked,
+        );
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ReconciliationReport(plan.token.clone()));
+        plan.applied = true;
+        plan.consumed = true;
+        env.storage().persistent().set(&key, &plan);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ConsumedRepairPlan(plan_id), &true);
+        Self::extend_persistent(env, &key);
+        Self::extend_persistent(env, &DataKey::ConsumedRepairPlan(plan_id));
+        Ok(())
+    }
 
         // Applying a plan twice is harmless (returns Ok(()))
         if plan.applied
