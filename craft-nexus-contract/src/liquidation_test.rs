@@ -84,6 +84,33 @@ fn test_evaluate_stake_health_healthy_no_obligations() {
 }
 
 #[test]
+fn test_is_account_under_collateralized_handles_missing_records() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin) = setup_test(&env, true);
+    client.set_min_stake_required(&10_000_000);
+
+    // Neither a stake record nor an active-obligation counter exists yet.
+    assert!(!client.is_account_under_collateralized(&seller));
+
+    token_admin.mint(&buyer, &20_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    // The missing stake record counts as zero collateral while the obligation is active.
+    assert!(client.is_account_under_collateralized(&seller));
+
+    client
+        .release_funds_idempotent(&1, &None::<BytesN<32>>)
+        .unwrap();
+    assert_eq!(client.get_escrow(&1).status, EscrowStatus::Released);
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ActiveObligations(seller.clone()));
+    });
+    assert!(!client.is_account_under_collateralized(&seller));
+}
+
+#[test]
 fn test_evaluate_stake_health_undercollateralized() {
     let env = Env::default();
     env.mock_all_auths();
