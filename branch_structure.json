@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "fix/1320-arbitrator-assign-revision-missing-key",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "fix/1320-arbitrator-assign-revision-missing-key": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "fix/1320-arbitrator-assign-revision-missing-key",
+    "origin"
+  ]
+}
