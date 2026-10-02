@@ -9110,29 +9110,50 @@ impl CraftNexusContract {
 
     /// Returns the total number of escrows ever created on this platform.
     ///
-    /// This is an O(1) read â€” safe to call at any scale. Pair with
+    /// This is an O(1) read — safe to call at any scale. Pair with
     /// `get_all_escrow_ids_iterative` to paginate the full ID set without
     /// hitting Soroban CPU/memory resource limits.
-    pub fn get_escrow_count(env: Env) -> u32 {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PlatformNotInitialized`] when the `EscrowCount`
+    /// storage key is absent (fresh deployment, archival, or partial
+    /// migration) instead of trapping. Uses `extend_persistent_read` on the
+    /// hot persistent key (#1369).
+    pub fn get_escrow_count(env: Env) -> Result<u32, Error> {
         Self::migrate_legacy_all_escrow_ids(&env);
-        Self::get_persistent_u32(&env, &DataKey::EscrowCount)
+        let key = DataKey::EscrowCount;
+        Self::extend_persistent_read(&env, &key);
+        Self::read_persistent(&env, &key).ok_or(Error::PlatformNotInitialized)
     }
 
     /// Return dashboard-level platform stats in one read-only contract call.
-    pub fn get_platform_stats(env: Env) -> PlatformStats {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PlatformNotInitialized`] when platform-level storage
+    /// keys are missing (fresh deployment, archival, or partial migration)
+    /// instead of trapping. Hot persistent keys use `extend_persistent_read`
+    /// (#1370).
+    pub fn get_platform_stats(env: Env) -> Result<PlatformStats, Error> {
         Self::migrate_legacy_all_escrow_ids(&env);
         Self::migrate_legacy_whitelisted_tokens(&env);
+
+        let escrow_count_key = DataKey::EscrowCount;
+        Self::extend_persistent_read(&env, &escrow_count_key);
+        let total_escrows =
+            Self::read_persistent(&env, &escrow_count_key).ok_or(Error::PlatformNotInitialized)?;
 
         let active_users = Self::get_onboarding_client(&env)
             .map(|(_, onboarding)| onboarding.get_active_user_count())
             .unwrap_or(0);
 
-        PlatformStats {
+        Ok(PlatformStats {
             total_volume: Self::get_total_volume(&env),
-            total_escrows: Self::get_persistent_u32(&env, &DataKey::EscrowCount),
+            total_escrows,
             active_users,
             whitelist_count: Self::get_whitelist_count(&env),
-        }
+        })
     }
 
     /// Returns a page of all escrow order IDs created on the platform, in creation order.
