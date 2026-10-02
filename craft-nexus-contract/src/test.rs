@@ -4764,7 +4764,68 @@ fn test_get_escrow_count_empty() {
     env.mock_all_auths();
     let (client, _, _, _, _, _, _) = setup_test(&env, true);
 
-    assert_eq!(client.get_escrow_count(), 0);
+    // Fresh platform: EscrowCount is absent. The getter must return the
+    // typed PlatformNotInitialized error instead of trapping (#1369).
+    let result = client.try_get_escrow_count();
+    assert_eq!(
+        result.unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            Error::PlatformNotInitialized as u32
+        ))
+    );
+}
+
+#[test]
+fn test_get_escrow_count_missing_key_returns_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    // Explicitly ensure the key is absent (archival / partial migration path).
+    env.as_contract(&client.address, || {
+        env.storage().persistent().remove(&DataKey::EscrowCount);
+    });
+
+    let result = client.try_get_escrow_count();
+    assert_eq!(
+        result.unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            Error::PlatformNotInitialized as u32
+        ))
+    );
+}
+
+#[test]
+fn test_get_platform_stats_missing_key_returns_typed_error() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, _, _, _, _) = setup_test(&env, true);
+
+    env.as_contract(&client.address, || {
+        env.storage().persistent().remove(&DataKey::EscrowCount);
+    });
+
+    let result = client.try_get_platform_stats();
+    assert_eq!(
+        result.unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            Error::PlatformNotInitialized as u32
+        ))
+    );
+}
+
+#[test]
+fn test_get_platform_stats_returns_stats_when_keys_exist() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+    token_admin.mint(&buyer, &1_000_000);
+
+    client.create_escrow(&buyer, &seller, &token_id, &500, &1, &Some(3600));
+
+    let stats = client.get_platform_stats().unwrap();
+    assert_eq!(stats.total_escrows, 1);
+    assert_eq!(stats.whitelist_count, 0);
 }
 
 #[test]
@@ -4774,16 +4835,22 @@ fn test_get_escrow_count_increments() {
     let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
     token_admin.mint(&buyer, &1_000_000);
 
-    assert_eq!(client.get_escrow_count(), 0);
+    // No escrows yet and no EscrowCount key => typed error, not a trap.
+    assert_eq!(
+        client.try_get_escrow_count().unwrap_err(),
+        Ok(soroban_sdk::Error::from_contract_error(
+            Error::PlatformNotInitialized as u32
+        ))
+    );
 
     client.create_escrow(&buyer, &seller, &token_id, &500, &1, &Some(3600));
-    assert_eq!(client.get_escrow_count(), 1);
+    assert_eq!(client.get_escrow_count(), Ok(1));
 
     client.create_escrow(&buyer, &seller, &token_id, &500, &2, &Some(3600));
-    assert_eq!(client.get_escrow_count(), 2);
+    assert_eq!(client.get_escrow_count(), Ok(2));
 
     client.create_escrow(&buyer, &seller, &token_id, &500, &3, &Some(3600));
-    assert_eq!(client.get_escrow_count(), 3);
+    assert_eq!(client.get_escrow_count(), Ok(3));
 }
 
 #[test]
@@ -4797,7 +4864,7 @@ fn test_get_escrow_count_tracks_100_global_indices() {
         client.create_escrow(&buyer, &seller, &token_id, &100, &order_id, &Some(3600));
     }
 
-    assert_eq!(client.get_escrow_count(), 100);
+    assert_eq!(client.get_escrow_count(), Ok(100));
 
     let count_key = DataKey::EscrowCount;
     let stored_count: u32 = env.as_contract(&client.address, || {
@@ -4931,7 +4998,7 @@ fn test_get_escrow_count_batch_creation() {
 
     client.create_batch_escrow(&1u64, &batch);
 
-    assert_eq!(client.get_escrow_count(), 3);
+    assert_eq!(client.get_escrow_count(), Ok(3));
 
     let ids = client.get_all_escrow_ids_iterative(&0, &10);
     assert_eq!(ids.len(), 3);
@@ -4955,7 +5022,7 @@ fn test_legacy_all_escrow_ids_migrates_on_get_escrow_count() {
         env.storage().persistent().set(&count_key, &1u32);
     });
 
-    assert_eq!(client.get_escrow_count(), 4);
+    assert_eq!(client.get_escrow_count(), Ok(4));
 
     let stored_count: u32 = env.as_contract(&client.address, || {
         env.storage().persistent().get(&count_key).unwrap()
@@ -5031,7 +5098,7 @@ fn test_legacy_all_escrow_ids_migration_is_idempotent_after_first_read() {
     let first_page = client.get_all_escrow_ids_iterative(&0, &10);
     let second_page = client.get_all_escrow_ids_iterative(&0, &10);
     assert_eq!(first_page, second_page);
-    assert_eq!(client.get_escrow_count(), 3);
+    assert_eq!(client.get_escrow_count(), Ok(3));
 
     let has_legacy = env.as_contract(&client.address, || {
         env.storage().persistent().has(&legacy_key)
