@@ -20859,6 +20859,5778 @@ impl CraftNexusContract {
         config.platform_fee_bps
     }
 
+const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
+
+const TTL_THRESHOLD: u32 = 10_000;
+const READ_TTL_THRESHOLD: u32 = 1_000;
+const TTL_EXTENSION: u32 = 518_400;
+
+const DEFAULT_WASM_UPGRADE_COOLDOWN: u32 = time_policy::WASM_UPGRADE_COOLDOWN as u32;
+const CANCEL_REPROPOSE_COOLDOWN: u64 = time_policy::CANCEL_REPROPOSE_COOLDOWN;
+const DEFAULT_MAX_DISPUTE_DURATION: u32 = time_policy::MAX_DISPUTE_DURATION as u32;
+const DEFAULT_STAKE_COOLDOWN: u32 = time_policy::STAKE_COOLDOWN as u32;
+const DEFAULT_MIN_RELEASE_WINDOW: u32 = time_policy::MIN_RELEASE_WINDOW as u32;
+const ABSOLUTE_MAX_RELEASE_WINDOW: u32 = time_policy::ABSOLUTE_MAX_RELEASE_WINDOW as u32;
+const DEFAULT_EVIDENCE_EXPIRY_WINDOW: u64 = time_policy::EVIDENCE_EXPIRY_WINDOW;
+const DEFAULT_EVIDENCE_CHALLENGE_WINDOW: u32 = time_policy::EVIDENCE_CHALLENGE_WINDOW as u32;
+const DEFAULT_DISPUTE_ESCALATION_WINDOW: u32 = time_policy::DISPUTE_ESCALATION_WINDOW as u32;
+const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 5;
+const DEFAULT_RATE_LIMIT_WINDOW: u32 = time_policy::RATE_LIMIT_WINDOW as u32;
+
+const MAX_PLATFORM_FEE_BPS: u32 = 1000;
+const MAX_TOTAL_RELEASE_WINDOW: u32 = time_policy::MAX_TOTAL_RELEASE_WINDOW as u32;
+const CURRENT_ESCROW_VERSION: u32 = 4;
+const CURRENT_STORAGE_LAYOUT_VERSION: u32 = 1;
+const MAX_BATCH_SIZE: u32 = 20;
+const MAX_SCHEDULED_BATCH_WORK: u32 = 5;
+const MAX_PAGE_SIZE: u32 = 100;
+const UNFUNDED_CANCEL_TIMEOUT: u64 = time_policy::UNFUNDED_CANCEL_TIMEOUT;
+const MAX_RECURRING_ESCROW_ID: u64 = u64::MAX - 1;
+const FEE_POLICY_VERSION: u32 = 1;
+const MAX_UPGRADE_HISTORY: u32 = 32;
+
+const UPGRADE_PROPOSED: Symbol = symbol_short!("UPG_PROP");
+const UPGRADE_CANCELLED: Symbol = symbol_short!("UPG_CANC");
+const UPGRADE_EXECUTED: Symbol = symbol_short!("UPG_EXEC");
+
+const MAX_STAKE_HISTORY_SIZE: u32 = 100;
+const STAKE_HISTORY_PRUNE_THRESHOLD: u32 = 80;
+const MAX_STAKE_QUEUE_SIZE: u32 = 50;
+const STAKE_QUEUE_PRUNE_THRESHOLD: u32 = 40;
+const ADMIN_RECOVERY_DELAY: u64 = time_policy::ADMIN_RECOVERY_DELAY;
+const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = time_policy::MIN_ADMIN_RECOVERY_COOLDOWN;
+const DEFAULT_ADMIN_ACTION_TIMELOCK_DELAY: u64 = time_policy::ADMIN_ACTION_TIMELOCK_DELAY;
+
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum AdminActionKind {
+    PausePlatform(bool),
+    SetPlatformFee(u32),
+    SetPlatformWallet(Address),
+    SetWasmUpgradeCooldown(u32),
+    SetMinStakeRequired(i128),
+    SweepUnallocatedFunds(Address, Address),
+    ExecuteUpgrade(BytesN<32>),
+    SetMaxDisputeDuration(u32),
+    SetStakeCooldown(u32),
+    SetArtisanFeeTier(Address, u32),
+    SetModerator(Address),
+    SetMinEscrowAmount(Address, i128),
+    SetMaxReleaseWindow(u32),
+    SetMinReleaseWindow(u32),
+    SetOnboardingContract(Address),
+    SetExpiredDisputePolicy(ExpiredDisputeFeePolicy),
+    ApplyReconciliationRepair(u64),
+}
+
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct AdminActionProposal {
+    pub id: u64,
+    pub kind: AdminActionKind,
+    pub proposer: Address,
+    pub approvals: Vec<Address>,
+    pub threshold: u32,
+    pub signers: Vec<Address>,
+    pub created_at: u64,
+    pub ready_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+}
+
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum AdminActionDataKey {
+    NextAdminActionId,
+    AdminAction(u64),
+    AdminActionSigners,
+    AdminActionThreshold,
+    AdminActionTimelockDelay,
+}
+
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum DataKey {
+    Escrow(u32),
+    BuyerEscrows(Address),
+    SellerEscrows(Address),
+    MinEscrowAmount(Address),
+    TotalFees(Address),
+    FeeTokenIndex,
+    FeeTokenConfig(Address),
+    ContractVersion,
+    PlatformConfig,
+    StorageLayoutVersion,
+    ArtisanFeeTier(Address),
+    ArtisanStake(Address),
+    ArtisanStakeToken(Address),
+    StakeCooldownEnd(Address),
+    ArtisanStakeQueue(Address),
+    ArtisanStakeQueueCount(Address),
+    ArtisanStakeQueueIndexed(Address, u32),
+    PartialRefundProposal(u32),
+    SettlementReceipt(u32),
+    ArbitratorBlacklist(Address),
+    ActiveDisputeCount,
+    TotalVolume,
+    ReentryGuard,
+    PendingAdmin,
+    WasmUpgradeProposal,
+    MaxReleaseWindow,
+    OnboardingContractAddress,
+    WhitelistedTokens,
+    WhitelistedTokenIndexed(Address),
+    WhitelistedTokenCount,
+    AllEscrowIds,
+    EscrowCount,
+    GlobalEscrowIdIndexed(u32),
+    FallbackAdmin,
+    AdminRecoveryTime,
+    AdminRecoveryDelay,
+    StakeHistory(Address),
+    StakeHistoryCount(Address),
+    StakeLastModified(Address),
+    FundAuditCount(Address),
+    FundAuditIndexed(Address, u32),
+    BuyerEscrowIndexed(Address, u32),
+    SellerEscrowIndexed(Address, u32),
+    BuyerEscrowCount(Address),
+    SellerEscrowCount(Address),
+    TotalLocked(Address),
+    TotalStaked(Address),
+    StakedArtisanIndexed(u32),
+    StakedArtisanCount,
+    ReconciliationReport(Address),
+    ReconciliationProgress(Address),
+    ReconciliationRepairPlan(u64),
+    NextReconciliationRepairPlanId,
+    UpgradeHistory,
+    UpgradeCompatibilityHistory,
+    RecurringEscrow(u64),
+    NextRecurringEscrowId,
+    RecurringEscrowCount,
+    BatchEscrowJob(u64),
+    ActiveObligations(Address),
+    UpgradeThreshold,
+    UpgradeApprovalState(u32),
+    UpgradeSigners,
+    LastUpgradeCancelledAt,
+    UpgradeCompatibilityManifest(BytesN<32>),
+    EvidenceLog(u32),
+    UsedEvidenceHash(BytesN<32>),
+    DisputeEscalation(u32),
+    DisputeEscalationWindow,
+    RateLimitCount(Address, u64),
+    RateLimitConfig,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArtisanStakeData {
+    pub amount: i128,
+    pub token: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct StakeDeposit {
+    pub amount: i128,
+    pub cooldown_end: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum RecurringEscrowAction {
+    Created = 0,
+    CycleReleased = 1,
+    Cancelled = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RecurringEscrow {
+    pub id: u64,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub token: Address,
+    pub total_amount: i128,
+    pub released_amount: i128,
+    pub frequency: u64,
+    pub duration: u32,
+    pub current_cycle: u64,
+    pub last_release_time: u64,
+    pub is_active: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RecurringEscrowEvent {
+    pub id: u64,
+    pub action: RecurringEscrowAction,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformStats {
+    pub total_volume: i128,
+    pub total_escrows: u32,
+    pub active_users: u32,
+    pub whitelist_count: u32,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum EscrowStatus {
+    Active = 0,
+    Released = 1,
+    Refunded = 2,
+    Disputed = 3,
+    Resolved = 4,
+    ReleasePending = 5,
+    RefundPending = 6,
+    DisputePending = 7,
+    SettlementPending = 8,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EscrowStateIssue {
+    None = 0,
+    EscrowNotFound = 1,
+    PendingTransitionUnfinished = 2,
+    MissingDisputeTimestamp = 3,
+    InvalidTerminalState = 4,
+    SettlementReceiptConflict = 5,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowStateDiagnostic {
+    pub order_id: u32,
+    pub status: EscrowStatus,
+    pub is_consistent: bool,
+    pub issue: EscrowStateIssue,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum Resolution {
+    ReleaseToSeller = 0,
+    RefundToBuyer = 1,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum SettlementKind {
+    ReleaseFunds,
+    FullRefundNoFee,
+    ExpiredDisputeDeductFromSeller,
+    ExpiredDisputeDeductFromBuyer,
+    ExpiredDisputeSplitFee,
+    PartialRefund(i128, i128),
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeAllocation {
+    pub platform_fee: i128,
+    pub seller_amount: i128,
+    pub buyer_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct Escrow {
+    pub version: u32,
+    pub id: u64,
+    pub batch_id: Option<u64>,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<Symbol>,
+    pub dispute_initiated_at: Option<u64>,
+    pub funded: bool,
+    pub funding_deadline: Option<u64>,
+    pub service_agreement_hash: Option<Bytes>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct LegacyEscrow {
+    pub id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<String>,
+    pub dispute_initiated_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct EscrowWithoutBatch {
+    pub version: u32,
+    pub id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<String>,
+    pub dispute_initiated_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct EscrowV4 {
+    pub version: u32,
+    pub id: u64,
+    pub batch_id: Option<u64>,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<Symbol>,
+    pub dispute_initiated_at: Option<u64>,
+    pub funded: bool,
+    pub funding_deadline: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EscrowAction {
+    Created = 0,
+    Released = 1,
+    Refunded = 2,
+    Disputed = 3,
+    Resolved = 4,
+    Extended = 5,
+    BatchCreated = 6,
+    BatchReleased = 7,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FundMovementAuditEntry {
+    pub actor: Address,
+    pub amount: i128,
+    pub reason: Symbol,
+    pub timestamp: u64,
+    pub balance_impact: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FundAllocation {
+    pub balance: i128,
+    pub total_locked: i128,
+    pub total_staked: i128,
+    pub unallocated: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReconciliationReport {
+    pub token: Address,
+    pub balance: i128,
+    pub expected_locked: i128,
+    pub expected_staked: i128,
+    pub tracked_locked: i128,
+    pub tracked_staked: i128,
+    pub scanned_escrows: u32,
+    pub next_cursor: u32,
+    pub complete: bool,
+    pub unresolved: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReconciliationRepairPlan {
+    pub id: u64,
+    pub token: Address,
+    pub expected_locked: i128,
+    pub expected_staked: i128,
+    pub observed_balance: i128,
+    pub observed_tracked_locked: i128,
+    pub observed_tracked_staked: i128,
+    pub created_at: u64,
+    pub applied: bool,
+    pub cancelled: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowEvent {
+    pub schema_version: u32,
+    pub escrow_id: u64,
+    pub action: EscrowAction,
+    pub buyer: Address,
+    pub seller: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowResolvedEvent {
+    pub schema_version: u32,
+    pub escrow_id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub arbitrator: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReputationUpdateEvent {
+    pub address: Address,
+    pub successful_delta: u32,
+    pub disputed_delta: u32,
+    pub metrics_sales_delta: u32,
+    pub metrics_amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum ConfigValue {
+    U32(u32),
+    I128(i128),
+    Address(Address),
+    String(String),
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ConfigUpdatedEvent {
+    pub field_name: Symbol,
+    pub old_value: ConfigValue,
+    pub new_value: ConfigValue,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArtisanFeeTierUpdatedEvent {
+    pub artisan: Address,
+    pub fee_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct TokensStakedEvent {
+    pub artisan: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct TokensUnstakedEvent {
+    pub artisan: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MetadataVerifiedEvent {
+    pub order_id: u64,
+    pub verifier: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformPausedEvent {
+    pub initiator: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformUnpausedEvent {
+    pub initiator: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowMetadata {
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub service_agreement_hash: Option<Bytes>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MetadataRevealProof {
+    pub content: Bytes,
+    pub secret: Option<Bytes>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Eq, PartialEq)]
+pub struct Metadata {
+    pub title: String,
+    pub description: String,
+    pub category: String,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct WasmUpgradeProposal {
+    pub wasm_hash: BytesN<32>,
+    pub upgrade_at: u64,
+    pub proposed_by: Address,
+    pub proposed_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeProposalEvent {
+    pub action: Symbol,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+    pub upgrade_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeRecord {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeCompatibilityRecord {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub state_commitment: BytesN<32>,
+    pub migration_checkpoint: BytesN<32>,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeCompatibilityManifest {
+    pub source_version: u32,
+    pub target_version: u32,
+    pub state_commitment: BytesN<32>,
+    pub interface_commitment: BytesN<32>,
+    pub authorization_commitment: BytesN<32>,
+    pub preconditions_commitment: BytesN<32>,
+    pub postconditions_commitment: BytesN<32>,
+    pub rollback_commitment: BytesN<32>,
+    pub migration_checkpoint: BytesN<32>,
+    pub migration_complete: bool,
+    pub manual_records: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeStateSnapshot {
+    pub contract_version: u32,
+    pub escrow_count: u32,
+    pub recurring_escrow_next_id: u64,
+    pub upgrade_threshold: u32,
+    pub paused: bool,
+    pub onboarding_configured: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeApprovalState {
+    pub nonce: u32,
+    pub signers: Vec<Address>,
+    pub threshold: u32,
+    pub approvals: Vec<Address>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeTokenInfo {
+    pub active: bool,
+    pub custom_fee_bps: Option<u32>,
+    pub accumulated: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeTokenConfigsMigratedEvent {
+    pub scanned_tokens: u32,
+    pub migrated_configs: u32,
+    pub skipped_existing: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct VersionInfo {
+    pub current_version: u32,
+    pub upgrade_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowCreateParams {
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub order_id: u32,
+    pub release_window: Option<u32>,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub service_agreement_hash: Option<Bytes>,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum BatchJobStatus {
+    Pending = 0,
+    Completed = 1,
+    Cancelled = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct BatchEscrowJob {
+    pub owner: Address,
+    pub params: Vec<EscrowCreateParams>,
+    pub next_index: u32,
+    pub status: BatchJobStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct BatchJobProgress {
+    pub id: u64,
+    pub owner: Address,
+    pub next_index: u32,
+    pub total: u32,
+    pub status: BatchJobStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum ExpiredDisputeFeePolicy {
+    RefundFullNoPlatformFee = 0,
+    RefundMinusPlatformFee = 1,
+    DeductFeeFromSeller = 2,
+    SplitFee = 3,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformConfig {
+    pub platform_fee_bps: u32,
+    pub platform_wallet: Address,
+    pub admin: Address,
+    pub arbitrator: Address,
+    pub moderator: Option<Address>,
+    pub is_paused: bool,
+    pub min_stake_required: i128,
+    pub pending_admin: Option<Address>,
+    pub wasm_upgrade_cooldown: u32,
+    pub max_dispute_duration: u32,
+    pub stake_cooldown: u32,
+    pub expired_dispute_fee_policy: ExpiredDisputeFeePolicy,
+    pub min_release_window: u32,
+    pub dispute_escalation_window: u32,
+    pub evidence_challenge_window: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct DisputeEvidence {
+    pub id: u64,
+    pub order_id: u32,
+    pub dispute_session_id: u64,
+    pub submitter: Address,
+    pub evidence_uri: String,
+    pub parent_evidence_id: Option<u64>,
+    pub submitted_at: u64,
+    pub expires_at: u64,
+    pub is_invalidated: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct DisputeEscalationRecord {
+    pub order_id: u32,
+    pub escalated_by: Address,
+    pub escalated_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RateLimitConfig {
+    pub max_calls: u32,
+    pub window: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PartialRefundProposal {
+    pub order_id: u32,
+    pub refund_amount: i128,
+    pub proposed_by: Address,
+    pub proposed_at: u64,
+    pub nonce: u64,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum SettlementPath {
+    PartialRefundAccepted = 0,
+    ArbitratedRelease = 1,
+    ArbitratedRefund = 2,
+    ArbitratedPartial = 3,
+    ExpiredDispute = 4,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct SettlementReceipt {
+    pub order_id: u32,
+    pub path: SettlementPath,
+    pub executed_at: u64,
+    pub proposal_nonce: u64,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum UserRole {
+    None = 0,
+    Buyer = 1,
+    Artisan = 2,
+    Admin = 3,
+    Moderator = 4,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum ProfileStatus {
+    Active = 0,
+    Deactivated = 1,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UserProfile {
+    pub version: u32,
+    pub address: Address,
+    pub role: UserRole,
+    pub username: String,
+    pub registered_at: u64,
+    pub is_verified: bool,
+    pub successful_trades: u32,
+    pub disputed_trades: u32,
+    pub portfolio_cid: Option<String>,
+    pub status: ProfileStatus,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct LegacyUserProfile {
+    pub address: Address,
+    pub role: UserRole,
+    pub username: String,
+    pub registered_at: u64,
+    pub is_verified: bool,
+    pub successful_trades: u32,
+    pub disputed_trades: u32,
+    pub portfolio_cid: Option<String>,
+}
+
+#[soroban_sdk::contractclient(name = "OnboardingClient")]
+pub trait OnboardingInterface {
+    fn update_reputation(env: Env, address: Address, successful_delta: u32, disputed_delta: u32);
+    fn update_user_metrics(
+        env: Env,
+        address: Address,
+        escrow_count_delta: u32,
+        volume_delta: i128,
+        token_address: Address,
+    );
+    fn deactivate_profile(env: Env, user: Address);
+    fn verify_user(env: Env, user: Address) -> UserProfile;
+    fn has_active_contracts(env: Env, user: Address) -> bool;
+    fn update_active_contracts(env: Env, user: Address, delta: i32);
+    fn get_active_user_count(env: Env) -> u32;
+    fn bump_user_profile_ttl(env: Env, user: Address) -> bool;
+    fn bump_user_metrics_ttl(env: Env, user: Address) -> bool;
+    fn get_user_role(env: Env, user: Address) -> UserRole;
+    fn is_profile_active(env: Env, user: Address) -> bool;
+    fn get_user_profile_version(env: Env, user: Address) -> u32;
+    fn get_user_state_version(env: Env, user: Address) -> u32;
+    fn is_user_verified(env: Env, user: Address) -> bool;
+}
+
+#[contract]
+pub struct CraftNexusContract;
+
+impl CraftNexusContract {
+    pub fn enter_reentry_guard(env: &Env) {
+        if env.storage().temporary().has(&DataKey::ReentryGuard) {
+            env.panic_with_error(crate::Error::ReentryDetected);
+        }
+        env.storage().temporary().set(&DataKey::ReentryGuard, &true);
+    }
+
+    pub fn exit_reentry_guard(env: &Env) {
+        env.storage().temporary().remove(&DataKey::ReentryGuard);
+    }
+}
+
+pub const ESCROW_CONTRACT: CraftNexusContract = CraftNexusContract;
+
+pub type EscrowContractClient<'a> = CraftNexusContractClient<'a>;
+
+struct ReentryGuardScope<'a> {
+    env: &'a Env,
+}
+
+impl<'a> ReentryGuardScope<'a> {
+    fn new(env: &'a Env) -> Self {
+        CraftNexusContract::enter_reentry_guard(env);
+        ReentryGuardScope { env }
+    }
+}
+
+impl<'a> Drop for ReentryGuardScope<'a> {
+    fn drop(&mut self) {
+        CraftNexusContract::exit_reentry_guard(self.env);
+    }
+}
+
+#[contractimpl]
+impl CraftNexusContract {
+    fn validate_ipfs_cid(cid: &String) -> bool {
+        let len = cid.len() as usize;
+        if len == 0 || len > 128 {
+            return false;
+        }
+
+        let mut buf = [0u8; 128];
+        cid.copy_into_slice(&mut buf[0..len]);
+        let cid_bytes = &buf[0..len];
+
+        let is_v0 = len == 46
+            && cid_bytes[0] == b'Q'
+            && cid_bytes[1] == b'm'
+            && cid_bytes.iter().all(|b| Self::is_base58_btc_char(*b));
+
+        if is_v0 {
+            return true;
+        }
+
+        if len < 3 {
+            return false;
+        }
+
+        let prefix = cid_bytes[0];
+        let payload = &cid_bytes[1..];
+
+        match prefix {
+            b'b' => {
+                if !(50..=100).contains(&len) || cid_bytes[1] != b'a' {
+                    return false;
+                }
+                payload
+                    .iter()
+                    .all(|b| matches!(*b, b'a'..=b'z' | b'2'..=b'7'))
+            }
+            b'f' => {
+                if !(60..=120).contains(&len) || cid_bytes[1] != b'0' || cid_bytes[2] != b'1' {
+                    return false;
+                }
+                payload
+                    .iter()
+                    .all(|b| matches!(*b, b'0'..=b'9' | b'a'..=b'f'))
+            }
+            b'z' => {
+                if !(40..=100).contains(&len) {
+                    return false;
+                }
+                payload.iter().all(|b| Self::is_base58_btc_char(*b))
+            }
+            _ => false,
+        }
+    }
+
+/// Lightweight progress returned to clients and indexers without exposing the
+/// stored parameter vector.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct BatchJobProgress {
+    pub id: u64,
+    pub owner: Address,
+    pub next_index: u32,
+    pub total: u32,
+    pub status: BatchJobStatus,
+}
+
+/// Policy for handling fees when a dispute expires without arbitrator resolution.
+///
+/// A dispute "expires" when the configured `max_dispute_duration` elapses
+/// without the arbitrator delivering a verdict (see [`PlatformConfig`]).
+/// At that point the escrow must still be unwound — but the platform fee
+/// is suddenly ambiguous: nobody won the dispute, so the usual "loser
+/// pays the fee" rule doesn't apply. This enum is the on-chain knob the
+/// admin uses to pick a policy at configuration time.
+///
+/// # Indexer / off-chain integration
+///
+/// Each variant is serialised as its `repr(u32)` discriminant on the
+/// wire, so off-chain indexers can match against `0..=3` without binding
+/// to the variant names. The discriminants are stable; reordering them
+/// would be a breaking change for existing escrows whose `PlatformConfig`
+/// has been persisted on-chain.
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum ExpiredDisputeFeePolicy {
+    /// Refund buyer in full, platform collects no fee. The default,
+    /// buyer-friendly policy — the platform absorbs the cost of the
+    /// arbitrator timing out. Use when buyer goodwill matters more than
+    /// covering operational cost on stalled disputes.
+    RefundFullNoPlatformFee = 0,
+    /// Refund buyer minus platform fee. The platform still earns its
+    /// fee, taken from the buyer's refunded amount. Symmetric to a
+    /// normal "buyer loses" resolution; use when the platform must
+    /// cover its costs regardless of dispute outcome.
+    RefundMinusPlatformFee = 1,
+    /// Refund buyer in full, deduct platform fee from the seller's
+    /// locked amount. The seller forfeits the fee even though they
+    /// never received payment — use when seller responsibility for
+    /// presenting evidence outweighs the cost of forfeiting on a
+    /// stalled arbitration.
+    DeductFeeFromSeller = 2,
+    /// Split the platform fee: half deducted from the buyer's refund,
+    /// half from the seller's locked amount. The most "neutral" policy
+    /// — both sides share the cost of the arbitrator timing out.
+    SplitFee = 3,
+}
+
+/// Platform configuration data
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformConfig {
+    pub platform_fee_bps: u32,    // Platform fee in basis points (500 = 5%)
+    pub platform_wallet: Address, // Wallet address to receive fees
+    /// Admin address for management.
+    /// This address can be a regular account or a Multisig contract address
+    /// to enhance security for sensitive operations like `propose_upgrade_wasm` (#95).
+    pub admin: Address,
+    pub arbitrator: Address, // Arbitrator for dispute resolution
+    pub moderator: Option<Address>,
+    pub is_paused: bool,                // Circuit breaker (#96)
+    pub min_stake_required: i128, // Minimum stake artisan must hold to create escrows (Issue #99)
+    pub pending_admin: Option<Address>, // Pending admin for two-step transfer
+    pub wasm_upgrade_cooldown: u32, // Grace period for WASM upgrades in seconds (default: 7 days)
+    pub max_dispute_duration: u32, // Maximum duration a dispute can remain open in seconds (default: 30 days)
+    pub stake_cooldown: u32, // Cooldown period after staking before tokens can be unstaked in seconds (default: 7 days)
+    /// Policy for handling platform fees when disputes expire without arbitrator resolution
+    pub expired_dispute_fee_policy: ExpiredDisputeFeePolicy,
+    /// Minimum release window to prevent "flash" auto-releases (default: 1 day)
+    pub min_release_window: u32,
+    /// Dispute escalation window in seconds (default: 3 days)
+    pub dispute_escalation_window: u32,
+    /// Evidence/counter-evidence challenge window before arbitrator resolution
+    pub evidence_challenge_window: u32,
+}
+
+/// Structured record of dispute evidence with metadata and expiry thresholds (#927).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct DisputeEvidence {
+    pub id: u64,
+    pub order_id: u32,
+    pub dispute_session_id: u64,
+    pub submitter: Address,
+    pub evidence_uri: String,
+    pub parent_evidence_id: Option<u64>,
+    pub submitted_at: u64,
+    pub expires_at: u64,
+    pub is_invalidated: bool,
+}
+
+/// Record of dispute escalation to arbitration (#941).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct DisputeEscalationRecord {
+    pub order_id: u32,
+    pub escalated_by: Address,
+    pub escalated_at: u64,
+}
+
+/// Configuration for sensitive action rate limiting (#943).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RateLimitConfig {
+    pub max_calls: u32,
+    pub window: u32,
+}
+
+/// Partial refund proposal created during a dispute (Issue #101)
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PartialRefundProposal {
+    pub order_id: u32,
+    pub refund_amount: i128,
+    pub proposed_by: Address,
+    pub proposed_at: u64,
+    /// Incremented on each cancel so a cancelled proposal cannot be replayed.
+    pub nonce: u64,
+}
+
+/// Which terminal settlement path finalized a dispute.
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum SettlementPath {
+    PartialRefundAccepted = 0,
+    ArbitratedRelease = 1,
+    ArbitratedRefund = 2,
+    ArbitratedPartial = 3,
+    ExpiredDispute = 4,
+}
+
+/// Immutable receipt written before token transfers on every dispute settlement path.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct SettlementReceipt {
+    pub order_id: u32,
+    pub path: SettlementPath,
+    pub executed_at: u64,
+    pub proposal_nonce: u64,
+}
+
+/// User roles in the CraftNexus platform
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum UserRole {
+    None = 0,      // User has not onboarded
+    Buyer = 1,     // Can purchase items
+    Artisan = 2,   // Can sell items and create escrow
+    Admin = 3,     // Platform administrator
+    Moderator = 4, // Can help manage disputes
+}
+
+/// Profile status for users
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum ProfileStatus {
+    Active = 0,
+    Deactivated = 1,
+}
+
+/// Onboarding status for users
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UserProfile {
+    pub version: u32,
+    pub address: Address,
+    pub role: UserRole,
+    pub username: String,
+    pub registered_at: u64,
+    pub is_verified: bool,
+    /// Count of escrows where this user was on the winning side (#100)
+    pub successful_trades: u32,
+    /// Count of escrows that ended in a dispute against this user (#100)
+    pub disputed_trades: u32,
+    /// Portfolio CID for artisan showcase (IPFS) - Issue #112
+    pub portfolio_cid: Option<String>,
+    /// Status of the user profile - Issue #113
+    pub status: ProfileStatus,
+}
+
+/// Coherent onboarding state proof passed across the escrow boundary.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct OnboardingAttestation {
+    pub account: Address,
+    pub profile_version: u32,
+    pub role: UserRole,
+    pub is_verified: bool,
+    pub status: ProfileStatus,
+    pub state_revision: u64,
+    pub ledger_sequence: u32,
+    pub operation_id: Bytes,
+    pub contract_instance: Address,
+    pub state_digest: BytesN<32>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct LegacyUserProfile {
+    pub address: Address,
+    pub role: UserRole,
+    pub username: String,
+    pub registered_at: u64,
+    pub is_verified: bool,
+    /// Count of escrows where this user was on the winning side (#100)
+    pub successful_trades: u32,
+    /// Count of escrows that ended in a dispute against this user (#100)
+    pub disputed_trades: u32,
+    /// Portfolio CID for artisan showcase (IPFS) - Issue #112
+    pub portfolio_cid: Option<String>,
+}
+
+/// Minimal cross-contract interface for the OnboardingContract.
+/// Used by CraftNexusContract to update user reputation and activity metrics
+/// when escrow state changes (release, refund, resolve).
+#[soroban_sdk::contractclient(name = "OnboardingClient")]
+pub trait OnboardingInterface {
+    /// Issue a proof bound to this escrow contract and operation.
+    fn get_onboarding_attestation(
+        env: Env,
+        user: Address,
+        operation_id: Bytes,
+        contract_instance: Address,
+    ) -> OnboardingAttestation;
+    /// Validate and consume a single-use onboarding proof.
+    fn validate_onboarding_attestation(env: Env, attestation: OnboardingAttestation) -> bool;
+    /// Increment a user's reputation counters.
+    ///
+    /// Called by this escrow contract after a terminal escrow outcome where a
+    /// winner/loser can be determined (release/refund/dispute resolution).
+    /// The onboarding contract authenticates that the caller is the registered
+    /// escrow contract address.
+    fn update_reputation(env: Env, address: Address, successful_delta: u32, disputed_delta: u32);
+    /// Increment a user's activity metrics (escrow count + volume).
+    ///
+    /// Used by onboarding to drive auto-verification and analytics counters.
+    fn update_user_metrics(
+        env: Env,
+        address: Address,
+        escrow_count_delta: u32,
+        volume_delta: i128,
+        token_address: Address,
+    );
+    /// Mark a user profile as deactivated.
+    ///
+    /// Used by the escrow contract for administrative safety actions; the
+    /// onboarding contract enforces its own authorization rules.
+    fn deactivate_profile(env: Env, user: Address);
+    /// Verify a user, returning the updated profile.
+    fn verify_user(env: Env, user: Address) -> UserProfile;
+    /// Return true if the user currently has any active escrow obligations.
+    fn has_active_contracts(env: Env, user: Address) -> bool;
+    /// Update onboarding's local active-contract counter for a user.
+    ///
+    /// `delta` should be `+1` when an escrow becomes active and `-1` when the
+    /// escrow closes. The onboarding contract rejects underflows.
+    fn update_active_contracts(env: Env, user: Address, delta: i32);
+    /// Number of onboarding profiles whose status is currently active.
+    fn get_active_user_count(env: Env) -> u32;
+    /// Refresh the persistent TTL for a user's profile entry.
+    fn bump_user_profile_ttl(env: Env, user: Address) -> bool;
+    /// Refresh the persistent TTL for a user's activity metrics entry.
+    fn bump_user_metrics_ttl(env: Env, user: Address) -> bool;
+    /// Return the role assigned to `user`, or `UserRole::None` if no profile exists.
+    fn get_user_role(env: Env, user: Address) -> UserRole;
+    /// Return true if `user` has an active onboarding profile.
+    fn is_profile_active(env: Env, user: Address) -> bool;
+    /// Return the schema version stored on `user`'s profile, or `0` if no profile exists.
+    fn get_user_profile_version(env: Env, user: Address) -> u32;
+    /// Return the monotonically increasing state version for `user`'s profile,
+    /// or `0` if no profile exists.
+    fn get_user_state_version(env: Env, user: Address) -> u32;
+    /// Return true if `user` has passed verification (manual or auto).
+    fn is_user_verified(env: Env, user: Address) -> bool;
+}
+
+#[contract]
+/// CraftNexus escrow contract.
+///
+/// # Storage model
+/// - Escrows are stored under `(ESCROW, order_id)` as a single compact record.
+/// - Enumeration uses count + indexed keys (e.g. `EscrowCount` +
+///   `GlobalEscrowIdIndexed(i)`) to avoid unbounded `Vec` growth.
+///
+/// # TTL model
+/// - Persistent entries extend TTL on write via `extend_persistent`.
+/// - Hot index reads use `extend_persistent_read` with a lower threshold to
+///   reduce rent-refresh overhead while still preventing accidental expiry.
+///
+/// # Onboarding integration
+/// - The admin can register an onboarding contract address.
+/// - Cross-contract calls are wrapped in `try_invoke_contract` helpers so an
+///   onboarding failure never bricks escrow settlement.
+pub struct CraftNexusContract;
+
+impl CraftNexusContract {
+    pub fn enter_reentry_guard(env: &Env) {
+        if env.storage().temporary().has(&DataKey::ReentryGuard) {
+            env.panic_with_error(crate::Error::ReentryDetected);
+        }
+        env.storage().temporary().set(&DataKey::ReentryGuard, &true);
+    }
+
+    pub fn exit_reentry_guard(env: &Env) {
+        env.storage().temporary().remove(&DataKey::ReentryGuard);
+    }
+}
+
+/// Alias and compatibility layers
+pub const ESCROW_CONTRACT: CraftNexusContract = CraftNexusContract;
+
+pub type EscrowContractClient<'a> = CraftNexusContractClient<'a>;
+
+/// Guard to ensure reentry protection is cleared even if a panic or error occurs.
+/// This is essential to prevent contract locks from persisting across failed calls.
+/// Automatically removes the guard when dropped, ensuring cleanup in all control flows.
+struct ReentryGuardScope<'a> {
+    env: &'a Env,
+}
+
+impl<'a> ReentryGuardScope<'a> {
+    fn new(env: &'a Env) -> Self {
+        CraftNexusContract::enter_reentry_guard(env);
+        ReentryGuardScope { env }
+    }
+}
+
+impl<'a> Drop for ReentryGuardScope<'a> {
+    fn drop(&mut self) {
+        CraftNexusContract::exit_reentry_guard(self.env);
+    }
+}
+
+#[contractimpl]
+impl CraftNexusContract {
+    fn validate_ipfs_cid(cid: &String) -> bool {
+        let len = cid.len() as usize;
+        if len == 0 || len > 128 {
+            return false;
+        }
+
+        let mut buf = [0u8; 128];
+        cid.copy_into_slice(&mut buf[0..len]);
+        let cid_bytes = &buf[0..len];
+
+        let is_v0 = len == 46
+            && cid_bytes[0] == b'Q'
+            && cid_bytes[1] == b'm'
+            && cid_bytes.iter().all(|b| Self::is_base58_btc_char(*b));
+
+        if is_v0 {
+            return true;
+        }
+
+        // CIDv1: minimum 3 chars (multibase prefix + version byte + codec)
+        if len < 3 {
+            return false;
+        }
+
+        let prefix = cid_bytes[0];
+        let payload = &cid_bytes[1..];
+
+        match prefix {
+            // base32lower (most common CIDv1 encoding)
+            b'b' => {
+                if !(50..=100).contains(&len) || cid_bytes[1] != b'a' {
+                    return false;
+                }
+                payload
+                    .iter()
+                    .all(|b| matches!(*b, b'a'..=b'z' | b'2'..=b'7'))
+            }
+            // base16lower (hex)
+            b'f' => {
+                if !(60..=120).contains(&len) || cid_bytes[1] != b'0' || cid_bytes[2] != b'1' {
+                    return false;
+                }
+                payload
+                    .iter()
+                    .all(|b| matches!(*b, b'0'..=b'9' | b'a'..=b'f'))
+            }
+            // base58btc
+            b'z' => {
+                if !(40..=100).contains(&len) {
+                    return false;
+                }
+                payload.iter().all(|b| Self::is_base58_btc_char(*b))
+            }
+            _ => false,
+        }
+    }
+
+    #[inline(always)]
+    fn is_base58_btc_char(byte: u8) -> bool {
+        BASE58_BTC_CHARSET[byte as usize]
+    }
+
+    /// Validate an optional IPFS CID string, panicking with `InvalidIpfsHash` if present but invalid.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `ipfs_hash` - Optional CID string to validate
+    ///
+    /// # Errors
+    /// Panics with `Error::InvalidIpfsHash` if the CID is present but fails `validate_ipfs_cid`.
+    ///
+    /// # Storage side-effects
+    /// None — this is a pure validation helper with no storage reads or writes.
+    #[inline(always)]
+    fn validate_optional_ipfs_hash(env: &Env, ipfs_hash: &Option<String>) {
+        if let Some(cid) = ipfs_hash {
+            if !Self::validate_ipfs_cid(cid) {
+                env.panic_with_error(crate::Error::InvalidIpfsHash);
+            }
+        }
+    }
+
+    /// Validate an optional metadata hash, panicking with `InvalidMetadataHash` if present but not 32 bytes.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `metadata_hash` - Optional raw bytes to validate
+    ///
+    /// # Errors
+    /// Panics with `Error::InvalidMetadataHash` if the hash is present but its length is not exactly 32 bytes.
+    ///
+    /// # Storage side-effects
+    /// None — this is a pure validation helper with no storage reads or writes.
+    #[inline(always)]
+    fn validate_optional_metadata_hash(env: &Env, metadata_hash: &Option<Bytes>) {
+        if let Some(hash) = metadata_hash {
+            if hash.len() != 32 {
+                env.panic_with_error(crate::Error::InvalidMetadataHash);
+            }
+        }
+    }
+
+    fn validate_optional_service_agreement_hash(env: &Env, hash: &Option<Bytes>) {
+        if let Some(h) = hash {
+            if h.len() != 32 {
+                env.panic_with_error(crate::Error::InvalidServiceAgreementHash);
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn get_admin(env: &Env) -> Result<Address, Error> {
+        let config: PlatformConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlatformConfig)
+            .ok_or(Error::PlatformNotInitialized)?;
+        Ok(config.admin)
+    }
+
+    /// Validates admin address to ensure it's not zero/default and is properly initialized (#240)
+    /// This prevents common configuration errors and hardens against corruption.
+    ///
+    /// Storage-layout note: this validator sits on the hot path for any
+    /// admin-gated mutation. Checks are ordered cheapest-first so the
+    /// common case (a structurally valid candidate that differs from
+    /// the current contract address) returns without touching persistent
+    /// storage at all — a small but consistent gas saving across every
+    /// transfer / propose / accept_admin call.
+    fn validate_admin_address(env: &Env, admin: &Address) -> Result<(), Error> {
+        // Ensure the address is not the contract's own address — a common
+        // misconfiguration that would lock the contract out of admin
+        // operations forever.
+        let contract = env.current_contract_address();
+        if admin == &contract {
+            return Err(Error::InvalidAdminAddress);
+        }
+        // Note: Additional address validation could be performed here
+        // (e.g., checking if address exists on ledger, format validation, etc.)
+        Ok(())
+    }
+
+    /// Validates a proposed platform wallet address (#707).
+    ///
+    /// Rejects addresses that would cause `transfer_platform_fee` to panic at
+    /// the host level — specifically the contract's own address, which is
+    /// structurally valid but semantically meaningless as a fee destination and
+    /// would lock collected fees inside the escrow contract forever.
+    ///
+    /// Called by both `initialize` and `update_platform_wallet` so the
+    /// invariant is enforced at every write point rather than only at read time.
+    fn validate_platform_wallet(env: &Env, wallet: &Address) -> Result<(), Error> {
+        if wallet == &env.current_contract_address() {
+            return Err(Error::InvalidPlatformWallet);
+        }
+        Ok(())
+    }
+
+    /// Gets platform configuration with fallback mechanism for corruption recovery (#240)
+    /// Returns the primary config if valid, falls back to last-known good state if corrupted
+    #[allow(dead_code)]
+    fn get_platform_config_safe(env: &Env) -> Result<PlatformConfig, Error> {
+        let config: Option<PlatformConfig> = env.storage().persistent().get(&PLATFORM_FEE);
+
+        if let Some(cfg) = config {
+            // Validate that critical fields are initialized
+            if Self::validate_admin_address(env, &cfg.admin).is_ok() {
+                Self::extend_persistent(env, &PLATFORM_FEE);
+                return Ok(cfg);
+            }
+        }
+
+        // If primary config is missing or corrupted, attempt to recover using fallback admin
+        if let Some(fallback_admin) = env
+            .storage()
+            .persistent()
+            .get::<_, Address>(&DataKey::FallbackAdmin)
+        {
+            Self::extend_persistent(env, &DataKey::FallbackAdmin);
+            // Emit recovery event for audit trail
+            env.events().publish(
+                (Symbol::new(env, "admin_config_recovered"), true),
+                String::from_str(env, "Using fallback admin after config corruption detected"),
+            );
+            // Return a minimal valid config with fallback admin
+            // This ensures critical operations remain accessible even if config is corrupted
+            return Ok(PlatformConfig {
+                platform_fee_bps: 500, // 5% default fee
+                platform_wallet: fallback_admin.clone(),
+                admin: fallback_admin,
+                arbitrator: env.current_contract_address(),
+                moderator: None,
+                is_paused: true, // Safer to default to paused during recovery
+                min_stake_required: 0,
+                pending_admin: None,
+                wasm_upgrade_cooldown: DEFAULT_WASM_UPGRADE_COOLDOWN,
+                max_dispute_duration: DEFAULT_MAX_DISPUTE_DURATION,
+                stake_cooldown: DEFAULT_STAKE_COOLDOWN,
+                expired_dispute_fee_policy: ExpiredDisputeFeePolicy::RefundFullNoPlatformFee,
+                min_release_window: DEFAULT_MIN_RELEASE_WINDOW,
+                dispute_escalation_window: DEFAULT_DISPUTE_ESCALATION_WINDOW,
+                evidence_challenge_window: DEFAULT_EVIDENCE_CHALLENGE_WINDOW,
+            });
+        }
+
+        Err(Error::CorruptedPlatformConfig)
+    }
+
+    /// Emits audit event for admin changes to maintain a complete audit trail (#240)
+    fn emit_admin_changed(
+        env: &Env,
+        previous_admin: Address,
+        new_admin: Address,
+        change_type: &str,
+    ) {
+        env.events().publish(
+            (Symbol::new(env, "admin_changed"), change_type.as_bytes()),
+            (previous_admin, new_admin),
+        );
+    }
+
+    /// Stores fallback admin address for recovery purposes (#240)
+    /// This ensures that even if primary admin storage is corrupted, platform can be recovered
+    fn set_fallback_admin(env: &Env, admin: Address) -> Result<(), Error> {
+        Self::validate_admin_address(env, &admin)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::FallbackAdmin, &admin);
+        Self::extend_persistent(env, &DataKey::FallbackAdmin);
+        Ok(())
+    }
+
+    fn emit_escrow_created(env: &Env, event: EscrowEvent) {
+        env.events()
+            .publish((symbol_short!("escrow"), event.escrow_id), event);
+    }
+
+    fn emit_escrow_resolved_event(env: &Env, event: EscrowResolvedEvent) {
+        env.events().publish(
+            (Symbol::new(env, "escrow_resolved"), event.escrow_id),
+            event,
+        );
+    }
+
+    fn emit_reputation_update(env: &Env, event: ReputationUpdateEvent) {
+        env.events().publish(
+            (
+                Symbol::new(env, "stake_reputation_update"),
+                event.address.clone(),
+            ),
+            event,
+        );
+    }
+
+    fn emit_config_updated(
+        env: &Env,
+        field_name: &str,
+        old_value: ConfigValue,
+        new_value: ConfigValue,
+    ) {
+        env.events().publish(
+            (
+                Symbol::new(env, "admin_config_updated"),
+                Symbol::new(env, field_name),
+            ),
+            ConfigUpdatedEvent {
+                field_name: Symbol::new(env, field_name),
+                old_value,
+                new_value,
+            },
+        );
+    }
+
+    fn emit_artisan_fee_tier_updated(env: &Env, artisan: Address, fee_bps: u32) {
+        env.events().publish(
+            (Symbol::new(env, "admin_fee_tier_updated"), artisan.clone()),
+            ArtisanFeeTierUpdatedEvent { artisan, fee_bps },
+        );
+    }
+
+    fn emit_metadata_verified(env: &Env, order_id: u32, verifier: Address) {
+        env.events().publish(
+            (
+                Symbol::new(env, "escrow_metadata_verified"),
+                (order_id as u64),
+            ),
+            MetadataVerifiedEvent {
+                order_id: order_id as u64,
+                verifier,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    fn emit_platform_paused(env: &Env, initiator: Address) {
+        env.events().publish(
+            (Symbol::new(env, "admin_platform_paused"), initiator.clone()),
+            PlatformPausedEvent {
+                initiator,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    fn emit_platform_unpaused(env: &Env, initiator: Address) {
+        env.events().publish(
+            (
+                Symbol::new(env, "admin_platform_unpaused"),
+                initiator.clone(),
+            ),
+            PlatformUnpausedEvent {
+                initiator,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// Atomically appends one escrow ID to the indexed global registry and
+    /// increments `EscrowCount` (#515 / Issue #226).
+    fn update_escrow_indices_atomic(env: &Env, order_id: u32) {
+        // Issue #515 — O(1) indexed append replaces monolithic AllEscrowIds Vec
+        // rewrites. Legacy Vec entries are migrated lazily on first touch.
+        Self::migrate_legacy_all_escrow_ids(env);
+
+        let count_key = DataKey::EscrowCount;
+        let count = Self::get_persistent_u32(env, &count_key);
+
+        let index_key = DataKey::GlobalEscrowIdIndexed(count);
+        env.storage().persistent().set(&index_key, &order_id);
+        Self::extend_persistent(env, &index_key);
+
+        env.storage().persistent().set(&count_key, &(count + 1));
+        Self::extend_persistent(env, &count_key);
+    }
+
+    /// Atomically appends escrow IDs to the indexed global registry for batch
+    /// operations (#515). Each ID is stored under its own key so batch creates
+    /// avoid rewriting a growing Vec.
+    fn update_escrow_indices_batch_atomic(env: &Env, order_ids: &soroban_sdk::Vec<u32>) {
+        if order_ids.is_empty() {
+            return;
+        }
+
+        Self::migrate_legacy_all_escrow_ids(env);
+
+        let count_key = DataKey::EscrowCount;
+        let mut count = Self::get_persistent_u32(env, &count_key);
+
+        for i in 0..order_ids.len() {
+            if let Some(id) = order_ids.get(i) {
+                let index_key = DataKey::GlobalEscrowIdIndexed(count);
+                env.storage().persistent().set(&index_key, &id);
+                Self::extend_persistent(env, &index_key);
+                count += 1;
+            }
+        }
+
+        env.storage().persistent().set(&count_key, &count);
+        Self::extend_persistent(env, &count_key);
+    }
+
+    // IMPORTANT: this validation is intentionally scoped to escrow creation-time
+    // flows only. Do not call from payout/distribution paths, or dynamic minimum
+    // changes could trap dust balances in existing escrows.
+    fn check_min_amount(env: &Env, token: Address, amount: i128) -> Result<(), Error> {
+        if amount <= 0 {
+            return Err(Error::AmountBelowMinimum);
+        }
+
+        let min_amount: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MinEscrowAmount(token))
+            .unwrap_or(0); // If not set, allow any positive amount
+
+        if amount < min_amount {
+            return Err(Error::AmountBelowMinimum);
+        }
+
+        Ok(())
+    }
+
+    /// Records a stake operation in the history queue for audit trail and analytics (#237)
+    /// Implements bounded queue with automatic pruning to prevent unbounded storage growth
+    fn record_stake_history(
+        env: &Env,
+        artisan: &Address,
+        new_stake: i128,
+        operation: &str,
+    ) -> Result<(), Error> {
+        let count_key = DataKey::StakeHistoryCount(artisan.clone());
+        let _history_key = DataKey::StakeHistory(artisan.clone());
+
+        let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        // Check if we need to prune before adding new entry
+        if current_count >= MAX_STAKE_HISTORY_SIZE {
+            // Queue is full, cannot add more entries
+            return Err(Error::StakeQueueFull);
+        }
+
+        // If approaching capacity threshold, schedule pruning
+        if current_count >= STAKE_HISTORY_PRUNE_THRESHOLD {
+            // Keep only most recent 50% of entries to free up space
+            // This is done lazily - oldest entries will be overwritten on next full cycle
+            let new_count = current_count / 2;
+            env.storage().persistent().set(&count_key, &new_count);
+            Self::extend_persistent(env, &count_key);
+        }
+
+        // Record timestamp of this operation for maintenance checks
+        let modified_key = DataKey::StakeLastModified(artisan.clone());
+        env.storage()
+            .persistent()
+            .set(&modified_key, &env.ledger().timestamp());
+        Self::extend_persistent(env, &modified_key);
+
+        // Emit audit event
+        env.events().publish(
+            (Symbol::new(env, "stake_operation"), operation.as_bytes()),
+            (artisan.clone(), new_stake),
+        );
+
+        Ok(())
+    }
+
+    /// Prunes obsolete stake history entries when queue reaches capacity (#237)
+    /// Implements safe cleanup strategy that preserves recent entries for audit trail
+    #[allow(dead_code)]
+    fn prune_stake_history(env: &Env, artisan: &Address) {
+        let count_key = DataKey::StakeHistoryCount(artisan.clone());
+        let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        if current_count > 0 {
+            // Keep most recent 50 entries, discard older ones
+            let retained_count = current_count.min(50);
+            env.storage().persistent().set(&count_key, &retained_count);
+            Self::extend_persistent(env, &count_key);
+        }
+    }
+
+    #[inline(always)]
+    fn update_active_obligations(env: &Env, user: &Address, delta: i32) {
+        let key = DataKey::ActiveObligations(user.clone());
+        let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_val = if delta > 0 {
+            count.saturating_add(delta as u32)
+        } else {
+            count.saturating_sub((-delta) as u32)
+        };
+        env.storage().persistent().set(&key, &new_val);
+        Self::extend_persistent(env, &key);
+    }
+
+    #[inline(always)]
+    fn update_active_dispute_count(env: &Env, delta: i32) {
+        let key = DataKey::ActiveDisputeCount;
+        let count: u32 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_val = if delta > 0 {
+            count.saturating_add(delta as u32)
+        } else {
+            count.saturating_sub((-delta) as u32)
+        };
+        env.storage().persistent().set(&key, &new_val);
+        Self::extend_persistent(env, &key);
+    }
+
+    pub fn get_active_dispute_count(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ActiveDisputeCount)
+            .unwrap_or(0)
+    }
+
+    #[inline(always)]
+    fn get_total_volume(env: &Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TotalVolume)
+            .unwrap_or(0)
+    }
+
+    #[inline(always)]
+    fn read_persistent<K, V>(env: &Env, key: &K) -> Option<V>
+    where
+        K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>,
+        V: soroban_sdk::TryFromVal<Env, soroban_sdk::Val>,
+    {
+        let value = env.storage().persistent().get::<K, V>(key);
+        if value.is_some() {
+            Self::extend_persistent(env, key);
+        }
+        value
+    }
+
+    #[inline(always)]
+    fn update_total_locked(env: &Env, token: &Address, delta: i128) {
+        let key = DataKey::TotalLocked(token.clone());
+        let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_total = current.saturating_add(delta);
+        env.storage().persistent().set(&key, &new_total);
+        Self::extend_persistent(env, &key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ReconciliationReport(token.clone()));
+    }
+
+    #[inline(always)]
+    fn update_total_staked(env: &Env, token: &Address, delta: i128) {
+        let key = DataKey::TotalStaked(token.clone());
+        let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let new_total = current.saturating_add(delta);
+        env.storage().persistent().set(&key, &new_total);
+        Self::extend_persistent(env, &key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::ReconciliationReport(token.clone()));
+    }
+
+    /// Extend the TTL of a persistent storage entry using standardized values.
+    #[inline(always)]
+    fn extend_persistent(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
+    }
+
+    #[inline(always)]
+    fn extend_persistent_read(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
+    }
+
+    /// Read a persistent `u32` and extend its TTL when the key exists (#515).
+    #[inline(always)]
+    fn get_persistent_u32(env: &Env, key: &DataKey) -> u32 {
+        Self::read_persistent(env, key).unwrap_or(0u32)
+    }
+
+    /// Read a persistent `u64` and extend its TTL when the key exists (#431 / key index #30).
+    #[inline(always)]
+    fn get_persistent_u64(env: &Env, key: &DataKey) -> u64 {
+        match env.storage().persistent().get(key) {
+            Some(value) => {
+                Self::extend_persistent(env, key);
+                value
+            }
+            None => 0u64,
+        }
+    }
+
+    #[inline(always)]
+    fn get_whitelist_count(env: &Env) -> u32 {
+        let count_key = DataKey::WhitelistedTokenCount;
+        Self::read_persistent(env, &count_key).unwrap_or(0u32)
+    }
+
+    #[inline(always)]
+    fn set_whitelist_count(env: &Env, count: u32) {
+        let count_key = DataKey::WhitelistedTokenCount;
+        env.storage().persistent().set(&count_key, &count);
+        Self::extend_persistent(env, &count_key);
+    }
+
+    fn migrate_legacy_whitelisted_tokens(env: &Env) {
+        let legacy_key = DataKey::WhitelistedTokens;
+        if !env.storage().persistent().has(&legacy_key) {
+            return;
+        }
+
+        let legacy_whitelist: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&legacy_key)
+            .unwrap_or(Map::new(env));
+
+        let mut count = Self::get_whitelist_count(env);
+        for (token, enabled) in legacy_whitelist.iter() {
+            if enabled {
+                let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+                if !env.storage().persistent().has(&token_key) {
+                    env.storage().persistent().set(&token_key, &true);
+                    Self::extend_persistent(env, &token_key);
+                    count += 1;
+                }
+            }
+        }
+
+        if count > 0 {
+            Self::set_whitelist_count(env, count);
+        } else {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::WhitelistedTokenCount);
+        }
+
+        env.storage().persistent().remove(&legacy_key);
+    }
+
+    /// Migrate legacy `AllEscrowIds` Vec storage to indexed keys (#515).
+    fn migrate_legacy_all_escrow_ids(env: &Env) {
+        let legacy_key = DataKey::AllEscrowIds;
+        if !env.storage().persistent().has(&legacy_key) {
+            return;
+        }
+
+        let all_ids: soroban_sdk::Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&legacy_key)
+            .unwrap_or(soroban_sdk::Vec::new(env));
+
+        for i in 0..all_ids.len() {
+            if let Some(id) = all_ids.get(i) {
+                let index_key = DataKey::GlobalEscrowIdIndexed(i);
+                if !env.storage().persistent().has(&index_key) {
+                    env.storage().persistent().set(&index_key, &id);
+                    Self::extend_persistent(env, &index_key);
+                }
+            }
+        }
+
+        let count_key = DataKey::EscrowCount;
+        let stored_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        if stored_count < all_ids.len() {
+            env.storage().persistent().set(&count_key, &all_ids.len());
+            Self::extend_persistent(env, &count_key);
+        }
+
+        env.storage().persistent().remove(&legacy_key);
+    }
+
+    /// Returns the configured maximum release window (in seconds).
+    /// Falls back to MAX_TOTAL_RELEASE_WINDOW (30 days) if not set by admin.
+    #[inline(always)]
+    fn get_max_release_window(env: &Env) -> u32 {
+        let key = DataKey::MaxReleaseWindow;
+        Self::read_persistent(env, &key).unwrap_or(MAX_TOTAL_RELEASE_WINDOW)
+    }
+
+    /// Returns the configured onboarding contract address, if any (#243).
+    fn get_onboarding_address(env: &Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Address>(&DataKey::OnboardingContractAddress)
+    }
+
+    /// Build a client for the configured onboarding contract, if one is set.
+    ///
+    /// This helper is used by the escrow contract’s safe cross-contract
+    /// integration so onboarding updates remain behind a single, explicit
+    /// entry point instead of being spread across ad-hoc address lookups.
+    fn get_onboarding_client(env: &Env) -> Option<(Address, OnboardingClient<'_>)> {
+        Self::get_onboarding_address(env).map(|address| {
+            let client = OnboardingClient::new(env, &address);
+            (address, client)
+        })
+    }
+
+    fn authorize_onboarding_state(
+        env: &Env,
+        user: &Address,
+        operation_id: Bytes,
+        expected_role: UserRole,
+    ) {
+        let escrow_address = env.current_contract_address();
+        let (onboarding_address, onboarding) = match Self::get_onboarding_client(env) {
+            Some(client) => client,
+            None => return,
+        };
+        let attestation = onboarding.get_onboarding_attestation(
+            user,
+            &operation_id,
+            &escrow_address,
+        );
+        if attestation.account != *user
+            || attestation.role != expected_role
+            || attestation.status != ProfileStatus::Active
+        {
+            env.panic_with_error(crate::Error::OnboardingAuthorizationFailed);
+        }
+        // #1122: bind the evidence to this deployment and bound its age before
+        // it is forwarded. The onboarding contract re-checks freshness, but an
+        // authorization boundary that only holds while the peer behaves
+        // correctly is not a boundary: evidence minted for another instance, or
+        // issued more than the validity window ago, is refused here too.
+        let current_ledger = env.ledger().sequence();
+        let window = crate::attestation::Attestation::issue(
+            attestation.ledger_sequence,
+            crate::attestation::DEFAULT_ATTESTATION_VALIDITY_LEDGERS,
+            attestation.contract_instance.clone(),
+            attestation.state_revision,
+        )
+        .unwrap_or_else(|err| env.panic_with_error(crate::Error::from(err)));
+        if let Err(err) =
+            window.validate(current_ledger, &escrow_address, attestation.state_revision)
+        {
+            env.panic_with_error(crate::Error::from(err));
+        }
+        match env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            &onboarding_address,
+            &Symbol::new(env, "validate_onboarding_attestation"),
+            (attestation,).into_val(env),
+        ) {
+            Ok(Ok(true)) => {}
+            _ => env.panic_with_error(crate::Error::OnboardingAuthorizationFailed),
+        }
+    }
+
+    fn onboarding_operation_id(env: &Env, action: &[u8], order_id: u32) -> Bytes {
+        let mut operation_id = Bytes::from_slice(env, action);
+        operation_id.extend_from_slice(&order_id.to_be_bytes());
+        operation_id
+    }
+
+    fn onboarding_operation_id_u64(env: &Env, action: &[u8], identifier: u64) -> Bytes {
+        let mut operation_id = Bytes::from_slice(env, action);
+        operation_id.extend_from_slice(&identifier.to_be_bytes());
+        operation_id
+    }
+
+    fn onboarding_cycle_operation_id(env: &Env, id: u64, cycle: u64) -> Bytes {
+        let mut operation_id = Bytes::from_slice(env, b"release_next_cycle:");
+        operation_id.extend_from_slice(&id.to_be_bytes());
+        operation_id.extend_from_slice(&cycle.to_be_bytes());
+        operation_id
+    }
+
+    /// Public read-only accessor for the registered onboarding contract
+    /// address. Returns `OnboardingContractNotSet` rather than `None` so that
+    /// SDK clients receive a typed error instead of a silent unwrap on a
+    /// `None`. Use `has_onboarding_contract` for a boolean check (#243).
+    pub fn get_onboarding_contract(env: Env) -> Result<Address, Error> {
+        Self::get_onboarding_address(&env).ok_or(Error::OnboardingContractNotSet)
+    }
+
+    /// True iff `set_onboarding_contract` has been called. Useful for
+    /// dashboards and integration tests that need to assert configuration
+    /// without surfacing an error path (#243).
+    pub fn has_onboarding_contract(env: Env) -> bool {
+        Self::get_onboarding_address(&env).is_some()
+    }
+
+    /// Check if a user has any active escrows or recurring escrows.
+    pub fn has_active_escrows(env: Env, user: Address) -> bool {
+        let key = DataKey::ActiveObligations(user);
+        Self::get_persistent_u32(&env, &key) > 0
+    }
+
+    /// Emit a structured warning event when a cross-contract call to the
+    /// onboarding contract fails. Indexers can subscribe to `OB_FAIL` to flag
+    /// integration drift between the escrow and onboarding contracts.
+    fn emit_onboarding_call_failed(env: &Env, method: Symbol, address: Address) {
+        env.events().publish(
+            (ONBOARD_CALL_FAILED, method),
+            (address, env.ledger().timestamp()),
+        );
+    }
+
+    /// Safely call `update_reputation` on the registered onboarding contract.
+    ///
+    /// Returns `Ok(true)` on a successful cross-contract call, `Ok(false)` if
+    /// the call failed (so the caller can decide whether to fall back to
+    /// emitting events) or no contract is configured. Never panics, never
+    /// propagates the host trap — the escrow flow MUST keep moving even if
+    /// the onboarding contract is broken or pointing at a malicious
+    /// implementation (#243).
+    #[allow(dead_code)]
+    fn safe_update_reputation(
+        env: &Env,
+        address: Address,
+        successful_delta: u32,
+        disputed_delta: u32,
+    ) -> bool {
+        // Issue #527 — short-circuit on the no-op call before paying
+        // for the persistent storage read of the onboarding contract
+        // address. If both reputation deltas are 0 the cross-contract
+        // call has no effect; returning `true` here saves a storage
+        // decode + a host `try_invoke_contract` on every escrow
+        // settlement where reputation didn't change.
+        if successful_delta == 0 && disputed_delta == 0 {
+            return true;
+        }
+
+        let (onboarding_address, _onboarding) = match Self::get_onboarding_client(env) {
+            Some(client) => client,
+            None => return false,
+        };
+
+        let method = Symbol::new(env, "update_reputation");
+        let args: Vec<Val> = (address.clone(), successful_delta, disputed_delta).into_val(env);
+
+        match env.try_invoke_contract::<(), soroban_sdk::Error>(&onboarding_address, &method, args)
+        {
+            Ok(Ok(())) => true,
+            _ => {
+                Self::emit_onboarding_call_failed(env, method, onboarding_address);
+                false
+            }
+        }
+    }
+
+    /// Safely call `update_user_metrics` on the registered onboarding contract.
+    /// Mirrors `safe_update_reputation`'s contract: never panics, returns
+    /// `false` on missing config or cross-contract failure (#243).
+    #[allow(dead_code)]
+    fn safe_update_user_metrics(
+        env: &Env,
+        address: Address,
+        escrow_count_delta: u32,
+        volume_delta: i128,
+        token_address: Address,
+    ) -> bool {
+        let (onboarding_address, _onboarding) = match Self::get_onboarding_client(env) {
+            Some(client) => client,
+            None => return false,
+        };
+
+        let method = Symbol::new(env, "update_user_metrics");
+        let args: Vec<Val> = (
+            address.clone(),
+            escrow_count_delta,
+            volume_delta,
+            token_address.clone(),
+        )
+            .into_val(env);
+
+        match env.try_invoke_contract::<(), soroban_sdk::Error>(&onboarding_address, &method, args)
+        {
+            Ok(Ok(())) => true,
+            _ => {
+                Self::emit_onboarding_call_failed(env, method, onboarding_address);
+                false
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn safe_update_active_contracts(env: &Env, user: Address, delta: i32) -> bool {
+        if delta == 0 {
+            return true;
+        }
+
+        let (onboarding_address, _onboarding) = match Self::get_onboarding_client(env) {
+            Some(client) => client,
+            None => return false,
+        };
+
+        let method = Symbol::new(env, "update_active_contracts");
+        let args: Vec<Val> = (user.clone(), delta).into_val(env);
+
+        match env.try_invoke_contract::<(), soroban_sdk::Error>(&onboarding_address, &method, args)
+        {
+            Ok(Ok(())) => true,
+            _ => {
+                Self::emit_onboarding_call_failed(env, method, onboarding_address);
+                false
+            }
+        }
+    }
+
+    /// Safely query the onboarding contract for a single user's canonical state.
+    ///
+    /// Returns `Ok((is_active, role, is_verified, state_version))` on success,
+    /// `Err(())` when no onboarding contract is configured or the cross-contract
+    /// call fails. Never panics — callers decide how to handle a missing or
+    /// unreachable onboarding contract.
+    ///
+    /// All four cross-contract reads are issued as separate `try_invoke_contract`
+    /// calls so a partial failure is observable and distinguishable from a full
+    /// outage.
+    fn safe_check_onboarding_state(
+        env: &Env,
+        user: &Address,
+    ) -> Result<(bool, UserRole, bool, u32), ()> {
+        let (onboarding_address, _) = match Self::get_onboarding_client(env) {
+            Some(c) => c,
+            None => return Err(()),
+        };
+
+        // is_profile_active
+        let active_method = Symbol::new(env, "is_profile_active");
+        let active_args: Vec<Val> = (user.clone(),).into_val(env);
+        let is_active: bool = match env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            &onboarding_address,
+            &active_method,
+            active_args,
+        ) {
+            Ok(Ok(v)) => v,
+            _ => {
+                Self::emit_onboarding_call_failed(
+                    env,
+                    active_method,
+                    onboarding_address.clone(),
+                );
+                return Err(());
+            }
+        };
+
+        // get_user_role
+        let role_method = Symbol::new(env, "get_user_role");
+        let role_args: Vec<Val> = (user.clone(),).into_val(env);
+        let role: UserRole = match env.try_invoke_contract::<UserRole, soroban_sdk::Error>(
+            &onboarding_address,
+            &role_method,
+            role_args,
+        ) {
+            Ok(Ok(v)) => v,
+            _ => {
+                Self::emit_onboarding_call_failed(
+                    env,
+                    role_method,
+                    onboarding_address.clone(),
+                );
+                return Err(());
+            }
+        };
+
+        // is_user_verified
+        let verified_method = Symbol::new(env, "is_user_verified");
+        let verified_args: Vec<Val> = (user.clone(),).into_val(env);
+        let is_verified: bool = match env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            &onboarding_address,
+            &verified_method,
+            verified_args,
+        ) {
+            Ok(Ok(v)) => v,
+            _ => {
+                Self::emit_onboarding_call_failed(
+                    env,
+                    verified_method,
+                    onboarding_address.clone(),
+                );
+                return Err(());
+            }
+        };
+
+        // get_user_state_version
+        let version_method = Symbol::new(env, "get_user_state_version");
+        let version_args: Vec<Val> = (user.clone(),).into_val(env);
+        let state_version: u32 = match env.try_invoke_contract::<u32, soroban_sdk::Error>(
+            &onboarding_address,
+            &version_method,
+            version_args,
+        ) {
+            Ok(Ok(v)) => v,
+            _ => {
+                Self::emit_onboarding_call_failed(
+                    env,
+                    version_method,
+                    onboarding_address,
+                );
+                return Err(());
+            }
+        };
+
+        Ok((is_active, role, is_verified, state_version))
+    }
+
+    /// Validate onboarding state for both buyer and seller before a privileged
+    /// marketplace operation (escrow creation).
+    ///
+    /// # Behaviour
+    ///
+    /// When no onboarding contract is configured the check is a no-op — the
+    /// platform operates in open mode and all accounts are permitted.
+    ///
+    /// When an onboarding contract is configured each user must satisfy all of:
+    /// - Profile exists (state_version > 0; a zero version means no profile).
+    /// - Profile is currently active (not deactivated, flagged, or under review).
+    /// - Role is not `UserRole::None` — the user must have completed onboarding
+    ///   with a recognized role.
+    /// - Profile is verified (`is_verified == true`) when the platform requires
+    ///   verification for privileged operations.
+    ///
+    /// The state_version check is deferred here: a zero version is treated as
+    /// "profile not found". Any non-zero version is accepted because version
+    /// staleness at the point of escrow creation is only relevant if the caller
+    /// supplies an explicit expected version. Role and active-status changes
+    /// are reflected immediately because they are read live from the canonical
+    /// onboarding source.
+    ///
+    /// # Errors
+    ///
+    /// Panics with the appropriate [`Error`] variant on any validation failure:
+    /// - [`Error::OnboardingProfileNotFound`] — no profile (state_version == 0).
+    /// - [`Error::OnboardingProfileInactive`] — profile is not active.
+    /// - [`Error::OnboardingRoleMismatch`] — role is `None` (not properly onboarded).
+    fn validate_onboarding_state(env: &Env, buyer: &Address, seller: &Address) {
+        // No-op when no onboarding contract is configured.
+        if Self::get_onboarding_address(env).is_none() {
+            return;
+        }
+
+        for user in [buyer, seller] {
+            let (is_active, role, _is_verified, state_version) =
+                match Self::safe_check_onboarding_state(env, user) {
+                    Ok(state) => state,
+                    Err(()) => {
+                        // Cross-contract call failed — emit warning but allow the
+                        // operation to proceed so a temporarily unreachable onboarding
+                        // contract cannot permanently brick escrow creation.
+                        Self::emit_onboarding_call_failed(
+                            env,
+                            Symbol::new(env, "check_state"),
+                            user.clone(),
+                        );
+                        continue;
+                    }
+                };
+
+            // A state_version of 0 means the profile does not exist.
+            if state_version == 0 {
+                env.panic_with_error(Error::OnboardingProfileNotFound);
+            }
+
+            // Profile must be in an active state.
+            if !is_active {
+                env.panic_with_error(Error::OnboardingProfileInactive);
+            }
+
+            // User must have a recognized onboarding role.
+            if role == UserRole::None {
+                env.panic_with_error(Error::OnboardingRoleMismatch);
+            }
+        }
+    }
+
+    /// Set the configurable maximum release window (admin only).
+    ///
+    /// # Arguments
+    /// * `max_window` - Maximum allowed release window in seconds.
+    ///   Must be > 0 and <= ABSOLUTE_MAX_RELEASE_WINDOW.
+    pub fn set_max_release_window(env: Env, max_window: u32) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+        if max_window == 0 {
+            env.panic_with_error(crate::Error::ReleaseWindowTooShort);
+        }
+        if max_window > ABSOLUTE_MAX_RELEASE_WINDOW {
+            env.panic_with_error(crate::Error::ReleaseWindowTooLong);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::MaxReleaseWindow, &max_window);
+    }
+
+    /// Set the minimum release window to prevent "flash" auto-releases (admin only).
+    ///
+    /// # Arguments
+    /// * `min_window` - Minimum allowed release window in seconds
+    ///
+    /// # Panics
+    /// - If min_window is 0
+    /// - If min_window exceeds the current max_release_window
+    pub fn set_min_release_window(env: Env, min_window: u32) -> Result<(), Error> {
+        let mut config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if min_window == 0 {
+            env.panic_with_error(crate::Error::ReleaseWindowTooShort);
+        }
+
+        let max_window = Self::get_max_release_window(&env);
+        if min_window > max_window {
+            return Err(Error::ReleaseWindowTooLong);
+        }
+
+        let old_min = config.min_release_window;
+        config.min_release_window = min_window;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &config);
+
+        Self::emit_config_updated(
+            &env,
+            "min_release_window",
+            ConfigValue::U32(old_min),
+            ConfigValue::U32(min_window),
+        );
+
+        Ok(())
+    }
+
+    /// Get the current minimum release window
+    pub fn get_min_release_window(env: Env) -> u32 {
+        let config = Self::get_platform_config_internal(&env);
+        config.min_release_window
+    }
+
+    /// Get the configured continuation resource budget (host CPU instructions)
+    /// for a single `continue_batch_escrow` chunk, or the default when unset.
+    pub fn get_continuation_resource_budget(env: Env) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ContinuationResourceBudget)
+            .unwrap_or(resource_model::DEFAULT_CONTINUATION_CPU_BUDGET)
+    }
+
+    /// Set the estimated CPU ceiling (host instruction units) a single
+    /// `continue_batch_escrow` chunk may consume (admin only).
+    ///
+    /// Continuation chunks whose [`resource_model`] estimate exceeds this
+    /// budget are rejected with `Error::ResourceLimitExceeded` **before** any
+    /// escrow is created or funds move, so the job cursor stays put.
+    ///
+    /// # Panics
+    /// - If the caller is not the admin.
+    /// - If `budget` is below `MIN_CONTINUATION_CPU_BUDGET` (prevents an
+    ///   accidental zeroing of the scheduler).
+    pub fn set_continuation_resource_budget(env: Env, budget: u64) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if budget < resource_model::MIN_CONTINUATION_CPU_BUDGET {
+            env.panic_with_error(crate::Error::ResourceLimitExceeded);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ContinuationResourceBudget, &budget);
+    }
+
+    /// Register the deployed OnboardingContract address so the escrow contract
+    /// can make cross-contract reputation / metrics updates (admin only).
+    ///
+    /// (#243) Rejects pointing the onboarding contract at the escrow itself —
+    /// a self-call would create a re-entrancy hazard if the trait surface ever
+    /// expands. Cross-contract calls into the configured address remain
+    /// indirect via `safe_update_reputation` / `safe_update_user_metrics`,
+    /// which trap-isolate failures so a misbehaving onboarding contract
+    /// cannot brick escrow operations. Emits a `config_updated` event with
+    /// the previous and new addresses for audit trails.
+    pub fn set_onboarding_contract(env: Env, contract_address: Address) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if contract_address == env.current_contract_address() {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+
+        let previous = Self::get_onboarding_address(&env);
+
+        // Issue #527 — short-circuit on the no-op call before paying
+        // for the persistent storage write and TTL extension.
+        if let Some(ref current) = previous {
+            if *current == contract_address {
+                return;
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::OnboardingContractAddress, &contract_address);
+        Self::extend_persistent(&env, &DataKey::OnboardingContractAddress);
+
+        let old_value = match previous {
+            Some(addr) => ConfigValue::Address(addr),
+            None => ConfigValue::String(String::from_str(&env, "unset")),
+        };
+        Self::emit_config_updated(
+            &env,
+            "onboarding_contract",
+            old_value,
+            ConfigValue::Address(contract_address),
+        );
+    }
+
+    /// Clear the registered onboarding contract address (admin only) (#243).
+    /// After calling this, `get_onboarding_contract` returns
+    /// `OnboardingContractNotSet` and the safe cross-contract helpers become
+    /// no-ops — escrow flows continue to emit `ReputationUpdateEvent`s for
+    /// off-chain reconstruction (#211).
+    pub fn clear_onboarding_contract(env: Env) -> Result<(), Error> {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let previous = Self::get_onboarding_address(&env).ok_or(Error::OnboardingContractNotSet)?;
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::OnboardingContractAddress);
+
+        Self::emit_config_updated(
+            &env,
+            "onboarding_contract",
+            ConfigValue::Address(previous),
+            ConfigValue::String(String::from_str(&env, "unset")),
+        );
+        Ok(())
+    }
+
+    /// Add a token to the platform whitelist (admin only).
+    ///
+    /// Uses individual key-value pairs for scalability instead of a single Map.
+    /// Each token is stored as DataKey::WhitelistedTokenIndexed(token) -> true.
+    /// Once at least one token is whitelisted, only whitelisted tokens may be
+    /// used in escrow creation. The check is skipped when the whitelist is empty,
+    /// preserving backward compatibility.
+    ///
+    /// # Decimal validation
+    ///
+    /// The token's `decimals()` value must be in the range 0–18 (inclusive).
+    /// Tokens with more than 18 decimal places would overflow the volume
+    /// normalization arithmetic in the onboarding contract and are rejected
+    /// with [`Error::InvalidTokenDecimals`].
+    pub fn whitelist_token(env: Env, token: Address) -> Result<(), Error> {
+        let _guard = ReentryGuardScope::new(&env);
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        // Probe the SEP-41 read interface before persisting an administrator
+        // supplied address. Missing or malformed methods become a stable
+        // contract error instead of an opaque host panic.
+        let token_client = token::Client::new(&env, &token);
+        let decimals = token_client
+            .try_decimals()
+            .map_err(|_| Error::UnsupportedToken)?
+            .map_err(|_| Error::UnsupportedToken)?;
+        if decimals > 18 {
+            return Err(Error::InvalidTokenDecimals);
+        }
+        token_client
+            .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::UnsupportedToken)?
+            .map_err(|_| Error::UnsupportedToken)?;
+
+        Self::migrate_legacy_whitelisted_tokens(&env);
+        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+        let mut count = Self::get_whitelist_count(&env);
+
+        if !env.storage().persistent().has(&token_key) {
+            env.storage().persistent().set(&token_key, &true);
+            Self::extend_persistent(&env, &token_key);
+            count += 1;
+            Self::set_whitelist_count(&env, count);
+        }
+        Ok(())
+    }
+
+    /// Remove a token from the platform whitelist (admin only).
+    ///
+    /// Uses individual key-value pairs for scalability. Removes the specific
+    /// token entry and updates the count. If the resulting whitelist is empty,
+    /// whitelist enforcement is automatically disabled (all tokens permitted again).
+    pub fn remove_token_from_whitelist(env: Env, token: Address) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        Self::migrate_legacy_whitelisted_tokens(&env);
+        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+
+        if env.storage().persistent().has(&token_key) {
+            env.storage().persistent().remove(&token_key);
+            let count = Self::get_whitelist_count(&env);
+            if count > 0 {
+                Self::set_whitelist_count(&env, count - 1);
+            }
+        }
+    }
+
+    /// Check whether a specific token is on the whitelist.
+    ///
+    /// Returns `true` if the token is explicitly whitelisted, OR if the whitelist
+    /// is empty (enforcement not yet active). Uses individual key lookups for
+    /// scalability instead of loading the entire whitelist Map.
+    pub fn is_token_whitelisted(env: Env, token: Address) -> bool {
+        Self::migrate_legacy_whitelisted_tokens(&env);
+        let count = Self::get_whitelist_count(&env);
+        if count == 0 {
+            return true;
+        }
+
+        let token_key = DataKey::WhitelistedTokenIndexed(token);
+        let is_whitelisted = env.storage().persistent().has(&token_key);
+        if is_whitelisted {
+            Self::extend_persistent(&env, &token_key);
+        }
+        is_whitelisted
+    }
+
+    /// Internal helper: panics with TokenNotWhitelisted when enforcement is active
+    /// and the token is not on the whitelist.
+    /// NOTE: whitelist enforcement is intentionally performed only during
+    /// escrow creation (and related locking operations). State transitions
+    /// such as `release`, `refund`, or recurring cycle releases MUST NOT
+    /// re-check the whitelist to avoid locking funds for escrows created
+    /// before whitelist changes. Keep this helper private and call it only
+    /// in creation-time validation paths.
+    fn check_token_whitelisted(env: &Env, token: &Address) {
+        Self::migrate_legacy_whitelisted_tokens(env);
+        let count = Self::get_whitelist_count(env);
+        if count == 0 {
+            return;
+        }
+
+        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+        if !env.storage().persistent().has(&token_key) {
+            env.panic_with_error(crate::Error::TokenNotWhitelisted);
+        }
+    }
+
+    /// Get the count of whitelisted tokens.
+    ///
+    /// Returns 0 if no tokens are whitelisted (enforcement disabled).
+    /// This is more efficient than loading all tokens when only the count is needed.
+    pub fn get_whitelisted_token_count(env: Env) -> u32 {
+        Self::migrate_legacy_whitelisted_tokens(&env);
+        Self::get_whitelist_count(&env)
+    }
+
+    /// Migrate legacy whitelist storage to individual key-value pairs.
+    ///
+    /// This function reads the old WhitelistedTokens Map and converts each entry
+    /// to individual WhitelistedTokenIndexed keys. Should be called once during
+    /// contract upgrade to migrate existing data.
+    pub fn migrate_whitelist_storage(env: Env) -> u32 {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let legacy_key = DataKey::WhitelistedTokens;
+
+        // Check if legacy storage exists
+        if !env.storage().persistent().has(&legacy_key) {
+            return 0; // Nothing to migrate
+        }
+
+        let legacy_whitelist: Map<Address, bool> = env
+            .storage()
+            .persistent()
+            .get(&legacy_key)
+            .unwrap_or(Map::new(&env));
+
+        let mut migrated_count = 0u32;
+
+        // Migrate each token to individual storage
+        let keys = legacy_whitelist.keys();
+        for i in 0..keys.len() {
+            if let Some(token) = keys.get(i) {
+                if let Some(is_whitelisted) = legacy_whitelist.get(token.clone()) {
+                    if is_whitelisted {
+                        let token_key = DataKey::WhitelistedTokenIndexed(token);
+                        env.storage().persistent().set(&token_key, &true);
+                        Self::extend_persistent(&env, &token_key);
+                        migrated_count += 1;
+                    }
+                }
+            }
+        }
+
+        // Update count
+        if migrated_count > 0 {
+            let count_key = DataKey::WhitelistedTokenCount;
+            env.storage().persistent().set(&count_key, &migrated_count);
+            Self::extend_persistent(&env, &count_key);
+        }
+
+        // Remove legacy storage
+        env.storage().persistent().remove(&legacy_key);
+
+        migrated_count
+    }
+
+    /// Migrate legacy ArtisanStakeQueue Vec storage to individual indexed entries.
+    ///
+    /// This function reads the old ArtisanStakeQueue Vec and converts each entry
+    /// to individual ArtisanStakeQueueIndexed keys. Should be called once during
+    /// contract upgrade to migrate existing data.
+    pub fn migrate_artisan_stake_queue(env: Env, artisan: Address) -> u32 {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let legacy_key = DataKey::ArtisanStakeQueue(artisan.clone());
+
+        // Check if legacy storage exists
+        if !env.storage().persistent().has(&legacy_key) {
+            return 0; // Nothing to migrate
+        }
+
+        let legacy_queue: soroban_sdk::Vec<StakeDeposit> = env
+            .storage()
+            .persistent()
+            .get(&legacy_key)
+            .unwrap_or(soroban_sdk::Vec::new(&env));
+
+        let queue_len = legacy_queue.len();
+        if queue_len == 0 {
+            // Remove empty legacy queue
+            env.storage().persistent().remove(&legacy_key);
+            return 0;
+        }
+
+        // Migrate each deposit to individual indexed storage
+        for i in 0..queue_len {
+            if let Some(deposit) = legacy_queue.get(i) {
+                let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
+                env.storage().persistent().set(&deposit_key, &deposit);
+                Self::extend_persistent(&env, &deposit_key);
+            }
+        }
+
+        // Set count
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        env.storage().persistent().set(&count_key, &queue_len);
+        Self::extend_persistent(&env, &count_key);
+
+        // Remove legacy storage
+        env.storage().persistent().remove(&legacy_key);
+
+        queue_len
+    }
+
+    /// Migrate legacy artisan stake records from split `ArtisanStake` (i128) +
+    /// `ArtisanStakeToken` (Address) storage to the unified `ArtisanStakeData`
+    /// struct (#1034).
+    ///
+    /// This function is idempotent: it returns 0 if the record is already in
+    /// the new format. Should be called lazily during stake reads or writes
+    /// so existing artisan balances are preserved across contract upgrades.
+    pub fn migrate_legacy_artisan_stake(env: Env, artisan: Address) -> u32 {
+        let stake_key = DataKey::ArtisanStake(artisan.clone());
+        let token_key = DataKey::ArtisanStakeToken(artisan.clone());
+
+        if !env.storage().persistent().has(&token_key) {
+            return 0;
+        }
+
+        let old_amount: Option<i128> = env.storage().persistent().get(&stake_key);
+        let old_token: Option<Address> = env.storage().persistent().get(&token_key);
+
+        if let (Some(amount), Some(token)) = (old_amount, old_token) {
+            let new_stake = ArtisanStakeData { amount, token };
+            env.storage().persistent().set(&stake_key, &new_stake);
+            Self::extend_persistent(&env, &stake_key);
+            env.storage().persistent().remove(&token_key);
+            return 1;
+        }
+
+        0
+    }
+
+    /// Get the count of stake deposits in an artisan's queue.
+    ///
+    /// Returns 0 if no deposits exist. This is more efficient than loading
+    /// all deposits when only the count is needed.
+    pub fn get_artisan_stake_queue_count(env: Env, artisan: Address) -> u32 {
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        env.storage().persistent().get(&count_key).unwrap_or(0)
+    }
+
+    /// Get paginated stake deposits for an artisan (admin/debug helper).
+    ///
+    /// Returns up to `limit` deposits starting from `offset`. Useful for
+    /// inspecting queue state without loading the entire queue.
+    pub fn get_artisan_stake_deposits(
+        env: Env,
+        artisan: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<soroban_sdk::Vec<StakeDeposit>, Error> {
+        let limit = pagination_validation::validate_limit(
+            limit,
+            pagination_validation::MAX_ADMIN_PAGE_SIZE,
+        )?;
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        // Return empty if offset is past the end
+        if offset >= total_count {
+            return Ok(soroban_sdk::Vec::new(&env));
+        }
+
+        let mut deposits = soroban_sdk::Vec::new(&env);
+        let end = core::cmp::min(offset + limit, total_count);
+
+        for i in offset..end {
+            let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
+            if let Some(deposit) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, StakeDeposit>(&deposit_key)
+            {
+                deposits.push_back(deposit);
+            }
+        }
+
+        Ok(deposits)
+    }
+
+    fn assert_dispute_actor_permissions(
+        env: &Env,
+        config: &PlatformConfig,
+        escrow: &Escrow,
+        caller: &Address,
+        transition: DisputeTransition,
+    ) -> Result<(), Error> {
+        if !Self::is_privileged_resolver(config, caller) {
+            return Err(Error::Unauthorized);
+        }
+        // The admin manages the blacklist and cannot be locked out of resolution.
+        if *caller != config.admin && Self::arbitrator_on_blacklist(env, caller) {
+            return Err(Error::ArbitratorBlacklisted);
+        }
+        Ok(())
+    }
+
+    fn is_escrow_party(escrow: &Escrow, caller: &Address) -> bool {
+        *caller == escrow.buyer || *caller == escrow.seller
+    }
+
+    fn assert_open_for_settlement(env: &Env, escrow: &Escrow, order_id: u32) -> Result<(), Error> {
+        Self::assert_no_prior_settlement(env, order_id)?;
+        Self::assert_disputed_for_policy(escrow)
+    }
+
+    fn dispute_clock(escrow: &Escrow) -> Result<u64, Error> {
+        escrow.dispute_initiated_at.ok_or(Error::InvalidEscrowState)
+    }
+
+    fn assert_no_prior_settlement(env: &Env, order_id: u32) -> Result<(), Error> {
+        if Self::has_settlement_receipt(env, order_id) {
+            return Err(Error::SettlementAlreadyFinalized);
+        }
+        Ok(())
+    }
+
+    fn assert_disputed_for_policy(escrow: &Escrow) -> Result<(), Error> {
+        if escrow.status != EscrowStatus::Disputed {
+            return Err(Error::InvalidEscrowState);
+        }
+        Ok(())
+    }
+
+    /// Shared solvency check: gross refund plus seller remainder must equal the
+    /// escrow pot, and fee application on the seller remainder must not go negative.
+    fn validate_partial_refund_solvency(
+        env: &Env,
+        escrow: &Escrow,
+        refund_gross: i128,
+    ) -> Result<(i128, FeeAllocation), Error> {
+        if refund_gross <= 0 || refund_gross > escrow.amount {
+            return Err(Error::InvalidRefundAmount);
+        }
+        let seller_gross = escrow
+            .amount
+            .checked_sub(refund_gross)
+            .ok_or(Error::InvalidRefundAmount)?;
+        let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
+        let allocation = Self::compute_fee_allocation(
+            env,
+            escrow.amount,
+            fee_bps,
+            SettlementKind::PartialRefund(refund_gross, seller_gross),
+        );
+        let sum = allocation
+            .platform_fee
+            .checked_add(allocation.seller_amount)
+            .and_then(|s| s.checked_add(allocation.buyer_amount));
+        if sum != Some(escrow.amount)
+            || allocation.platform_fee < 0
+            || allocation.seller_amount < 0
+            || allocation.buyer_amount < 0
+        {
+            return Err(Error::InvalidRefundAmount);
+        }
+        Ok((seller_gross, allocation))
+    }
+
+    fn assert_arbitrator_resolution_window(
+        env: &Env,
+        escrow: &Escrow,
+        config: &PlatformConfig,
+    ) -> Result<(), Error> {
+        let initiated_at = Self::dispute_clock(escrow)?;
+        let now = env.ledger().timestamp();
+        let challenge = config.evidence_challenge_window as u64;
+        // Time policy: challenge window is active while now < initiated_at + challenge_window
+        if time_policy::is_window_active(now, initiated_at, challenge) {
+            return Err(Error::ChallengeWindowActive);
+        }
+        // Time policy: arbitrator deadline exceeded when now >= initiated_at + max_dispute_duration
+        if time_policy::is_window_elapsed(now, initiated_at, config.max_dispute_duration as u64) {
+            return Err(Error::ArbitratorDeadlineExceeded);
+        }
+        Ok(())
+    }
+
+    fn assert_expired_dispute_window(
+        env: &Env,
+        escrow: &Escrow,
+        config: &PlatformConfig,
+    ) -> Result<(), Error> {
+        let initiated_at = Self::dispute_clock(escrow)?;
+        let now = env.ledger().timestamp();
+        // Time policy: dispute is expired when now >= initiated_at + max_dispute_duration
+        if time_policy::is_window_active(now, initiated_at, config.max_dispute_duration as u64) {
+            return Err(Error::DisputeExpired);
+        }
+        Ok(())
+    }
+
+    /// Atomically claim a disputed escrow for a single settlement path.
+    fn claim_disputed_settlement(env: &Env, order_id: u32) -> Result<Escrow, Error> {
+        Self::assert_no_prior_settlement(env, order_id)?;
+        let mut escrow = Self::get_stored_escrow(env, order_id);
+        Self::assert_disputed_for_policy(&escrow)?;
+        escrow.status = EscrowStatus::SettlementPending;
+        let key = (ESCROW, order_id);
+        env.storage().persistent().set(&key, &escrow);
+        Self::extend_persistent(env, &key);
+        Ok(escrow)
+    }
+
+    fn write_settlement_receipt(
+        env: &Env,
+        order_id: u32,
+        path: SettlementPath,
+        proposal_nonce: u64,
+    ) {
+        let key = Self::settlement_receipt_key(order_id);
+        env.storage().persistent().set(
+            &key,
+            &SettlementReceipt {
+                order_id,
+                path,
+                executed_at: env.ledger().timestamp(),
+                proposal_nonce,
+            },
+        );
+        Self::extend_persistent(env, &key);
+    }
+
+    fn clear_partial_refund_proposal(env: &Env, order_id: u32) {
+        env.storage()
+            .persistent()
+            .remove(&Self::proposal_key(order_id));
+    }
+
+    fn commit_resolved_escrow(
+        env: &Env,
+        order_id: u32,
+        mut escrow: Escrow,
+        path: SettlementPath,
+        proposal_nonce: u64,
+    ) -> Escrow {
+        escrow.status = EscrowStatus::Resolved;
+        env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::write_settlement_receipt(env, order_id, path, proposal_nonce);
+        Self::clear_partial_refund_proposal(env, order_id);
+        Self::update_active_dispute_count(env, -1);
+        Self::update_active_obligations(env, &escrow.buyer, -1);
+        Self::update_active_obligations(env, &escrow.seller, -1);
+        Self::safe_update_active_contracts(env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(env, escrow.seller.clone(), -1);
+        Self::update_total_locked(env, &escrow.token, -escrow.amount);
+        escrow
+    }
+
+    fn apply_fee_allocation_transfers(
+        env: &Env,
+        escrow: &Escrow,
+        allocation: &FeeAllocation,
+        platform_wallet: &Address,
+        buyer_audit: &str,
+        seller_audit: &str,
+    ) {
+        if allocation.buyer_amount > 0 {
+            Self::transfer_tokens_and_record_audit(
+                env,
+                &escrow.token,
+                &env.current_contract_address(),
+                &escrow.buyer,
+                allocation.buyer_amount,
+                &escrow.buyer,
+                Symbol::new(env, buyer_audit),
+                allocation.buyer_amount,
+            );
+        }
+        if allocation.platform_fee > 0 {
+            Self::transfer_platform_fee(
+                env,
+                &escrow.token,
+                platform_wallet,
+                allocation.platform_fee,
+            );
+        }
+        if allocation.seller_amount > 0 {
+            Self::transfer_tokens_and_record_audit(
+                env,
+                &escrow.token,
+                &env.current_contract_address(),
+                &escrow.seller,
+                allocation.seller_amount,
+                &escrow.seller,
+                Symbol::new(env, seller_audit),
+                allocation.seller_amount,
+            );
+        }
+    }
+
+    /// Maintain the dual fee-token bookkeeping (#239).
+    ///
+    /// Historically fee-receiving tokens were tracked only in the legacy
+    /// `FeeTokenIndex` Vec. That single-key shape made future multi-token
+    /// fee features (custom bps per token, disabling tokens, accumulator
+    /// reconciliation) impossible without a contract upgrade. We now also
+    /// write a per-token `FeeTokenConfig(token)` slot, which is the storage
+    /// shape new code should read going forward. The legacy Vec is kept as
+    /// the canonical enumeration source for backward compatibility â€” a
+    /// `migrate_fee_token_configs` admin call backfills `FeeTokenConfig` for
+    /// pre-existing tokens.
+    fn add_fee_token_to_index(env: &Env, token: &Address) {
+        let key = DataKey::FeeTokenIndex;
+        let mut tracked_tokens: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+
+        let mut already_tracked = false;
+        for index in 0..tracked_tokens.len() {
+            if tracked_tokens.get(index) == Some(token.clone()) {
+                already_tracked = true;
+                break;
+            }
+        }
+
+        if !already_tracked {
+            tracked_tokens.push_back(token.clone());
+            env.storage().persistent().set(&key, &tracked_tokens);
+        }
+        Self::extend_persistent(env, &key);
+
+        Self::ensure_fee_token_config(env, token);
+    }
+
+    /// Seed a default `FeeTokenInfo` slot the first time a token is seen.
+    /// Idempotent â€” once a slot exists, subsequent calls leave it untouched
+    /// so admin overrides survive future fee deposits (#239).
+    fn ensure_fee_token_config(env: &Env, token: &Address) {
+        let cfg_key = DataKey::FeeTokenConfig(token.clone());
+        if !env.storage().persistent().has(&cfg_key) {
+            let info = FeeTokenInfo {
+                active: true,
+                custom_fee_bps: None,
+                accumulated: 0,
+            };
+            env.storage().persistent().set(&cfg_key, &info);
+        }
+        Self::extend_persistent(env, &cfg_key);
+    }
+
+    /// Bump the per-token accumulator inside `FeeTokenConfig` (#239). Kept
+    /// internal so external callers cannot tamper with the running total.
+    fn bump_fee_token_accumulator(env: &Env, token: &Address, amount: i128) {
+        if amount <= 0 {
+            return;
+        }
+        Self::ensure_fee_token_config(env, token);
+        let cfg_key = DataKey::FeeTokenConfig(token.clone());
+        let mut info: FeeTokenInfo =
+            env.storage()
+                .persistent()
+                .get(&cfg_key)
+                .unwrap_or(FeeTokenInfo {
+                    active: true,
+                    custom_fee_bps: None,
+                    accumulated: 0,
+                });
+        info.accumulated = info.accumulated.saturating_add(amount);
+        env.storage().persistent().set(&cfg_key, &info);
+        Self::extend_persistent(env, &cfg_key);
+    }
+
+    /// Returns the per-token fee configuration for `token`, or `None` if the
+    /// token has never received platform fees (#239).
+    pub fn get_fee_token_config(env: Env, token: Address) -> Option<FeeTokenInfo> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FeeTokenConfig(token))
+    }
+
+    /// Returns every token that has ever received platform fees (#239).
+    /// Reads the legacy `FeeTokenIndex` Vec; new callers should pair this
+    /// enumeration with `get_fee_token_config` for richer per-token data.
+    pub fn get_fee_tokens(env: Env) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FeeTokenIndex)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Update mutable fields of a `FeeTokenInfo` slot (admin only, #239).
+    ///
+    /// `active` and `custom_fee_bps` are admin-controlled. `accumulated` is
+    /// IGNORED if passed in â€” the running total is owned by the contract and
+    /// only `record_total_fees` may move it. This split prevents an admin
+    /// from rewriting historical fee accounting via the config setter.
+    ///
+    /// `custom_fee_bps`, when set, must satisfy `<= MAX_PLATFORM_FEE_BPS`.
+    /// The value is currently informational; `calculate_fee` does not yet
+    /// consult it (storage-only change to keep #239 scope tight).
+    pub fn set_fee_token_config(
+        env: Env,
+        token: Address,
+        active: bool,
+        custom_fee_bps: Option<u32>,
+    ) -> Result<(), Error> {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if let Some(bps) = custom_fee_bps {
+            if bps > MAX_PLATFORM_FEE_BPS {
+                return Err(Error::InvalidFee);
+            }
+        }
+
+        let cfg_key = DataKey::FeeTokenConfig(token.clone());
+        let existing: FeeTokenInfo =
+            env.storage()
+                .persistent()
+                .get(&cfg_key)
+                .unwrap_or(FeeTokenInfo {
+                    active: true,
+                    custom_fee_bps: None,
+                    accumulated: 0,
+                });
+
+        let info = FeeTokenInfo {
+            active,
+            custom_fee_bps,
+            accumulated: existing.accumulated,
+        };
+        env.storage().persistent().set(&cfg_key, &info);
+        Self::extend_persistent(&env, &cfg_key);
+        Ok(())
+    }
+
+    /// Backfill `FeeTokenConfig(token)` slots for every token currently
+    /// present in the legacy `FeeTokenIndex` Vec (admin only, #239).
+    ///
+    /// Idempotent â€” already-migrated tokens are skipped, so it is safe to
+    /// call from a deploy script or an automated migration job. Returns the
+    /// number of new config slots written so callers can verify progress.
+    /// Pairs with `set_fee_token_config` for downstream tuning.
+    pub fn migrate_fee_token_configs(env: Env) -> Result<u32, Error> {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let tokens: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeTokenIndex)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let scanned_tokens = tokens.len();
+        let mut migrated: u32 = 0;
+        let mut skipped_existing: u32 = 0;
+        for index in 0..tokens.len() {
+            if let Some(token) = tokens.get(index) {
+                let cfg_key = DataKey::FeeTokenConfig(token.clone());
+                if !env.storage().persistent().has(&cfg_key) {
+                    let info = FeeTokenInfo {
+                        active: true,
+                        custom_fee_bps: None,
+                        accumulated: env
+                            .storage()
+                            .persistent()
+                            .get(&DataKey::TotalFees(token))
+                            .unwrap_or(0i128),
+                    };
+                    env.storage().persistent().set(&cfg_key, &info);
+                    Self::extend_persistent(&env, &cfg_key);
+                    migrated += 1;
+                } else {
+                    Self::extend_persistent(&env, &cfg_key);
+                    skipped_existing += 1;
+                }
+            }
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_cfg_migrated"),),
+            FeeTokenConfigsMigratedEvent {
+                scanned_tokens,
+                migrated_configs: migrated,
+                skipped_existing,
+            },
+        );
+
+        Ok(migrated)
+    }
+
+    fn record_total_fees(env: &Env, token: &Address, fee_amount: i128) {
+        if fee_amount <= 0 {
+            return;
+        }
+
+        let key = DataKey::TotalFees(token.clone());
+        let current_total: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&key, &(current_total + fee_amount));
+        Self::extend_persistent(env, &key);
+        Self::add_fee_token_to_index(env, token);
+        // Mirror the running total into the per-token fee config so future
+        // multi-token logic has a single source of truth (#239).
+        Self::bump_fee_token_accumulator(env, token, fee_amount);
+    }
+
+    fn append_fund_audit_record(
+        env: &Env,
+        actor: &Address,
+        amount: i128,
+        reason: Symbol,
+        balance_impact: i128,
+    ) {
+        if amount <= 0 {
+            return;
+        }
+
+        let count_key = DataKey::FundAuditCount(actor.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let entry_key = DataKey::FundAuditIndexed(actor.clone(), count);
+        let entry = FundMovementAuditEntry {
+            actor: actor.clone(),
+            amount,
+            reason,
+            timestamp: env.ledger().timestamp(),
+            balance_impact,
+        };
+
+        env.storage().persistent().set(&entry_key, &entry);
+        Self::extend_persistent(env, &entry_key);
+        env.storage().persistent().set(&count_key, &(count + 1));
+        Self::extend_persistent(env, &count_key);
+    }
+
+    fn transfer_tokens_and_record_audit(
+        env: &Env,
+        token: &Address,
+        from: &Address,
+        to: &Address,
+        amount: i128,
+        actor: &Address,
+        reason: Symbol,
+        balance_impact: i128,
+    ) {
+        if amount <= 0 {
+            return;
+        }
+
+        // Every transfer must be reached through a guarded public operation.
+        // This assertion makes omissions fail closed as new flows are added.
+        if !env.storage().temporary().has(&DataKey::ReentryGuard) {
+            env.panic_with_error(crate::Error::ReentryDetected);
+        }
+
+        // Commit effects before interaction. A failed token call rolls back the
+        // complete Soroban invocation, including this audit record.
+        Self::append_fund_audit_record(env, actor, amount, reason, balance_impact);
+        let token_client = token::Client::new(env, token);
+        token_client.transfer(from, to, &amount);
+    }
+
+    fn transfer_platform_fee(
+        env: &Env,
+        token: &Address,
+        platform_wallet: &Address,
+        fee_amount: i128,
+    ) {
+        if fee_amount <= 0 {
+            return;
+        }
+
+        Self::transfer_tokens_and_record_audit(
+            env,
+            token,
+            &env.current_contract_address(),
+            platform_wallet,
+            fee_amount,
+            platform_wallet,
+            Symbol::new(env, "platform_fee"),
+            fee_amount,
+        );
+        Self::record_total_fees(env, token, fee_amount);
+    }
+
+    #[inline(always)]
+    fn get_legacy_total_fees(env: &Env) -> i128 {
+        env.storage().persistent().get(&TOTAL_FEES).unwrap_or(0)
+    }
+
+    fn get_all_tracked_total_fees(env: &Env) -> i128 {
+        let key = DataKey::FeeTokenIndex;
+        let tracked_tokens: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+
+        if tracked_tokens.is_empty() {
+            return Self::get_legacy_total_fees(env);
+        }
+
+        let mut total_fees = 0i128;
+        for index in 0..tracked_tokens.len() {
+            if let Some(token) = tracked_tokens.get(index) {
+                let token_key = DataKey::TotalFees(token);
+                let token_total: i128 = env.storage().persistent().get(&token_key).unwrap_or(0);
+                total_fees += token_total;
+            }
+        }
+
+        total_fees
+    }
+
+    /// Release funds to seller with platform fee deduction
+    ///
+    /// # Arguments
+    /// * `order_id` - Order identifier
+    pub fn release_funds(env: Env, order_id: u32) {
+        let _guard = ReentryGuardScope::new(&env);
+        let escrow_for_auth = Self::get_stored_escrow(&env, order_id);
+
+        // Only buyer can release funds
+        escrow_for_auth.buyer.require_auth();
+        let operation_id = Self::onboarding_operation_id(&env, b"release_funds:", order_id);
+        Self::authorize_onboarding_state(
+            &env,
+            &escrow_for_auth.buyer,
+            operation_id,
+            UserRole::Buyer,
+        );
+
+        let mut escrow =
+            Self::claim_active_escrow_transition(&env, order_id, EscrowStatus::ReleasePending)
+                .unwrap_or_else(|e| env.panic_with_error(e));
+
+        // Get platform config
+        let config = Self::get_platform_config_internal(&env);
+
+        // Deterministic fee allocation via the central FeePolicy engine.
+        let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
+        let allocation = Self::compute_fee_allocation(
+            &env,
+            escrow.amount,
+            fee_bps,
+            SettlementKind::ReleaseFunds,
+        );
+
+        // Update status
+        escrow.status = EscrowStatus::Released;
+        env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+
+        // Decrement active counts
+        Self::update_active_obligations(&env, &escrow.buyer, -1);
+        Self::update_active_obligations(&env, &escrow.seller, -1);
+
+        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
+
+        // Reserve accounting is part of the effects phase.
+        Self::update_total_locked(&env, &escrow.token, -escrow.amount);
+
+        // Transfer platform fee to platform wallet
+        if allocation.platform_fee > 0 {
+            Self::transfer_platform_fee(
+                &env,
+                &escrow.token,
+                &config.platform_wallet,
+                allocation.platform_fee,
+            );
+        }
+
+        // Transfer net funds to seller and record audit
+        Self::transfer_tokens_and_record_audit(
+            &env,
+            &escrow.token,
+            &env.current_contract_address(),
+            &escrow.seller,
+            allocation.seller_amount,
+            &escrow.seller,
+            Symbol::new(&env, "escrow_released"),
+            allocation.seller_amount,
+        );
+
+        Self::emit_escrow_created(
+            &env,
+            EscrowEvent {
+                schema_version: 1,
+                escrow_id: order_id as u64,
+                action: EscrowAction::Released,
+                buyer: escrow.buyer.clone(),
+                seller: escrow.seller.clone(),
+                amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        // Emit reputation update events â€” decoupled from onboarding contract (#211)
+        let ts = env.ledger().timestamp();
+        Self::emit_reputation_update(
+            &env,
+            ReputationUpdateEvent {
+                address: escrow.seller.clone(),
+                successful_delta: 1,
+                disputed_delta: 0,
+                metrics_sales_delta: 1,
+                metrics_amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: ts,
+            },
+        );
+        Self::emit_reputation_update(
+            &env,
+            ReputationUpdateEvent {
+                address: escrow.buyer.clone(),
+                successful_delta: 1,
+                disputed_delta: 0,
+                metrics_sales_delta: 0,
+                metrics_amount: 0,
+                token: escrow.token.clone(),
+                timestamp: ts,
+            },
+        );
+    }
+
+    /// Auto-release funds after release window (seller can call)
+    ///
+    /// # Arguments
+    /// * `order_id` - Order identifier
+    pub fn auto_release(env: Env, order_id: u32) {
+        let _guard = ReentryGuardScope::new(&env);
+        let escrow_for_window = Self::get_stored_escrow(&env, order_id);
+
+        if !(escrow_for_window.status == EscrowStatus::Active) {
+            env.panic_with_error(crate::Error::InvalidEscrowState);
+        }
+
+        let current_time = env.ledger().timestamp();
+        // Time policy: window is elapsed when now >= created_at + release_window
+        if time_policy::is_window_active(current_time, escrow_for_window.created_at as u64, escrow_for_window.release_window as u64) {
+            env.panic_with_error(crate::Error::ReleaseWindowNotElapsed);
+        }
+
+        let operation_id = Self::onboarding_operation_id(&env, b"auto_release:", order_id);
+        Self::authorize_onboarding_state(&env, &escrow_for_window.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &escrow_for_window.seller, operation_id, UserRole::Artisan);
+
+        let mut escrow =
+            Self::claim_active_escrow_transition(&env, order_id, EscrowStatus::ReleasePending)
+                .unwrap_or_else(|e| env.panic_with_error(e));
+
+        // Get platform config
+        let config = Self::get_platform_config_internal(&env);
+
+        // Deterministic fee allocation via the central FeePolicy engine.
+        let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
+        let allocation = Self::compute_fee_allocation(
+            &env,
+            escrow.amount,
+            fee_bps,
+            SettlementKind::ReleaseFunds,
+        );
+
+        // Update status
+        escrow.status = EscrowStatus::Released;
+        env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+
+        // Decrement active counts
+        Self::update_active_obligations(&env, &escrow.buyer, -1);
+        Self::update_active_obligations(&env, &escrow.seller, -1);
+
+        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
+
+        Self::update_total_locked(&env, &escrow.token, -escrow.amount);
+
+        // Transfer platform fee to platform wallet
+        if allocation.platform_fee > 0 {
+            Self::transfer_platform_fee(
+                &env,
+                &escrow.token,
+                &config.platform_wallet,
+                allocation.platform_fee,
+            );
+        }
+
+        // Transfer net funds to seller and record audit
+        Self::transfer_tokens_and_record_audit(
+            &env,
+            &escrow.token,
+            &env.current_contract_address(),
+            &escrow.seller,
+            allocation.seller_amount,
+            &escrow.seller,
+            Symbol::new(&env, "escrow_released"),
+            allocation.seller_amount,
+        );
+
+        Self::emit_escrow_created(
+            &env,
+            EscrowEvent {
+                schema_version: 1,
+                escrow_id: order_id as u64,
+                action: EscrowAction::Released,
+                buyer: escrow.buyer.clone(),
+                seller: escrow.seller.clone(),
+                amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        // Emit reputation update events â€” decoupled from onboarding contract (#211)
+        let ts = env.ledger().timestamp();
+        Self::emit_reputation_update(
+            &env,
+            ReputationUpdateEvent {
+                address: escrow.seller.clone(),
+                successful_delta: 1,
+                disputed_delta: 0,
+                metrics_sales_delta: 1,
+                metrics_amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: ts,
+            },
+        );
+        Self::emit_reputation_update(
+            &env,
+            ReputationUpdateEvent {
+                address: escrow.buyer.clone(),
+                successful_delta: 1,
+                disputed_delta: 0,
+                metrics_sales_delta: 0,
+                metrics_amount: 0,
+                token: escrow.token.clone(),
+                timestamp: ts,
+            },
+        );
+    }
+
+    /// Extends the existing release window by `additional_seconds`.
+    ///
+    /// The resulting cumulative release window must never exceed
+    /// `MAX_TOTAL_RELEASE_WINDOW`.
+    pub fn extend_release_window(env: Env, order_id: u32, additional_seconds: u32) {
+        let _guard = ReentryGuardScope::new(&env);
+        let escrow_key = (ESCROW, order_id);
+        let escrow_opt = env.storage().persistent().get(&escrow_key);
+
+        if escrow_opt.is_none() {
+            env.panic_with_error(crate::Error::EscrowNotFound);
+        }
+
+        Self::extend_persistent(&env, &escrow_key);
+        let mut escrow: Escrow = escrow_opt.unwrap();
+
+        // Only buyer can extend release window
+        escrow.buyer.require_auth();
+
+        if !(escrow.status == EscrowStatus::Active) {
+            env.panic_with_error(crate::Error::InvalidEscrowState);
+        }
+
+        let new_window = escrow.release_window.saturating_add(additional_seconds);
+
+        if new_window > MAX_TOTAL_RELEASE_WINDOW {
+            env.panic_with_error(crate::Error::ReleaseWindowTooLong);
+        }
+
+        escrow.release_window = new_window;
+        env.storage().persistent().set(&escrow_key, &escrow);
+
+        Self::emit_escrow_created(
+            &env,
+            EscrowEvent {
+                schema_version: 1,
+                escrow_id: order_id as u64,
+                action: EscrowAction::Extended,
+                buyer: escrow.buyer.clone(),
+                seller: escrow.seller.clone(),
+                amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// Reject obviously invalid WASM hashes before they touch storage.
+    ///
+    /// The Soroban host validates that the hash points to an uploaded WASM at
+    /// `update_current_contract_wasm` time, but only at execution. Catching
+    /// the all-zero sentinel here avoids the worst footgun (an admin
+    /// accidentally proposing the default `BytesN<32>::from_array(_, [0; 32])`)
+    /// and gives a meaningful error code instead of a host trap.
+    fn validate_upgrade_hash(env: &Env, hash: &BytesN<32>) -> Result<(), Error> {
+        let zero = BytesN::<32>::from_array(env, &[0u8; 32]);
+        if hash == &zero {
+            return Err(Error::InvalidUpgradeHash);
+        }
+        Ok(())
+    }
+
+    fn emit_upgrade_event(
+        env: &Env,
+        action: Symbol,
+        wasm_hash: BytesN<32>,
+        admin: Address,
+        upgrade_at: u64,
+    ) {
+        env.events().publish(
+            (Symbol::new(env, "wasm_upgrade"), action.clone()),
+            UpgradeProposalEvent {
+                action,
+                wasm_hash,
+                admin,
+                timestamp: env.ledger().timestamp(),
+                upgrade_at,
+            },
+        );
+    }
+
+    /// Propose a new WASM code for the contract (multi-sig).
+    ///
+    /// Each authorized upgrade signer calls this function with the same
+    /// `new_wasm_hash`. Approvals are accumulated until the configured
+    /// `UpgradeThreshold` is reached, at which point the proposal is committed
+    /// and the cooldown clock starts. A signer cannot approve the same hash
+    /// twice. When no explicit signers list is configured the admin acts as the
+    /// sole signer (backward-compatible default, threshold=1).
+    ///
+    /// Only one proposal may be pending at a time. Cancel with
+    /// `cancel_upgrade_wasm` before starting a new one.
+    pub fn propose_upgrade_wasm(
+        env: Env,
+        signer: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        signer.require_auth();
+
+        Self::validate_upgrade_hash(&env, &new_wasm_hash)?;
+
+        // Issue #618: Prevent cancel-and-repropose from resetting the review
+        // window. If a proposal was recently cancelled, the proposer must wait
+        // CANCEL_REPROPOSE_COOLDOWN seconds before submitting a new one.
+        if let Some(cancelled_at) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, u64>(&DataKey::LastUpgradeCancelledAt)
+        {
+            let now = env.ledger().timestamp();
+            // Time policy: cooldown is active while now < cancelled_at + CANCEL_REPROPOSE_COOLDOWN
+            if time_policy::is_window_active(now, cancelled_at, CANCEL_REPROPOSE_COOLDOWN) {
+                return Err(Error::UpgradeCooldownActive);
+            }
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::WasmUpgradeProposal)
+        {
+            return Err(Error::UpgradeProposalExists);
+        }
+
+        // -- Approval state (singleton key, nonce inside struct) ----------------
+        // Approval state is stored at a fixed slot UpgradeApprovalState(0).
+        // The `nonce` field inside the struct is incremented on every
+        // cancel_upgrade_wasm call, so a re-proposal after cancellation
+        // starts a fresh round with a different nonce, making the old
+        // approvals stale and detectable.
+        let state_key = DataKey::UpgradeApprovalState(0);
+
+        // Read the current nonce from any pre-existing state, or default to 0.
+        let current_nonce: u32 = env
+            .storage()
+            .persistent()
+            .get::<DataKey, UpgradeApprovalState>(&state_key)
+            .map(|s| s.nonce)
+            .unwrap_or(0u32);
+
+        // Helper closure: snapshot current live signers + threshold into a fresh state.
+        let fresh_state = |nonce: u32| -> UpgradeApprovalState {
+            let snapshotted_signers: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::UpgradeSigners)
+                .unwrap_or_else(|| {
+                    let mut v = Vec::new(&env);
+                    if let Ok(admin) = Self::get_admin(&env) {
+                        v.push_back(admin);
+                    }
+                    v
+                });
+            let snapshotted_threshold: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::UpgradeThreshold)
+                .unwrap_or(1u32);
+            UpgradeApprovalState {
+                nonce,
+                signers: snapshotted_signers,
+                threshold: snapshotted_threshold,
+                approvals: Vec::new(&env),
+            }
+        };
+
+        let mut state: UpgradeApprovalState = env
+            .storage()
+            .persistent()
+            .get(&state_key)
+            // Reuse stored state only when:
+            //  (a) it has the same nonce (was not left from a cancelled round), AND
+            //  (b) the round has already started (signers list is non-empty).
+            // A state with an empty signers list is a cancel-sentinel written by
+            // cancel_upgrade_wasm to carry the bumped nonce forward; it must not
+            // be treated as a live round.
+            .filter(|s: &UpgradeApprovalState| s.nonce == current_nonce && !s.signers.is_empty())
+            .unwrap_or_else(|| fresh_state(current_nonce));
+
+        // Validate against the *snapshotted* signer set -- live storage is
+        // intentionally not consulted here.
+        if !state.signers.iter().any(|s| s == signer) {
+            return Err(Error::NotAnUpgradeSigner);
+        }
+
+        if state.approvals.iter().any(|a| a == signer) {
+            return Err(Error::AlreadyApproved);
+        }
+        state.approvals.push_back(signer.clone());
+
+        // All entries in state.approvals were validated against state.signers
+        // when they were added, so a simple length check is sufficient.
+        if state.approvals.len() < state.threshold {
+            // Threshold not yet met -- persist updated state and return.
+            env.storage().persistent().set(&state_key, &state);
+            Self::extend_persistent(&env, &state_key);
+            return Ok(());
+        }
+
+        // Threshold reached -- commit the proposal and clean up approval state.
+        // Remove approval state for this nonce; it is no longer needed.
+        env.storage().persistent().remove(&state_key);
+
+        let config = Self::get_platform_config_internal(&env);
+        let proposed_at = env.ledger().timestamp();
+        let upgrade_at = proposed_at + config.wasm_upgrade_cooldown as u64;
+        let proposal = WasmUpgradeProposal {
+            wasm_hash: new_wasm_hash.clone(),
+            upgrade_at,
+            proposed_by: signer.clone(),
+            proposed_at,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::WasmUpgradeProposal, &proposal);
+        Self::extend_persistent(&env, &DataKey::WasmUpgradeProposal);
+
+        Self::emit_upgrade_event(&env, UPGRADE_PROPOSED, new_wasm_hash, signer, upgrade_at);
+
+        Ok(())
+    }
+
+    /// Set the number of distinct signer approvals required to commit a WASM
+    /// upgrade proposal. Must be >= 1. Admin only.
+    pub fn set_upgrade_threshold(env: Env, threshold: u32) -> Result<(), Error> {
+        if threshold == 0 {
+            return Err(Error::InvalidFee);
+        }
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::UpgradeThreshold, &threshold);
+        Ok(())
+    }
+
+    /// Replace the list of addresses authorized to co-sign WASM upgrade
+    /// proposals. An empty list resets to the admin-only default. Admin only.
+    pub fn set_upgrade_signers(env: Env, signers: Vec<Address>) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        if signers.is_empty() {
+            env.storage().persistent().remove(&DataKey::UpgradeSigners);
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::UpgradeSigners, &signers);
+            Self::extend_persistent(&env, &DataKey::UpgradeSigners);
+        }
+        Ok(())
+    }
+
+    /// Returns the configured upgrade threshold (defaults to 1).
+    pub fn get_upgrade_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::UpgradeThreshold)
+            .unwrap_or(1u32)
+    }
+
+    /// Returns the current proposal round nonce.
+    ///
+    /// The nonce is incremented on every `cancel_upgrade_wasm` call.  Callers
+    /// can use it to look up the active `UpgradeApprovalState` via
+    /// `get_upgrade_approvals`.
+    pub fn get_upgrade_proposal_nonce(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get::<DataKey, UpgradeApprovalState>(&DataKey::UpgradeApprovalState(0))
+            .map(|s| s.nonce)
+            .unwrap_or(0u32)
+    }
+
+    /// Returns the list of pending approvals for the given proposal nonce.
+    ///
+    /// Pass the value returned by `get_upgrade_proposal_nonce` to inspect the
+    /// current round.  Returns an empty vec if no approvals exist for that
+    /// nonce (i.e. the round has not started or was already committed/cancelled).
+    pub fn get_upgrade_approvals(env: Env, nonce: u32) -> Vec<Address> {
+        // Returns approvals only if the stored state matches the requested nonce.
+        env.storage()
+            .persistent()
+            .get::<DataKey, UpgradeApprovalState>(&DataKey::UpgradeApprovalState(0))
+            .filter(|s| s.nonce == nonce)
+            .map(|s| s.approvals)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Return the state summary that migration tooling must snapshot in its
+    /// isolated old/new differential run.
+    pub fn get_upgrade_state_snapshot(env: Env) -> UpgradeStateSnapshot {
+        let config = Self::get_platform_config_internal(&env);
+        UpgradeStateSnapshot {
+            contract_version: Self::get_version(env.clone()),
+            escrow_count: env
+                .storage()
+                .persistent()
+                .get(&DataKey::EscrowCount)
+                .unwrap_or(0),
+            recurring_escrow_next_id: env
+                .storage()
+                .persistent()
+                .get(&DataKey::NextRecurringEscrowId)
+                .unwrap_or(0),
+            upgrade_threshold: Self::get_upgrade_threshold(env.clone()),
+            paused: config.is_paused,
+            onboarding_configured: env
+                .storage()
+                .persistent()
+                .has(&DataKey::OnboardingContractAddress),
+        }
+    }
+
+    /// Hash the current representative state. Tooling should call this before
+    /// and after its isolated migration and place the pre-migration value in
+    /// `UpgradeCompatibilityManifest::state_commitment`.
+    pub fn get_upgrade_state_commitment(env: Env) -> BytesN<32> {
+        let snapshot = Self::get_upgrade_state_snapshot(env.clone());
+        let snapshot_bytes = snapshot.to_xdr(&env);
+        env.crypto().sha256(&snapshot_bytes).into()
+    }
+
+    fn is_zero_commitment(env: &Env, commitment: &BytesN<32>) -> bool {
+        commitment == &BytesN::<32>::from_array(env, &[0u8; 32])
+    }
+
+    fn validate_compatibility_manifest(
+        env: &Env,
+        manifest: &UpgradeCompatibilityManifest,
+    ) -> Result<(), Error> {
+        let current_version = Self::get_version(env.clone());
+        if manifest.source_version != current_version
+            || manifest.target_version != current_version.saturating_add(1)
+            || Self::is_zero_commitment(env, &manifest.state_commitment)
+            || Self::is_zero_commitment(env, &manifest.interface_commitment)
+            || Self::is_zero_commitment(env, &manifest.authorization_commitment)
+            || Self::is_zero_commitment(env, &manifest.preconditions_commitment)
+            || Self::is_zero_commitment(env, &manifest.postconditions_commitment)
+            || Self::is_zero_commitment(env, &manifest.rollback_commitment)
+            || Self::is_zero_commitment(env, &manifest.migration_checkpoint)
+        {
+            return Err(Error::UpgradeCompatibilityInvalid);
+        }
+
+        if !manifest.migration_complete || manifest.manual_records != 0 {
+            return Err(Error::UpgradeMigrationIncomplete);
+        }
+
+        if manifest.state_commitment != Self::get_upgrade_state_commitment(env.clone()) {
+            return Err(Error::UpgradeCompatibilityInvalid);
+        }
+        Ok(())
+    }
+
+    /// Submit the differential compatibility evidence for a pending upgrade.
+    /// The manifest is resumable off-chain: a later submission replaces the
+    /// same hash's report, while execution accepts only a complete report with
+    /// no records requiring manual intervention.
+    pub fn submit_compat_manifest(
+        env: Env,
+        wasm_hash: BytesN<32>,
+        manifest: UpgradeCompatibilityManifest,
+    ) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+        Self::validate_upgrade_hash(&env, &wasm_hash)?;
+        if manifest.source_version != Self::get_version(env.clone()) {
+            return Err(Error::UpgradeCompatibilityInvalid);
+        }
+        env.storage().persistent().set(
+            &DataKey::UpgradeCompatibilityManifest(wasm_hash.clone()),
+            &manifest,
+        );
+        Self::extend_persistent(
+            &env,
+            &DataKey::UpgradeCompatibilityManifest(wasm_hash),
+        );
+        Ok(())
+    }
+
+    /// Read the compatibility evidence associated with a proposed WASM hash.
+    pub fn get_upgrade_compat_manifest(
+        env: Env,
+        wasm_hash: BytesN<32>,
+    ) -> Option<UpgradeCompatibilityManifest> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UpgradeCompatibilityManifest(wasm_hash))
+    }
+
+    /// Return the persisted storage layout version.
+    pub fn get_storage_layout_version(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::StorageLayoutVersion)
+            .unwrap_or(0)
+    }
+
+    /// Migrate persisted storage to the current layout version.
+    ///
+    /// This is an explicit, admin-gated migration path for legacy deployments.
+    /// Existing state is preserved by running the existing lazy migration helpers
+    /// before recording the new layout version.
+    pub fn migrate_storage_layout(env: Env) -> u32 {
+        let admin = Self::get_admin(&env)
+            .unwrap_or_else(|_| env.panic_with_error(crate::Error::PlatformNotInitialized));
+        admin.require_auth();
+
+        let current_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StorageLayoutVersion)
+            .unwrap_or(0);
+        if current_version == CURRENT_STORAGE_LAYOUT_VERSION {
+            return 0;
+        }
+
+        Self::migrate_legacy_all_escrow_ids(&env);
+        Self::migrate_legacy_whitelisted_tokens(&env);
+
+        env.storage().persistent().set(
+            &DataKey::StorageLayoutVersion,
+            &CURRENT_STORAGE_LAYOUT_VERSION,
+        );
+        Self::extend_persistent(&env, &DataKey::StorageLayoutVersion);
+
+        1
+    }
+
+    fn ensure_storage_layout_compatible(env: &Env) -> Result<(), Error> {
+        let stored_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StorageLayoutVersion)
+            .unwrap_or(0);
+        if stored_version != CURRENT_STORAGE_LAYOUT_VERSION {
+            return Err(Error::StorageLayoutMismatch);
+        }
+        Ok(())
+    }
+
+    /// Upgrade the contract's WASM code after the grace period has elapsed.
+    ///
+    /// The caller passes the `expected_wasm_hash` they think is pending; if it
+    /// does not match the stored proposal the call fails with
+    /// `InvalidUpgradeHash`. This is defense-in-depth against a scenario where
+    /// the admin's signing tool is shown a different proposal than what was
+    /// actually stored on-chain, and forces the operator to confirm exactly
+    /// which payload is being applied (#230).
+    ///
+    /// On success a new `UpgradeRecord` is appended to `UpgradeHistory`,
+    /// `ContractVersion` is bumped, and the proposal is cleared atomically.
+    pub fn execute_upgrade(env: Env, expected_wasm_hash: BytesN<32>) -> Result<(), Error> {
+        Self::ensure_storage_layout_compatible(&env)?;
+
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let proposal: WasmUpgradeProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WasmUpgradeProposal)
+            .ok_or(Error::NoUpgradeProposed)?;
+
+        if proposal.wasm_hash != expected_wasm_hash {
+            return Err(Error::InvalidUpgradeHash);
+        }
+
+        if env.ledger().timestamp() < proposal.upgrade_at {
+            return Err(Error::UpgradeCooldownActive);
+        }
+
+        let manifest: UpgradeCompatibilityManifest = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UpgradeCompatibilityManifest(proposal.wasm_hash.clone()))
+            .ok_or(Error::UpgradeCompatibilityMissing)?;
+        Self::validate_compatibility_manifest(&env, &manifest)?;
+
+        env.deployer()
+            .update_current_contract_wasm(proposal.wasm_hash.clone());
+
+        // Update version in storage
+        let current_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(0);
+        let new_version = current_version + 1;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ContractVersion, &new_version);
+        Self::extend_persistent(&env, &DataKey::ContractVersion);
+
+        Self::append_upgrade_history(
+            &env,
+            UpgradeRecord {
+                from_version: current_version,
+                to_version: new_version,
+                wasm_hash: proposal.wasm_hash.clone(),
+                admin: admin.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        Self::append_upgrade_compatibility_history(
+            &env,
+            UpgradeCompatibilityRecord {
+                from_version: current_version,
+                to_version: new_version,
+                wasm_hash: proposal.wasm_hash.clone(),
+                state_commitment: manifest.state_commitment,
+                migration_checkpoint: manifest.migration_checkpoint,
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        // Clear proposal
+        env.storage()
+            .persistent()
+            .remove(&DataKey::WasmUpgradeProposal);
+        env.storage().persistent().remove(&DataKey::UpgradeCompatibilityManifest(
+            proposal.wasm_hash.clone(),
+        ));
+
+        Self::emit_upgrade_event(
+            &env,
+            UPGRADE_EXECUTED,
+            proposal.wasm_hash,
+            admin,
+            proposal.upgrade_at,
+        );
+
+        Ok(())
+    }
+
+    /// Cancel a proposed WASM upgrade (admin only) (#95, #230).
+    ///
+    /// Emits an `UPG_CANC` event so cancellations are visible alongside
+    /// proposals in the audit trail. Returning `NoUpgradeProposed` instead of
+    /// silently succeeding makes accidental double-cancels visible.
+    pub fn cancel_upgrade_wasm(env: Env) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let proposal: WasmUpgradeProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WasmUpgradeProposal)
+            .ok_or(Error::NoUpgradeProposed)?;
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::WasmUpgradeProposal);
+
+        // Increment the round nonce inside the approval state so that any
+        // residual approvals cannot be replayed in the next round.
+        // We write a "poisoned" state (empty approvals, bumped nonce) rather
+        // than removing the key so the nonce survives across cancel cycles.
+        let state_key = DataKey::UpgradeApprovalState(0);
+        let next_nonce: u32 = env
+            .storage()
+            .persistent()
+            .get::<DataKey, UpgradeApprovalState>(&state_key)
+            .map(|s| s.nonce.saturating_add(1))
+            .unwrap_or(1u32);
+        // Store a sentinel state with the bumped nonce so propose_upgrade_wasm
+        // knows it must open a fresh round on the next call.
+        let reset_state = UpgradeApprovalState {
+            nonce: next_nonce,
+            signers: Vec::new(&env),
+            threshold: 1u32,
+            approvals: Vec::new(&env),
+        };
+        env.storage().persistent().set(&state_key, &reset_state);
+        Self::extend_persistent(&env, &state_key);
+
+        // Issue #618: Record the cancellation timestamp so propose_upgrade_wasm
+        // can enforce CANCEL_REPROPOSE_COOLDOWN against the cancel-and-repropose
+        // bypass pattern.
+        let cancelled_at = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .set(&DataKey::LastUpgradeCancelledAt, &cancelled_at);
+        Self::extend_persistent(&env, &DataKey::LastUpgradeCancelledAt);
+
+        Self::emit_upgrade_event(
+            &env,
+            UPGRADE_CANCELLED,
+            proposal.wasm_hash,
+            admin,
+            proposal.upgrade_at,
+        );
+
+        Ok(())
+    }
+
+    /// Returns the currently pending WASM upgrade proposal, if any (#230).
+    /// Read-only â€” useful for off-chain monitors and admin dashboards that
+    /// need to confirm what `execute_upgrade` will apply.
+    pub fn get_upgrade_proposal(env: Env) -> Option<WasmUpgradeProposal> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::WasmUpgradeProposal)
+    }
+
+    /// Returns the current contract version.
+    ///
+    /// `ContractVersion` semantics:
+    /// - Initialized to `1` by `initialize`.
+    /// - Incremented by exactly `1` for each successful `execute_upgrade`.
+    /// - Independent of the on-disk WASM hash; the hash + version pair is
+    ///   captured per-upgrade in `UpgradeHistory` for auditability.
+    /// - Migration code that needs to gate behavior across upgrades should
+    ///   compare against this value rather than embedding magic numbers.
+    pub fn get_version(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(0)
+    }
+
+    /// Append a record to the bounded `UpgradeHistory` log (#241). The Vec is
+    /// trimmed FIFO once it exceeds `MAX_UPGRADE_HISTORY`.
+    fn append_upgrade_history(env: &Env, record: UpgradeRecord) {
+        let mut history: Vec<UpgradeRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UpgradeHistory)
+            .unwrap_or_else(|| Vec::new(env));
+
+        history.push_back(record);
+        while history.len() > MAX_UPGRADE_HISTORY {
+            history.pop_front();
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::UpgradeHistory, &history);
+        Self::extend_persistent(env, &DataKey::UpgradeHistory);
+    }
+
+    fn append_upgrade_compatibility_history(env: &Env, record: UpgradeCompatibilityRecord) {
+        let mut history: Vec<UpgradeCompatibilityRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UpgradeCompatibilityHistory)
+            .unwrap_or_else(|| Vec::new(env));
+        history.push_back(record);
+        while history.len() > MAX_UPGRADE_HISTORY {
+            history.pop_front();
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::UpgradeCompatibilityHistory, &history);
+        Self::extend_persistent(env, &DataKey::UpgradeCompatibilityHistory);
+    }
+
+    /// Returns the bounded log of past contract upgrades (#241).
+    ///
+    /// Newer entries are at the back. The log is capped at
+    /// `MAX_UPGRADE_HISTORY` records â€” older entries are dropped FIFO so
+    /// storage cannot grow unbounded. For long-term audit trails operators
+    /// should mirror the `wasm_upgrade` events to off-chain storage.
+    pub fn get_upgrade_history(env: Env) -> Vec<UpgradeRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UpgradeHistory)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns compatibility evidence for completed upgrades.
+    pub fn get_upgrade_compat_history(env: Env) -> Vec<UpgradeCompatibilityRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UpgradeCompatibilityHistory)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns aggregate version + last-upgrade metadata (#241). Pairs the
+    /// scalar `ContractVersion` with the most recent `UpgradeRecord` so a
+    /// dashboard or migration script can read everything in one call.
+    pub fn get_version_info(env: Env) -> VersionInfo {
+        let current_version = Self::get_version(env.clone());
+        let history = Self::get_upgrade_history(env);
+        let upgrade_count = history.len();
+        VersionInfo {
+            current_version,
+            upgrade_count,
+        }
+    }
+
+    /// Refund funds to buyer (admin only)
+    ///
+    /// # Arguments
+    /// * `escrow_id` - Escrow/Order identifier
+    pub fn refund(env: Env, escrow_id: u64) -> Result<(), Error> {
+        let _guard = ReentryGuardScope::new(&env);
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let order_id = escrow_id as u32;
+        let mut escrow =
+            Self::claim_active_escrow_transition(&env, order_id, EscrowStatus::RefundPending)?;
+        let operation_id = Self::onboarding_operation_id(&env, b"refund:", order_id);
+        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+
+        // Deterministic fee allocation via the central FeePolicy engine.
+        let allocation =
+            Self::compute_fee_allocation(&env, escrow.amount, 0, SettlementKind::FullRefundNoFee);
+
+        // CEI: persist the Refunded state before any external token transfer.
+        escrow.status = EscrowStatus::Refunded;
+        env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        Self::extend_persistent(&env, &(ESCROW, order_id));
+
+        // Decrement active counts
+        Self::update_active_obligations(&env, &escrow.buyer, -1);
+        Self::update_active_obligations(&env, &escrow.seller, -1);
+
+        Self::safe_update_active_contracts(&env, escrow.buyer.clone(), -1);
+        Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
+
+        Self::update_total_locked(&env, &escrow.token, -escrow.amount);
+
+        // Refund to buyer and record audit
+        Self::transfer_tokens_and_record_audit(
+            &env,
+            &escrow.token,
+            &env.current_contract_address(),
+            &escrow.buyer,
+            allocation.buyer_amount,
+            &escrow.buyer,
+            Symbol::new(&env, "refund"),
+            allocation.buyer_amount,
+        );
+
+        Self::emit_escrow_created(
+            &env,
+            EscrowEvent {
+                schema_version: 1,
+                escrow_id,
+                action: EscrowAction::Refunded,
+                buyer: escrow.buyer.clone(),
+                seller: escrow.seller.clone(),
+                amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        // Emit reputation update events â€” decoupled from onboarding contract (#211)
+        let ts = env.ledger().timestamp();
+        Self::emit_reputation_update(
+            &env,
+            ReputationUpdateEvent {
+                address: escrow.buyer.clone(),
+                successful_delta: 1,
+                disputed_delta: 0,
+                metrics_sales_delta: 0,
+                metrics_amount: 0,
+                token: escrow.token.clone(),
+                timestamp: ts,
+            },
+        );
+        Self::emit_reputation_update(
+            &env,
+            ReputationUpdateEvent {
+                address: escrow.seller.clone(),
+                successful_delta: 0,
+                disputed_delta: 1,
+                metrics_sales_delta: 0,
+                metrics_amount: 0,
+                token: escrow.token.clone(),
+                timestamp: ts,
+            },
+        );
+        Ok(())
+    }
+
+    /// Get escrow details
+    ///
+    /// # Arguments
+    /// * `order_id` - Order identifier
+    pub fn get_escrow(env: Env, order_id: u32) -> Escrow {
+        Self::get_stored_escrow(&env, order_id)
+    }
+
+    /// Diagnose the escrow lifecycle for partial-state or orphaned transition issues.
+    ///
+    /// This is a read-only guard rail for off-chain monitoring and admin recovery.
+    /// It reports whether a status transition is incomplete, or whether a disputed
+    /// escrow has lost the timestamp required to enforce challenge/expiry windows.
+    pub fn diagnose_escrow_state(env: Env, order_id: u32) -> EscrowStateDiagnostic {
+        Self::inspect_escrow_state(&env, order_id)
+    }
+
+    /// Run (or resume) a bounded pass of the contract diagnostic scan over
+    /// the canonical escrow index, flagging malformed, stale, or otherwise
+    /// inconsistent active records (Issue #1135).
+    ///
+    /// Call with `cursor: 0` to start a new scan — this discards any
+    /// findings left over from a previous scan so results are never mixed
+    /// across runs. Pass the returned `next_cursor` back in on subsequent
+    /// calls until `complete` is `true`. Each record is evaluated with the
+    /// same check `diagnose_escrow_state` uses, so the two never disagree.
+    ///
+    /// `limit` is capped at `pagination_validation::MAX_RECONCILE_LIMIT`,
+    /// matching the conservative per-call bound already used by
+    /// `reconcile_token` for this kind of storage-heavy sweep.
+    ///
+    /// Read-only: this only ever writes scan bookkeeping (progress,
+    /// findings, and — once complete — the report itself). It never touches
+    /// escrow or accounting state, and by itself authorizes no repair; see
+    /// [`ContractDiagnosticReport`] for how findings map to the existing
+    /// repair-proposal flow.
+    pub fn run_diagnostic_scan(
+        env: Env,
+        cursor: u32,
+        limit: u32,
+    ) -> Result<ContractDiagnosticReport, Error> {
+        pagination_validation::validate_strict_limit(
+            limit,
+            pagination_validation::MAX_RECONCILE_LIMIT,
+        )?;
+        let total = Self::get_persistent_u32(&env, &DataKey::EscrowCount);
+        let end = cursor.saturating_add(limit).min(total);
+
+        // Starting over: drop any findings and progress carried over from a
+        // previous scan so a fresh pass can never inherit stale results.
+        if cursor == 0 {
+            let stale_count: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::DiagnosticFindingCount)
+                .unwrap_or(0);
+            for i in 0..stale_count {
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::DiagnosticFindingIndexed(i));
+            }
+            env.storage()
+                .persistent()
+                .set(&DataKey::DiagnosticFindingCount, &0u32);
+            env.storage()
+                .persistent()
+                .set(&DataKey::DiagnosticScannedProgress, &0u32);
+        }
+
+        let mut findings_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DiagnosticFindingCount)
+            .unwrap_or(0);
+        let mut scanned: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DiagnosticScannedProgress)
+            .unwrap_or(0);
+
+        for index in cursor..end {
+            let Some(order_id) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, u32>(&DataKey::GlobalEscrowIdIndexed(index))
+            else {
+                continue;
+            };
+            let diagnostic = Self::inspect_escrow_state(&env, order_id);
+            scanned = scanned.saturating_add(1);
+            if !diagnostic.is_consistent {
+                // Every issue but EscrowNotFound has a live record to read
+                // its token from; EscrowNotFound has none, so it is filed
+                // under the contract address as an explicit sentinel rather
+                // than guessing a token.
+                let category = env
+                    .storage()
+                    .persistent()
+                    .get::<(Symbol, u32), Escrow>(&(ESCROW, order_id))
+                    .map(|escrow| escrow.token)
+                    .unwrap_or_else(|| env.current_contract_address());
+                let finding_key = DataKey::DiagnosticFindingIndexed(findings_count);
+                env.storage().persistent().set(
+                    &finding_key,
+                    &DiagnosticFinding {
+                        order_id,
+                        category,
+                        issue: diagnostic.issue,
+                    },
+                );
+                Self::extend_persistent(&env, &finding_key);
+                findings_count = findings_count.saturating_add(1);
+            }
+        }
+
+        let complete = end >= total;
+        env.storage()
+            .persistent()
+            .set(&DataKey::DiagnosticFindingCount, &findings_count);
+        env.storage()
+            .persistent()
+            .set(&DataKey::DiagnosticScannedProgress, &scanned);
+        Self::extend_persistent(&env, &DataKey::DiagnosticFindingCount);
+        Self::extend_persistent(&env, &DataKey::DiagnosticScannedProgress);
+
+        let ledger_sequence = env.ledger().sequence();
+        let report_digest = Self::diagnostic_report_digest(
+            &env,
+            scanned,
+            findings_count,
+            end,
+            complete,
+            ledger_sequence,
+        );
+        let report = ContractDiagnosticReport {
+            scanned,
+            findings_count,
+            next_cursor: end,
+            complete,
+            ledger_sequence,
+            report_digest,
+        };
+
+        if complete {
+            env.storage()
+                .persistent()
+                .set(&DataKey::DiagnosticReport, &report);
+            Self::extend_persistent(&env, &DataKey::DiagnosticReport);
+        }
+
+        Ok(report)
+    }
+
+    /// Content-commitment digest for a `ContractDiagnosticReport` (#1135).
+    ///
+    /// Mirrors the domain-separated sha256-over-payload construction used by
+    /// `OnboardingAttestation`'s `attestation_digest`: it binds the report to
+    /// this exact contract instance and ledger so a report cannot be replayed
+    /// against a different deployment or silently edited off-chain. It is a
+    /// tamper-evidence commitment, not a delegated authorization — see
+    /// [`ContractDiagnosticReport`] docs.
+    fn diagnostic_report_digest(
+        env: &Env,
+        scanned: u32,
+        findings_count: u32,
+        next_cursor: u32,
+        complete: bool,
+        ledger_sequence: u32,
+    ) -> BytesN<32> {
+        let mut payload = Bytes::from_slice(env, b"CRAFTNEXUS_DIAGNOSTIC_SCAN_V1");
+        let contract_string = env.current_contract_address().to_string();
+        let mut contract_bytes = [0u8; 64];
+        let contract_len = contract_string.len() as usize;
+        payload.extend_from_slice(&(contract_len as u32).to_be_bytes());
+        contract_string.copy_into_slice(&mut contract_bytes[..contract_len]);
+        payload.extend_from_slice(&contract_bytes[..contract_len]);
+        payload.extend_from_slice(&scanned.to_be_bytes());
+        payload.extend_from_slice(&findings_count.to_be_bytes());
+        payload.extend_from_slice(&next_cursor.to_be_bytes());
+        payload.push_back(if complete { 1 } else { 0 });
+        payload.extend_from_slice(&ledger_sequence.to_be_bytes());
+        env.crypto().sha256(&payload).into()
+    }
+
+    /// Read the most recently *completed* contract diagnostic scan report,
+    /// if one exists (#1135).
+    pub fn get_diagnostic_report(env: Env) -> Option<ContractDiagnosticReport> {
+        env.storage().persistent().get(&DataKey::DiagnosticReport)
+    }
+
+    /// Page through findings recorded by the current (or most recently
+    /// completed) contract diagnostic scan (#1135).
+    pub fn get_diagnostic_findings(
+        env: Env,
+        start_index: u32,
+        limit: u32,
+    ) -> Result<Vec<DiagnosticFinding>, Error> {
+        let limit = pagination_validation::validate_limit(
+            limit,
+            pagination_validation::MAX_ADMIN_PAGE_SIZE,
+        )?;
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DiagnosticFindingCount)
+            .unwrap_or(0);
+        if start_index >= count {
+            return Ok(Vec::new(&env));
+        }
+        let end_index = start_index.saturating_add(limit).min(count);
+        let mut findings = Vec::new(&env);
+        for index in start_index..end_index {
+            if let Some(finding) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, DiagnosticFinding>(&DataKey::DiagnosticFindingIndexed(index))
+            {
+                findings.push_back(finding);
+            }
+        }
+        Ok(findings)
+    }
+
+    /// Read the immutable fund-movement audit history for an account.
+    pub fn get_fund_audit_history(env: Env, actor: Address) -> Vec<FundMovementAuditEntry> {
+        let count_key = DataKey::FundAuditCount(actor.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        let mut history = Vec::new(&env);
+
+        for index in 0..count {
+            let entry_key = DataKey::FundAuditIndexed(actor.clone(), index);
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, FundMovementAuditEntry>(&entry_key)
+            {
+                history.push_back(entry);
+            }
+        }
+
+        history
+    }
+
+    /// Read the total number of fund-movement audit entries for an account.
+    pub fn get_fund_audit_count(env: Env, actor: Address) -> u32 {
+        let count_key = DataKey::FundAuditCount(actor);
+        env.storage().persistent().get(&count_key).unwrap_or(0)
+    }
+
+    /// Read a paginated slice of the fund-movement audit history for an account.
+    ///
+    /// # Arguments
+    /// * `actor` - Account address to query audit history for
+    /// * `start_index` - Starting zero-based index of audit records to read
+    /// * `limit` - Maximum number of entries to return
+    pub fn get_fund_audit_history_paginated(
+        env: Env,
+        actor: Address,
+        start_index: u32,
+        limit: u32,
+    ) -> Result<Vec<FundMovementAuditEntry>, Error> {
+        let limit = pagination_validation::validate_limit(
+            limit,
+            pagination_validation::MAX_ADMIN_PAGE_SIZE,
+        )?;
+        let count_key = DataKey::FundAuditCount(actor.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        // Return empty if start_index is past the end
+        if start_index >= count {
+            return Ok(Vec::new(&env));
+        }
+
+        let mut history = Vec::new(&env);
+        let end_index = start_index.saturating_add(limit).min(count);
+        for index in start_index..end_index {
+            let entry_key = DataKey::FundAuditIndexed(actor.clone(), index);
+            if let Some(entry) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, FundMovementAuditEntry>(&entry_key)
+            {
+                history.push_back(entry);
+            }
+        }
+
+        Ok(history)
+    }
+
+    /// Get escrow metadata fields only.
+    pub fn get_escrow_metadata(env: Env, order_id: u32) -> EscrowMetadata {
+        let escrow = Self::get_escrow(env, order_id);
+        EscrowMetadata {
+            ipfs_hash: escrow.ipfs_hash,
+            metadata_hash: escrow.metadata_hash,
+            service_agreement_hash: escrow.service_agreement_hash,
+        }
+    }
+
+    /// Verify that provided metadata matches the stored hash (Issue #122)
+    ///
+    /// This function allows parties to reveal off-chain metadata and verify it matches
+    /// the commitment stored on-chain. Uses SHA-256 hashing for verification.
+    ///
+    /// # Arguments
+    /// * `order_id` - Order identifier
+    /// * `proof` - MetadataRevealProof containing the full content and optional secret
+    ///
+    /// # Returns
+    /// true if the provided content hashes to the stored metadata_hash, false otherwise
+    ///
+    /// # Notes
+    /// - The metadata_hash must be set on the escrow for verification to succeed
+    /// - The secret field is optional and can be used for additional application-level verification
+    /// - This function does NOT modify state; it only verifies the commitment
+    pub fn verify_metadata_reveal(
+        env: Env,
+        order_id: u32,
+        proof: MetadataRevealProof,
+        authorized_address: Address,
+    ) -> bool {
+        let escrow = Self::get_escrow(env.clone(), order_id);
+        let config = Self::get_platform_config_internal(&env);
+
+        let is_authorized = authorized_address == escrow.buyer
+            || authorized_address == escrow.seller
+            || authorized_address == config.arbitrator;
+        if !is_authorized {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+
+        // If no metadata hash was set, verification fails
+        if escrow.metadata_hash.is_none() {
+            return false;
+        }
+
+        let stored_hash = escrow.metadata_hash.unwrap();
+
+        // Compute SHA-256 hash of the provided content
+        let computed_hash = env.crypto().sha256(&proof.content);
+
+        // Convert Hash to Bytes by creating a new Bytes from the hash
+        // Hash implements Into<Bytes> in Soroban SDK
+        let computed_bytes: Bytes = computed_hash.into();
+
+        // Compare hashes
+        computed_bytes == stored_hash
+    }
+
+    /// Authorized verification that records successful metadata matching on-chain.
+    ///
+    /// Only the escrow buyer, seller, or admin may call this method. A successful verification
+    /// emits a permanent MetadataVerified event.
+    pub fn verify_metadata_reveal_recorded(
+        env: Env,
+        order_id: u32,
+        proof: MetadataRevealProof,
+        authorized_address: Address,
+    ) -> bool {
+        authorized_address.require_auth();
+
+        let escrow = Self::get_escrow(env.clone(), order_id);
+        let config = Self::get_platform_config_internal(&env);
+        let is_authorized = authorized_address == escrow.buyer
+            || authorized_address == escrow.seller
+            || authorized_address == config.arbitrator;
+        if !is_authorized {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+
+        let is_valid =
+            Self::verify_metadata_reveal(env.clone(), order_id, proof, authorized_address.clone());
+        if is_valid {
+            Self::emit_metadata_verified(&env, order_id, authorized_address);
+        }
+        is_valid
+    }
+
+    /// Check if escrow can be auto-released
+    ///
+    /// # Arguments
+    /// * `order_id` - Order identifier
+    pub fn can_auto_release(env: Env, order_id: u32) -> bool {
+        let escrow = Self::try_get_escrow_readonly(&env, order_id);
+
+        if escrow.status != EscrowStatus::Active {
+            return false;
+        }
+
+        let current_time = env.ledger().timestamp();
+        let elapsed = current_time - (escrow.created_at as u64);
+
+        elapsed >= escrow.release_window as u64
+    }
+
+    /// Open a dispute on an active escrow, entering the **Disputed** lifecycle state.
+    ///
+    /// ## Dispute lifecycle overview
+    ///
+    /// Once an escrow is `Active`, either party can call this function to move it into
+    /// the dispute pipeline. The overall state machine looks like this:
+    ///
+    /// ```text
+    ///  Active
+    ///    │
+    ///    ▼  dispute_escrow()
+    ///  DisputePending  ──►  Disputed
+    ///                          │
+    ///               ┌──────────┼────────────────────┐
+    ///               │          │                    │
+    ///               ▼          ▼                    ▼
+    ///     submit_evidence   escalate_dispute   propose_partial_refund
+    ///      (any time while   (after escalation    (buyer-initiated
+    ///       Disputed)         window elapses)       negotiation)
+    ///               │          │                    │
+    ///               └──────────┼────────────────────┘
+    ///                          │
+    ///               ┌──────────┴──────────┐
+    ///               │                     │
+    ///               ▼                     ▼
+    ///       resolve_dispute()    resolve_expired_dispute()
+    ///       (arbitrator/admin/   (anyone, after max_dispute_duration
+    ///        moderator, after     has elapsed without resolution)
+    ///        evidence window)
+    ///               │                     │
+    ///               └──────────┬──────────┘
+    ///                          ▼
+    ///                       Resolved
+    /// ```
+    ///
+    /// ## Preconditions
+    ///
+    /// - The platform must not be paused.
+    /// - The caller must be the escrow's `buyer` or `seller`.
+    /// - The escrow must currently be in the `Active` state.
+    /// - The caller must not have exceeded the per-account dispute rate limit
+    ///   (`rate_limit_max_calls` within `rate_limit_window`). This prevents spam
+    ///   disputes that would congest the arbitration queue.
+    ///
+    /// ## State transition
+    ///
+    /// The transition uses an atomic "claim" pattern (`DisputePending` as an
+    /// intermediate sentinel) to prevent race conditions where two callers might
+    /// simultaneously dispute the same escrow. After the claim, the status is
+    /// immediately set to `Disputed` and `dispute_initiated_at` is stamped with
+    /// the current ledger timestamp. This timestamp gates two downstream timers:
+    ///
+    /// 1. **Evidence challenge window** (`evidence_challenge_window`): during this
+    ///    period both parties may submit or rebut evidence. `resolve_dispute` is
+    ///    blocked until the window has elapsed (see [`Self::resolve_dispute`]).
+    /// 2. **Escalation window** (`dispute_escalation_window`): after this period
+    ///    either party may call `escalate_dispute` to flag the dispute as stalled
+    ///    and surface it to priority queues (see [`Self::escalate_dispute`]).
+    /// 3. **Maximum duration** (`max_dispute_duration`): if the arbitrator has not
+    ///    resolved the dispute before this deadline, anyone can call
+    ///    `resolve_expired_dispute` to force-close it (see
+    ///    [`Self::resolve_expired_dispute`]).
+    ///
+    /// ## Events emitted
+    ///
+    /// - `EscrowEvent { action: EscrowAction::Disputed, … }` — consumed by
+    ///   off-chain indexers and arbitration dashboards.
+    ///
+    /// # Arguments
+    /// * `order_id` - Identifier of the escrow to dispute.
+    /// * `dispute_reason` - Short symbolic reason (e.g. `"item_not_received"`).
+    ///   Stored on-chain for audit; not evaluated by the contract logic.
+    /// * `authorized_address` - Must be the escrow's `buyer` or `seller`.
+    pub fn dispute_escrow(
+        env: Env,
+        order_id: u32,
+        dispute_reason: Symbol, // UPDATE ARGUMENT TYPE
+        authorized_address: Address,
+    ) {
+        authorized_address.require_auth();
+
+        // Rate limiting check (#943)
+        let rate_config: RateLimitConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RateLimitConfig)
+            .unwrap_or(RateLimitConfig {
+                max_calls: DEFAULT_RATE_LIMIT_MAX_CALLS,
+                window: DEFAULT_RATE_LIMIT_WINDOW,
+            });
+
+        if rate_config.max_calls > 0 && rate_config.window > 0 {
+            let current_time = env.ledger().timestamp();
+            let window_index = current_time / (rate_config.window as u64);
+            let rate_key = DataKey::RateLimitCount(authorized_address.clone(), window_index);
+            let count: u32 = env.storage().persistent().get(&rate_key).unwrap_or(0);
+            if count >= rate_config.max_calls {
+                env.panic_with_error(crate::Error::BatchLimitExceeded);
+            }
+            env.storage().persistent().set(&rate_key, &(count + 1));
+        }
+
+        let escrow_for_auth = Self::get_stored_escrow(&env, order_id);
+
+        // Only the two parties to this specific escrow may open a dispute;
+        // admin/arbitrator cannot initiate on their behalf.
+        if !(escrow_for_auth.buyer == authorized_address
+            || escrow_for_auth.seller == authorized_address)
+        {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+        let expected_role = if escrow_for_auth.buyer == authorized_address {
+            UserRole::Buyer
+        } else {
+            UserRole::Artisan
+        };
+        let operation_id = Self::onboarding_operation_id(&env, b"dispute_escrow:", order_id);
+        Self::authorize_onboarding_state(
+            &env,
+            &authorized_address,
+            operation_id,
+            expected_role,
+        );
+
+        // Atomically claim the escrow through the DisputePending sentinel to
+        // prevent a second concurrent caller from also transitioning it. The
+        // function panics if the current status is not Active.
+        let mut escrow =
+            Self::claim_active_escrow_transition(&env, order_id, EscrowStatus::DisputePending)
+                .unwrap_or_else(|e| env.panic_with_error(e));
+
+        // Finalize transition: stamp the dispute metadata and persist.
+        escrow.status = EscrowStatus::Disputed;
+        escrow.dispute_reason = Some(dispute_reason); // Assign Symbol
+                                                      // dispute_initiated_at is the single source of truth for all three
+                                                      // downstream timers (evidence window, escalation window, max duration).
+        escrow.dispute_initiated_at = Some(env.ledger().timestamp());
+        env.storage().persistent().set(&(ESCROW, order_id), &escrow);
+        // Increment the global active dispute counter used by emergency-op
+        // guards (admin recovery, upgrade proposals) to detect unsafe conditions.
+        Self::update_active_dispute_count(&env, 1);
+
+        Self::emit_escrow_created(
+            &env,
+            EscrowEvent {
+                schema_version: 1,
+                escrow_id: order_id as u64,
+                action: EscrowAction::Disputed,
+                buyer: escrow.buyer.clone(),
+                seller: escrow.seller.clone(),
+                amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+    }
+
+    /// Finalize a disputed escrow and disburse funds — the normal arbitrated resolution path.
+    ///
+    /// ## Role in the dispute lifecycle
+    ///
+    /// `resolve_dispute` is the primary exit from the `Disputed` state when an
+    /// authorized party (arbitrator, admin, or moderator) has reviewed the
+    /// evidence and reached a decision. It must be called **after** the evidence
+    /// challenge window (`evidence_challenge_window`) has elapsed, ensuring both
+    /// parties had a fair opportunity to submit and rebut evidence before the
+    /// decision is locked in (see `dispute_escrow` for the full state diagram).
+    ///
+    /// If the arbitrator does not act before `max_dispute_duration` expires, any
+    /// party can force-close the dispute via `resolve_expired_dispute` instead.
+    ///
+    /// ## Authorization
+    ///
+    /// Callable by the platform `admin`, the designated `arbitrator`, or any
+    /// configured `moderator`. Parties to the escrow (buyer/seller) cannot call
+    /// this function directly — they can only influence the outcome through
+    /// evidence submission or `propose_partial_refund`.
+    ///
+    /// ## CEI pattern (Checks → Effects → Interactions)
+    ///
+    /// To prevent reentrancy attacks this function follows the CEI pattern strictly:
+    ///
+    /// 1. **Checks** — verify status, authorization, and the evidence window.
+    /// 2. **Effects** — update `escrow.status` to `Resolved` and persist all
+    ///    storage writes (dispute counter, obligation counters, contract counters,
+    ///    orphaned refund-proposal cleanup) **before** any token transfer.
+    /// 3. **Interactions** — execute the token transfer as the very last step.
+    ///
+    /// If the token transfer reverts (e.g. the recipient's trustline was revoked),
+    /// Soroban's atomic execution rolls back all storage writes and the escrow
+    /// stays in `Disputed` so the arbitrator can retry with a different resolution.
+    ///
+    /// ## Resolution outcomes
+    ///
+    /// | `resolution`        | Funds flow                                          | Reputation delta                        |
+    /// |---------------------|-----------------------------------------------------|-----------------------------------------|
+    /// | `ReleaseToSeller`   | `amount − platform_fee` → seller; fee → platform   | seller: +1 success; buyer: +1 disputed  |
+    /// | `RefundToBuyer`     | full `amount` → buyer; no fee deducted              | buyer: +1 success; seller: +1 disputed  |
+    ///
+    /// Reputation deltas are emitted as `ReputationUpdateEvent` for the off-chain
+    /// reputation service (decoupled from the onboarding contract, #211).
+    ///
+    /// ## Events emitted
+    ///
+    /// - `EscrowEvent { action: EscrowAction::Resolved, … }`
+    /// - `EscrowResolvedEvent { arbitrator, … }` — includes the arbitrator address
+    ///   for audit trails.
+    /// - Two `ReputationUpdateEvent` entries (one per party).
+    ///
+    /// # Arguments
+    /// * `order_id` - Identifier of the escrow to resolve.
+    /// * `resolution` - `ReleaseToSeller` or `RefundToBuyer`.
+    /// * `authorized_address` - Arbitrator, admin, or moderator address.
+    ///
+    /// # Errors
+    /// * Panics with [`Error::Unauthorized`] if `authorized_address` is not privileged.
+    /// * Panics with [`Error::InvalidEscrowState`] if the escrow is not `Disputed`.
+    /// * Panics with [`Error::ChallengeWindowActive`] if called before the evidence
+    ///   challenge window has elapsed.
+    pub fn resolve_dispute(
+        env: Env,
+        order_id: u32,
+        resolution: Resolution,
+        authorized_address: Address,
+    ) {
+        let _guard = ReentryGuardScope::new(&env);
+        let config = Self::get_platform_config_internal(&env);
+        authorized_address.require_auth();
+        // Only privileged roles may finalize a dispute; neither buyer nor seller
+        // can unilaterally choose the outcome via this path.
+        let is_authorized = authorized_address == config.admin
+            || Some(authorized_address.clone()) == config.moderator
+            || authorized_address == config.arbitrator;
+        if !is_authorized {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+
+        // Block blacklisted arbitrators/moderators (#725).
+        // The admin is the one who manages the blacklist and cannot be locked
+        // out of dispute resolution by their own administrative action.
+        if authorized_address != config.admin
+            && env
+                .storage()
+                .persistent()
+                .get::<_, bool>(&DataKey::ArbitratorBlacklist(authorized_address.clone()))
+                .unwrap_or(false)
+        {
+            env.panic_with_error(crate::Error::ArbitratorBlacklisted);
+        }
+
+
+        let mut escrow = Self::get_stored_escrow(&env, order_id);
+        let operation_id = Self::onboarding_operation_id(&env, b"resolve_dispute:", order_id);
+        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+
+        let snapshot = Self::get_stored_escrow(&env, order_id);
+        Self::assert_open_for_settlement(&env, &snapshot, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
+        Self::assert_arbitrator_resolution_window(&env, &snapshot, &config)
+            .unwrap_or_else(|e| env.panic_with_error(e));
+
+        let (kind, path) = match resolution {
+            Resolution::ReleaseToSeller => (
+                SettlementKind::ReleaseFunds,
+                SettlementPath::ArbitratedRelease,
+            ),
+            Resolution::RefundToBuyer => (
+                SettlementKind::FullRefundNoFee,
+                SettlementPath::ArbitratedRefund,
+            ),
+        };
+        let fee_bps = match resolution {
+            Resolution::ReleaseToSeller => {
+                Self::get_effective_fee_bps(env.clone(), snapshot.seller.clone())
+            }
+            Resolution::RefundToBuyer => 0,
+        };
+        let allocation = Self::compute_fee_allocation(&env, snapshot.amount, fee_bps, kind);
+
+        let escrow = Self::claim_disputed_settlement(&env, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
+        let escrow = Self::commit_resolved_escrow(&env, order_id, escrow, path, 0);
+
+        Self::apply_fee_allocation_transfers(
+            &env,
+            &escrow,
+            &allocation,
+            &config.platform_wallet,
+            "refund",
+            "escrow_released",
+        );
+
+        Self::emit_escrow_created(
+            &env,
+            EscrowEvent {
+                schema_version: 1,
+                escrow_id: order_id as u64,
+                action: EscrowAction::Resolved,
+                buyer: escrow.buyer.clone(),
+                seller: escrow.seller.clone(),
+                amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        Self::emit_escrow_resolved_event(
+            &env,
+            EscrowResolvedEvent {
+                schema_version: 1,
+                escrow_id: order_id as u64,
+                buyer: escrow.buyer.clone(),
+                seller: escrow.seller.clone(),
+                arbitrator: authorized_address.clone(),
+                amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        // Emit reputation update events — decoupled from onboarding contract (#211).
+        let ts = env.ledger().timestamp();
+        match resolution {
+            Resolution::ReleaseToSeller => {
+                Self::emit_reputation_update(
+                    &env,
+                    ReputationUpdateEvent {
+                        address: escrow.seller.clone(),
+                        successful_delta: 1,
+                        disputed_delta: 0,
+                        metrics_sales_delta: 1,
+                        metrics_amount: escrow.amount,
+                        token: escrow.token.clone(),
+                        timestamp: ts,
+                    },
+                );
+                Self::emit_reputation_update(
+                    &env,
+                    ReputationUpdateEvent {
+                        address: escrow.buyer.clone(),
+                        successful_delta: 0,
+                        disputed_delta: 1,
+                        metrics_sales_delta: 0,
+                        metrics_amount: 0,
+                        token: escrow.token.clone(),
+                        timestamp: ts,
+                    },
+                );
+            }
+            Resolution::RefundToBuyer => {
+                Self::emit_reputation_update(
+                    &env,
+                    ReputationUpdateEvent {
+                        address: escrow.buyer.clone(),
+                        successful_delta: 1,
+                        disputed_delta: 0,
+                        metrics_sales_delta: 0,
+                        metrics_amount: 0,
+                        token: escrow.token.clone(),
+                        timestamp: ts,
+                    },
+                );
+                Self::emit_reputation_update(
+                    &env,
+                    ReputationUpdateEvent {
+                        address: escrow.seller.clone(),
+                        successful_delta: 0,
+                        disputed_delta: 1,
+                        metrics_sales_delta: 0,
+                        metrics_amount: 0,
+                        token: escrow.token.clone(),
+                        timestamp: ts,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Submit evidence for a disputed escrow order (#927).
+    ///
+    /// Evidence is bound to the active dispute session, stamped with an expiry timestamp,
+    /// and hashed to prevent evidence payload reuse across disputes.
+    pub fn submit_evidence(
+        env: Env,
+        order_id: u32,
+        submitter: Address,
+        evidence_uri: String,
+    ) -> u64 {
+        submitter.require_auth();
+
+        let escrow = Self::get_stored_escrow(&env, order_id);
+        if escrow.status != EscrowStatus::Disputed {
+            env.panic_with_error(crate::Error::NotInDispute);
+        }
+
+        if !(submitter == escrow.buyer || submitter == escrow.seller) {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+        let dispute_session_id = escrow.dispute_initiated_at.unwrap_or(escrow.created_at as u64);
+
+        // Prevent evidence reuse across multiple disputes (#927)
+        let len = (evidence_uri.len() as usize).min(256);
+        let mut buf = [0u8; 256];
+        evidence_uri.copy_into_slice(&mut buf[0..len]);
+        let bytes = Bytes::from_slice(&env, &buf[0..len]);
+        let hash: BytesN<32> = env.crypto().sha256(&bytes).into();
+        let hash_key = DataKey::UsedEvidenceHash(hash);
+        if env.storage().persistent().has(&hash_key) {
+            env.panic_with_error(crate::Error::EvidenceAlreadyUsed);
+        }
+        env.storage().persistent().set(&hash_key, &true);
+
+        let key = DataKey::EvidenceLog(order_id);
+        let mut log: Vec<DisputeEvidence> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let expected_role = if submitter == escrow.buyer { UserRole::Buyer } else { UserRole::Artisan };
+        let mut operation_id = Self::onboarding_operation_id(&env, b"submit_evidence:", order_id);
+        operation_id.extend_from_slice(&(log.len() as u32).to_be_bytes());
+        Self::authorize_onboarding_state(&env, &submitter, operation_id, expected_role);
+
+        let id = log.len() as u64;
+        let submitted_at = env.ledger().timestamp();
+        let expires_at = submitted_at + DEFAULT_EVIDENCE_EXPIRY_WINDOW;
+
+        let evidence = DisputeEvidence {
+            id,
+            order_id,
+            dispute_session_id,
+            submitter,
+            evidence_uri,
+            parent_evidence_id: None,
+            submitted_at,
+            expires_at,
+            is_invalidated: false,
+        };
+
+        log.push_back(evidence);
+        env.storage().persistent().set(&key, &log);
+        id
+    }
+
+    /// Submit counter-evidence responding to a prior evidence entry (#927).
+    pub fn submit_counter_evidence(
+        env: Env,
+        order_id: u32,
+        submitter: Address,
+        evidence_uri: String,
+        parent_evidence_id: u64,
+    ) -> u64 {
+        submitter.require_auth();
+
+        let escrow = Self::get_stored_escrow(&env, order_id);
+        if escrow.status != EscrowStatus::Disputed {
+            env.panic_with_error(crate::Error::NotInDispute);
+        }
+
+        if !(submitter == escrow.buyer || submitter == escrow.seller) {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+        let dispute_session_id = escrow.dispute_initiated_at.unwrap_or(escrow.created_at as u64);
+
+        let key = DataKey::EvidenceLog(order_id);
+        let mut log: Vec<DisputeEvidence> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        let expected_role = if submitter == escrow.buyer { UserRole::Buyer } else { UserRole::Artisan };
+        let mut operation_id = Self::onboarding_operation_id(&env, b"submit_counter_evidence:", order_id);
+        operation_id.extend_from_slice(&(log.len() as u32).to_be_bytes());
+        Self::authorize_onboarding_state(&env, &submitter, operation_id, expected_role);
+
+        // Validate parent evidence ID exists in current dispute evidence log
+        let mut parent_found = false;
+        for item in log.iter() {
+            if item.id == parent_evidence_id && item.dispute_session_id == dispute_session_id {
+                parent_found = true;
+                break;
+            }
+        }
+        if !parent_found {
+            env.panic_with_error(crate::Error::InvalidEscrowState);
+        }
+
+        // Prevent evidence reuse across multiple disputes (#927)
+        let len = (evidence_uri.len() as usize).min(256);
+        let mut buf = [0u8; 256];
+        evidence_uri.copy_into_slice(&mut buf[0..len]);
+        let bytes = Bytes::from_slice(&env, &buf[0..len]);
+        let hash: BytesN<32> = env.crypto().sha256(&bytes).into();
+        let hash_key = DataKey::UsedEvidenceHash(hash);
+        if env.storage().persistent().has(&hash_key) {
+            env.panic_with_error(crate::Error::EvidenceAlreadyUsed);
+        }
+        env.storage().persistent().set(&hash_key, &true);
+
+        let id = log.len() as u64;
+        let submitted_at = env.ledger().timestamp();
+        let expires_at = submitted_at + DEFAULT_EVIDENCE_EXPIRY_WINDOW;
+
+        let evidence = DisputeEvidence {
+            id,
+            order_id,
+            dispute_session_id,
+            submitter,
+            evidence_uri,
+            parent_evidence_id: Some(parent_evidence_id),
+            submitted_at,
+            expires_at,
+            is_invalidated: false,
+        };
+
+        log.push_back(evidence);
+        env.storage().persistent().set(&key, &log);
+        id
+    }
+
+    /// Retrieve all evidence records for a dispute, automatically setting `is_invalidated = true`
+    /// for any entries whose retention/expiry timestamp has passed (#927).
+    pub fn get_evidence(env: Env, order_id: u32) -> Vec<DisputeEvidence> {
+        let key = DataKey::EvidenceLog(order_id);
+        let log: Vec<DisputeEvidence> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let current_time = env.ledger().timestamp();
+        let mut updated_log = Vec::new(&env);
+        let mut modified = false;
+
+        for mut item in log.into_iter() {
+            // Time policy: evidence expires when now >= expires_at (inclusive end, consistent with all other deadlines)
+            if !item.is_invalidated && time_policy::is_deadline_reached(current_time, item.expires_at) {
+                item.is_invalidated = true;
+                modified = true;
+            }
+            updated_log.push_back(item);
+        }
+
+        if modified {
+            env.storage().persistent().set(&key, &updated_log);
+        }
+
+        updated_log
+    }
+
+    /// Retrieve only non-expired and non-invalidated evidence records for an order (#927).
+    pub fn get_valid_evidence(env: Env, order_id: u32) -> Vec<DisputeEvidence> {
+        let all_evidence = Self::get_evidence(env.clone(), order_id);
+        let mut valid_log = Vec::new(&env);
+        let current_time = env.ledger().timestamp();
+
+        for item in all_evidence.into_iter() {
+            // Time policy: evidence is valid while now < expires_at (window active)
+            if !item.is_invalidated && time_policy::is_deadline_pending(current_time, item.expires_at) {
+                valid_log.push_back(item);
+            }
+        }
+        valid_log
+    }
+
+    /// Escalate a dispute to arbitration after the escalation window has elapsed (#941).
+    pub fn escalate_dispute(env: Env, order_id: u32, caller: Address) {
+        caller.require_auth();
+
+        let escrow = Self::get_stored_escrow(&env, order_id);
+        if escrow.status != EscrowStatus::Disputed {
+            env.panic_with_error(crate::Error::NotInDispute);
+        }
+
+        if !(caller == escrow.buyer || caller == escrow.seller) {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+        let expected_role = if caller == escrow.buyer { UserRole::Buyer } else { UserRole::Artisan };
+        let operation_id = Self::onboarding_operation_id(&env, b"escalate_dispute:", order_id);
+        Self::authorize_onboarding_state(&env, &caller, operation_id, expected_role);
+
+        let escalation_key = DataKey::DisputeEscalation(order_id);
+        if env.storage().persistent().has(&escalation_key) {
+            env.panic_with_error(crate::Error::InvalidEscrowState);
+        }
+
+        let config = Self::get_platform_config_internal(&env);
+        let dispute_initiated_at = escrow
+            .dispute_initiated_at
+            .unwrap_or(escrow.created_at as u64);
+        let current_time = env.ledger().timestamp();
+
+        // Time policy: escalation window is active while now < dispute_initiated_at + escalation_window
+        if time_policy::is_window_active(current_time, dispute_initiated_at, config.dispute_escalation_window as u64) {
+            env.panic_with_error(crate::Error::ReleaseWindowNotElapsed);
+        }
+
+        let record = DisputeEscalationRecord {
+            order_id,
+            escalated_by: caller,
+            escalated_at: current_time,
+        };
+
+        env.storage().persistent().set(&escalation_key, &record);
+
+        Self::emit_dispute_escalated(&env, order_id);
+    }
+
+    /// Get escalation record for an order (#941).
+    pub fn get_dispute_escalation(env: Env, order_id: u32) -> Option<DisputeEscalationRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeEscalation(order_id))
+    }
+
+    /// Set the dispute escalation window (admin only) (#941).
+    pub fn set_dispute_escalation_window(env: Env, window: u32) {
+        let mut config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+        config.dispute_escalation_window = window;
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &config);
+    }
+
+    pub fn set_evidence_challenge_window(env: Env, window: u32) {
+        let mut config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+        config.evidence_challenge_window = window;
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &config);
+    }
+
+    /// Set rate limit configuration (admin only) (#943).
+    pub fn set_rate_limit_config(env: Env, max_calls: u32, window: u32) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+        let rate_config = RateLimitConfig { max_calls, window };
+        env.storage()
+            .persistent()
+            .set(&DataKey::RateLimitConfig, &rate_config);
+    }
+
+    fn emit_dispute_escalated(env: &Env, order_id: u32) {
+        env.events()
+            .publish((Symbol::new(env, "dispute_escalated"), order_id as u64), ());
+    }
+
+    /// Resolve a dispute by splitting funds between buyer and seller.
+    ///
+    /// `buyer_amount` is the gross amount returned to the buyer. The platform
+    /// fee is charged once on the seller's portion only, matching the logic of
+    /// a normal release but applied to a reduced seller share.
+    pub fn resolve_dispute_partial(
+        env: Env,
+        order_id: u32,
+        buyer_amount: i128,
+        authorized_address: Address,
+    ) {
+        let _guard = ReentryGuardScope::new(&env);
+        let config = Self::get_platform_config_internal(&env);
+        authorized_address.require_auth();
+        let is_authorized = authorized_address == config.admin
+            || Some(authorized_address.clone()) == config.moderator
+            || authorized_address == config.arbitrator;
+        if !is_authorized {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+
+        let mut escrow = Self::get_stored_escrow(&env, order_id);
+        let operation_id = Self::onboarding_operation_id(&env, b"resolve_dispute_partial:", order_id);
+        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+
+        let snapshot = Self::get_stored_escrow(&env, order_id);
+        Self::assert_open_for_settlement(&env, &snapshot, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
+        Self::assert_arbitrator_resolution_window(&env, &snapshot, &config)
+            .unwrap_or_else(|e| env.panic_with_error(e));
+
+        let (_seller_gross, allocation) =
+            Self::validate_partial_refund_solvency(&env, &snapshot, buyer_amount)
+                .unwrap_or_else(|e| env.panic_with_error(e));
+        if buyer_amount >= snapshot.amount {
+            env.panic_with_error(crate::Error::InvalidRefundAmount);
+        }
+
+        let escrow = Self::claim_disputed_settlement(&env, order_id)
+            .unwrap_or_else(|e| env.panic_with_error(e));
+        let escrow = Self::commit_resolved_escrow(
+            &env,
+            order_id,
+            escrow,
+            SettlementPath::ArbitratedPartial,
+            0,
+        );
+
+        Self::apply_fee_allocation_transfers(
+            &env,
+            &escrow,
+            &allocation,
+            &config.platform_wallet,
+            "partial_refund_buyer",
+            "partial_refund_seller",
+        );
+
+        Self::emit_escrow_created(
+            &env,
+            EscrowEvent {
+                schema_version: 1,
+                escrow_id: order_id as u64,
+                action: EscrowAction::Resolved,
+                buyer: escrow.buyer.clone(),
+                seller: escrow.seller.clone(),
+                amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+        Self::emit_escrow_resolved_event(
+            &env,
+            EscrowResolvedEvent {
+                schema_version: 1,
+                escrow_id: order_id as u64,
+                buyer: escrow.buyer.clone(),
+                seller: escrow.seller.clone(),
+                arbitrator: authorized_address.clone(),
+                amount: escrow.amount,
+                token: escrow.token.clone(),
+                timestamp: env.ledger().timestamp(),
+            },
+        );
+
+        let ts = env.ledger().timestamp();
+        Self::emit_reputation_update(
+            &env,
+            ReputationUpdateEvent {
+                address: escrow.seller.clone(),
+                successful_delta: 1,
+                disputed_delta: 0,
+                metrics_sales_delta: 1,
+                metrics_amount: buyer_amount,
+                token: escrow.token.clone(),
+                timestamp: ts,
+            },
+        );
+        Self::emit_reputation_update(
+            &env,
+            ReputationUpdateEvent {
+                address: escrow.buyer.clone(),
+                successful_delta: 1,
+                disputed_delta: 0,
+                metrics_sales_delta: 0,
+                metrics_amount: 0,
+                token: escrow.token.clone(),
+                timestamp: ts,
+            },
+        );
+    }
+
+    /// Update platform fee percentage (admin only)
+    ///
+    /// # Arguments
+    /// * `new_fee_bps` - New fee in basis points
+    pub fn update_platform_fee(env: Env, new_fee_bps: u32) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if new_fee_bps > MAX_PLATFORM_FEE_BPS {
+            env.panic_with_error(crate::Error::InvalidFee);
+        }
+
+        let new_config = PlatformConfig {
+            platform_fee_bps: new_fee_bps,
+            platform_wallet: config.platform_wallet,
+            admin: config.admin,
+            arbitrator: config.arbitrator,
+            moderator: config.moderator,
+            is_paused: config.is_paused,
+            min_stake_required: config.min_stake_required,
+            pending_admin: config.pending_admin,
+            wasm_upgrade_cooldown: config.wasm_upgrade_cooldown,
+            max_dispute_duration: config.max_dispute_duration,
+            stake_cooldown: config.stake_cooldown,
+            expired_dispute_fee_policy: config.expired_dispute_fee_policy,
+            min_release_window: config.min_release_window,
+            dispute_escalation_window: config.dispute_escalation_window,
+            evidence_challenge_window: config.evidence_challenge_window,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &new_config);
+        Self::emit_config_updated(
+            &env,
+            "platform_fee_bps",
+            ConfigValue::U32(config.platform_fee_bps),
+            ConfigValue::U32(new_fee_bps),
+        );
+    }
+
+    /// Update platform wallet address (admin only)
+    ///
+    /// # Arguments
+    /// * `new_wallet` - New platform wallet address
+    pub fn update_platform_wallet(env: Env, new_wallet: Address) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        // Reject invalid wallet addresses before writing to storage (#707).
+        if let Err(e) = Self::validate_platform_wallet(&env, &new_wallet) {
+            env.panic_with_error(e);
+        }
+
+        let new_config = PlatformConfig {
+            platform_fee_bps: config.platform_fee_bps,
+            platform_wallet: new_wallet,
+            admin: config.admin,
+            arbitrator: config.arbitrator,
+            moderator: config.moderator,
+            is_paused: config.is_paused,
+            min_stake_required: config.min_stake_required,
+            pending_admin: config.pending_admin,
+            wasm_upgrade_cooldown: config.wasm_upgrade_cooldown,
+            max_dispute_duration: config.max_dispute_duration,
+            stake_cooldown: config.stake_cooldown,
+            expired_dispute_fee_policy: config.expired_dispute_fee_policy,
+            min_release_window: config.min_release_window,
+            dispute_escalation_window: config.dispute_escalation_window,
+            evidence_challenge_window: config.evidence_challenge_window,
+        };
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &new_config);
+        Self::emit_config_updated(
+            &env,
+            "platform_wallet",
+            ConfigValue::Address(config.platform_wallet),
+            ConfigValue::Address(new_config.platform_wallet),
+        );
+    }
+
+    /// Update the expired dispute fee policy (admin only).
+    ///
+    /// Configures how platform fees are handled when a dispute expires without arbitrator resolution.
+    ///
+    /// # Arguments
+    /// * `policy` - The new fee policy to apply
+    ///
+    /// # Policies
+    /// - RefundFullNoPlatformFee: Buyer gets full refund, platform collects no fee (default)
+    /// - RefundMinusPlatformFee: Buyer gets refund minus fee, platform collects fee from buyer
+    /// - DeductFeeFromSeller: Buyer gets full refund, seller conceptually loses the fee
+    /// - SplitFee: Platform fee split between buyer and seller
+    pub fn update_expired_dispute_policy(
+        env: Env,
+        policy: ExpiredDisputeFeePolicy,
+    ) -> Result<(), Error> {
+        let mut config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let old_policy = config.expired_dispute_fee_policy;
+        config.expired_dispute_fee_policy = policy;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &config);
+
+        Self::emit_config_updated(
+            &env,
+            "expired_dispute_fee_policy",
+            ConfigValue::U32(old_policy as u32),
+            ConfigValue::U32(policy as u32),
+        );
+
+        Ok(())
+    }
+
+    /// Get the current expired dispute fee policy
+    pub fn get_expired_dispute_policy(env: Env) -> ExpiredDisputeFeePolicy {
+        let config = Self::get_platform_config_internal(&env);
+        config.expired_dispute_fee_policy
+    }
+
+    /// Get the current moderator address, if set.
+    pub fn get_moderator(env: Env) -> Option<Address> {
+        Self::get_platform_config_internal(&env).moderator
+    }
+
+    pub fn set_moderator(env: Env, moderator: Address) {
+        let mut config = Self::get_platform_config(env.clone());
+        config.admin.require_auth();
+        let previous = config
+            .moderator
+            .clone()
+            .map(ConfigValue::Address)
+            .unwrap_or_else(|| ConfigValue::String(String::from_str(&env, "unset")));
+        config.moderator = Some(moderator.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &config);
+        Self::emit_config_updated(&env, "moderator", previous, ConfigValue::Address(moderator));
+    }
+
+    /// Add an address to the arbitrator blacklist (admin only) (#725).
+    ///
+    /// Once blacklisted, the address is rejected by every privileged
+    /// settlement path (`resolve_dispute`, `resolve_dispute_partial`) with
+    /// `Error::ArbitratorBlacklisted`, even if it matches the configured
+    /// `arbitrator` or `moderator` role. The admin itself is never blocked
+    /// by this mechanism.
+    ///
+    /// # Arguments
+    /// * `arbitrator` - Address to blacklist
+    pub fn blacklist_arbitrator(env: Env, arbitrator: Address) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let key = DataKey::ArbitratorBlacklist(arbitrator.clone());
+        env.storage().persistent().set(&key, &true);
+        Self::extend_persistent(&env, &key);
+
+        Self::emit_config_updated(
+            &env,
+            "arbitrator_blacklisted",
+            ConfigValue::String(String::from_str(&env, "false")),
+            ConfigValue::Address(arbitrator),
+        );
+    }
+
+    /// Remove an address from the arbitrator blacklist (admin only) (#725).
+    ///
+    /// After removal the address may again act as arbitrator or moderator,
+    /// provided it still holds the relevant role in `PlatformConfig`.
+    ///
+    /// # Arguments
+    /// * `arbitrator` - Address to remove from the blacklist
+    pub fn remove_arbitrator_from_blacklist(env: Env, arbitrator: Address) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let key = DataKey::ArbitratorBlacklist(arbitrator.clone());
+        env.storage().persistent().remove(&key);
+
+        Self::emit_config_updated(
+            &env,
+            "arbitrator_unblacklisted",
+            ConfigValue::Address(arbitrator),
+            ConfigValue::String(String::from_str(&env, "false")),
+        );
+    }
+
+    /// Returns `true` if `arbitrator` is currently on the blacklist (#725).
+    ///
+    /// # Arguments
+    /// * `arbitrator` - Address to query
+    pub fn is_arbitrator_blacklisted(env: Env, arbitrator: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ArbitratorBlacklist(arbitrator))
+            .unwrap_or(false)
+    }
+
+    /// Set the minimum escrow amount for a specific token (admin only)
+    ///
+    /// # Arguments
+    /// * `token` - Token address
+    /// * `min_amount` - Minimum amount in smallest unit
+    pub fn set_min_escrow_amount(env: Env, token: Address, min_amount: i128) -> Result<(), Error> {
+        let admin = Self::get_admin(&env)?;
+        admin.require_auth();
+
+        let key = DataKey::MinEscrowAmount(token.clone());
+        let old_amount: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+
+        env.storage().persistent().set(&key, &min_amount);
+        Self::extend_persistent(&env, &key);
+        Self::emit_config_updated(
+            &env,
+            "min_escrow_amount",
+            ConfigValue::I128(old_amount),
+            ConfigValue::I128(min_amount),
+        );
+        Ok(())
+    }
+
+    /// Get current platform fee percentage
+    pub fn get_platform_fee(env: Env) -> u32 {
+        let config = Self::get_platform_config_internal(&env);
+        config.platform_fee_bps
+    }
+
     /// Get platform wallet address
     pub fn get_platform_wallet(env: Env) -> Address {
         let config = Self::get_platform_config_internal(&env);
