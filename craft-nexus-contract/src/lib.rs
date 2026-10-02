@@ -4429,6 +4429,7 @@ impl CraftNexusContract {
         if escrow.funded {
             return Err(Error::InvalidEscrowState);
         }
+    }
 
         let current_time = env.ledger().timestamp();
         // Use the stored funding_deadline when available; fall back to the
@@ -24762,53 +24763,100 @@ impl CraftNexusContract {
         env.storage().set(&key, &escrow);
     }
 
-    pub fn set_moderator(env: Env, moderator: Address) {
-        let mut config = Self::get_platform_config(env.clone());
-        config.admin.require_auth();
-        let previous = config
-            .moderator
-            .clone()
-            .map(ConfigValue::Address)
-            .unwrap_or_else(|| ConfigValue::String(String::from_str(&env, "unset")));
-        config.moderator = Some(moderator.clone());
-        env.storage()
-            .instance()
-            .set(&DataKey::PlatformConfig, &config);
-        Self::emit_config_updated(&env, "moderator", previous, ConfigValue::Address(moderator));
-    }
-
-    pub fn blacklist_arbitrator(env: Env, arbitrator: Address) {
+    /// Set the estimated CPU ceiling (host instruction units) a single
+    /// `continue_batch_escrow` chunk may consume (admin only).
+    ///
+    /// Continuation chunks whose [`resource_model`] estimate exceeds this
+    /// budget are rejected with `Error::ResourceLimitExceeded` **before** any
+    /// escrow is created or funds move, so the job cursor stays put.
+    ///
+    /// # Panics
+    /// - If the caller is not the admin.
+    /// - If `budget` is below `MIN_CONTINUATION_CPU_BUDGET` (prevents an
+    ///   accidental zeroing of the scheduler).
+    pub fn set_continuation_resource_budget(env: Env, budget: u64) {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
-        let key = DataKey::ArbitratorBlacklist(arbitrator.clone());
-        env.storage().persistent().set(&key, &true);
-        Self::extend_persistent(&env, &key);
+        if budget < resource_model::MIN_CONTINUATION_CPU_BUDGET {
+            env.panic_with_error(crate::Error::ResourceLimitExceeded);
+        }
 
+        env.storage()
+            .persistent()
+            .set(&DataKey::ContinuationResourceBudget, &budget);
+    }
+
+    /// Register the deployed OnboardingContract address so the escrow contract
+    /// can make cross-contract reputation / metrics updates (admin only).
+    ///
+    /// (#243) Rejects pointing the onboarding contract at the escrow itself —
+    /// a self-call would create a re-entrancy hazard if the trait surface ever
+    /// expands. Cross-contract calls into the configured address remain
+    /// indirect via `safe_update_reputation` / `safe_update_user_metrics`,
+    /// which trap-isolate failures so a misbehaving onboarding contract
+    /// cannot brick escrow operations. Emits a `config_updated` event with
+    /// the previous and new addresses for audit trails.
+    pub fn set_onboarding_contract(env: Env, contract_address: Address) {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        if contract_address == env.current_contract_address() {
+            env.panic_with_error(crate::Error::Unauthorized);
+        }
+
+        let previous = Self::get_onboarding_address(&env);
+
+        // Issue #527 — short-circuit on the no-op call before paying
+        // for the persistent storage write and TTL extension.
+        if let Some(ref current) = previous {
+            if *current == contract_address {
+                return;
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::OnboardingContractAddress, &contract_address);
+        Self::extend_persistent(&env, &DataKey::OnboardingContractAddress);
+
+        let old_value = match previous {
+            Some(addr) => ConfigValue::Address(addr),
+            None => ConfigValue::String(String::from_str(&env, "unset")),
+        };
         Self::emit_config_updated(
             &env,
-            "arbitrator_blacklisted",
-            ConfigValue::String(String::from_str(&env, "false")),
-            ConfigValue::Address(arbitrator),
+            "onboarding_contract",
+            old_value,
+            ConfigValue::Address(contract_address),
         );
     }
 
-    pub fn remove_arbitrator_from_blacklist(env: Env, arbitrator: Address) {
+    /// Clear the registered onboarding contract address (admin only) (#243).
+    /// After calling this, `get_onboarding_contract` returns
+    /// `OnboardingContractNotSet` and the safe cross-contract helpers become
+    /// no-ops — escrow flows continue to emit `ReputationUpdateEvent`s for
+    /// off-chain reconstruction (#211).
+    pub fn clear_onboarding_contract(env: Env) -> Result<(), Error> {
         let config = Self::get_platform_config_internal(&env);
         if config.paused {
             panic_with_error!(&env, Error::ContractPaused);
         }
         config.admin.require_auth();
 
-        let key = DataKey::ArbitratorBlacklist(arbitrator.clone());
-        env.storage().persistent().remove(&key);
+        let previous = Self::get_onboarding_address(&env).ok_or(Error::OnboardingContractNotSet)?;
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::OnboardingContractAddress);
 
         Self::emit_config_updated(
             &env,
-            "arbitrator_unblacklisted",
-            ConfigValue::Address(arbitrator),
-            ConfigValue::String(String::from_str(&env, "false")),
+            "onboarding_contract",
+            ConfigValue::Address(previous),
+            ConfigValue::String(String::from_str(&env, "unset")),
         );
+        Ok(())
     }
 
     pub fn is_arbitrator_blacklisted(env: Env, arbitrator: Address) -> Option<bool> {
@@ -24821,36 +24869,54 @@ impl CraftNexusContract {
         }
     }
 
-    pub fn set_min_escrow_amount(env: Env, token: Address, min_amount: i128) -> Result<(), Error> {
-        let admin = Self::get_admin(&env)?;
-        admin.require_auth();
+        // Probe the SEP-41 read interface before persisting an administrator
+        // supplied address. Missing or malformed methods become a stable
+        // contract error instead of an opaque host panic.
+        let token_client = token::Client::new(&env, &token);
+        let decimals = token_client
+            .try_decimals()
+            .map_err(|_| Error::UnsupportedToken)?
+            .map_err(|_| Error::UnsupportedToken)?;
+        if decimals > 18 {
+            return Err(Error::InvalidTokenDecimals);
+        }
+        token_client
+            .try_balance(&env.current_contract_address())
+            .map_err(|_| Error::UnsupportedToken)?
+            .map_err(|_| Error::UnsupportedToken)?;
 
-        let key = DataKey::MinEscrowAmount(token.clone());
-        let old_amount: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        Self::migrate_legacy_whitelisted_tokens(&env);
+        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
+        let mut count = Self::get_whitelist_count(&env);
 
-        env.storage().persistent().set(&key, &min_amount);
-        Self::extend_persistent(&env, &key);
-        Self::emit_config_updated(
-            &env,
-            "min_escrow_amount",
-            ConfigValue::I128(old_amount),
-            ConfigValue::I128(min_amount),
-        );
+        if !env.storage().persistent().has(&token_key) {
+            env.storage().persistent().set(&token_key, &true);
+            Self::extend_persistent(&env, &token_key);
+            count += 1;
+            Self::set_whitelist_count(&env, count);
+        }
         Ok(())
     }
 
-    pub fn get_platform_fee(env: Env) -> u32 {
+    /// Remove a token from the platform whitelist (admin only).
+    ///
+    /// Uses individual key-value pairs for scalability. Removes the specific
+    /// token entry and updates the count. If the resulting whitelist is empty,
+    /// whitelist enforcement is automatically disabled (all tokens permitted again).
+    pub fn remove_token_from_whitelist(env: Env, token: Address) {
         let config = Self::get_platform_config_internal(&env);
-        config.platform_fee_bps
-    }
+        config.admin.require_auth();
 
-    pub fn get_platform_wallet(env: Env) -> Address {
-        let config = Self::get_platform_config_internal(&env);
-        config.platform_wallet
-    }
+        Self::migrate_legacy_whitelisted_tokens(&env);
+        let token_key = DataKey::WhitelistedTokenIndexed(token.clone());
 
-    pub fn get_total_fees_collected(env: Env) -> i128 {
-        Self::get_all_tracked_total_fees(&env)
+        if env.storage().persistent().has(&token_key) {
+            env.storage().persistent().remove(&token_key);
+            let count = Self::get_whitelist_count(&env);
+            if count > 0 {
+                Self::set_whitelist_count(&env, count - 1);
+            }
+        }
     }
 
     pub fn get_total_fees_for_token(env: Env, token: Address) -> i128 {
@@ -25019,133 +25085,88 @@ mod tests {
         );
     }
 
-    pub fn create_batch_escrow(
+    /// Get paginated stake deposits for an artisan (admin/debug helper).
+    ///
+    /// Returns up to `limit` deposits starting from `offset`. Useful for
+    /// inspecting queue state without loading the entire queue.
+    pub fn get_artisan_stake_deposits(
         env: Env,
-        batch_id: u64,
-        escrows: soroban_sdk::Vec<EscrowCreateParams>,
-    ) -> Result<soroban_sdk::Vec<u64>, Error> {
-        let _guard = ReentryGuardScope::new(&env);
-        Self::check_not_paused(&env);
+        artisan: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Result<soroban_sdk::Vec<StakeDeposit>, Error> {
+        let limit = pagination_validation::validate_limit(
+            limit,
+            pagination_validation::MAX_ADMIN_PAGE_SIZE,
+        )?;
+        let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
+        let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
 
-        if escrows.len() > MAX_BATCH_SIZE {
-            return Err(Error::BatchLimitExceeded);
+        // Return empty if offset is past the end
+        if offset >= total_count {
+            return Ok(soroban_sdk::Vec::new(&env));
         }
 
-        let mut results = soroban_sdk::Vec::new(&env);
+        let mut deposits = soroban_sdk::Vec::new(&env);
+        let end = core::cmp::min(offset + limit, total_count);
 
-        if escrows.is_empty() {
-            return Ok(results);
-        }
-
-        let mut authorized_buyers: Map<Address, u32> = Map::new(&env);
-        for i in 0..escrows.len() {
-            if let Some(params) = escrows.get(i) {
-                let buyer_key = params.buyer.clone();
-                if !authorized_buyers.contains_key(buyer_key.clone()) {
-                    buyer_key.require_auth();
-                    authorized_buyers.set(buyer_key, 1u32);
-                }
+        for i in offset..end {
+            let deposit_key = DataKey::ArtisanStakeQueueIndexed(artisan.clone(), i);
+            if let Some(deposit) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, StakeDeposit>(&deposit_key)
+            {
+                deposits.push_back(deposit);
             }
         }
 
-        let mut seen_order_ids: Map<u32, bool> = Map::new(&env);
-        for i in 0..escrows.len() {
-            if let Some(params) = escrows.get(i) {
-                if seen_order_ids.contains_key(params.order_id) {
-                    return Err(Error::EscrowAlreadyExists);
-                }
-                seen_order_ids.set(params.order_id, true);
-                Self::validate_escrow_params(&env, &params)?;
-            }
-        }
+        Ok(deposits)
+    }
 
-        let mut buyer_count_state: Map<Address, u32> = Map::new(&env);
-        let mut seller_count_state: Map<Address, u32> = Map::new(&env);
+    fn assert_dispute_actor_permissions(
+        env: &Env,
+        config: &PlatformConfig,
+        escrow: &Escrow,
+        caller: &Address,
+        transition: DisputeTransition,
+    ) -> Result<(), Error> {
 
-        for i in 0..escrows.len() {
-            if let Some(params) = escrows.get(i) {
-                let buyer_key = params.buyer.clone();
-                let seller_key = params.seller.clone();
-
-                if !buyer_count_state.contains_key(buyer_key.clone()) {
-                    let count_key = DataKey::BuyerEscrowCount(buyer_key.clone());
-                    let existing_count: u32 =
-                        env.storage().persistent().get(&count_key).unwrap_or(0u32);
-                    buyer_count_state.set(buyer_key.clone(), existing_count);
-                }
-
-                if !seller_count_state.contains_key(seller_key.clone()) {
-                    let count_key = DataKey::SellerEscrowCount(seller_key.clone());
-                    let existing_count: u32 =
-                        env.storage().persistent().get(&count_key).unwrap_or(0u32);
-                    seller_count_state.set(seller_key.clone(), existing_count);
+                    return Err(Error::Unauthorized);
                 }
             }
-        }
-
-        let mut buyer_next_counts: Map<Address, u32> = Map::new(&env);
-        let mut seller_next_counts: Map<Address, u32> = Map::new(&env);
-
-        for i in 0..escrows.len() {
-            if let Some(params) = escrows.get(i) {
-                match Self::create_single_escrow(&env, params.clone(), Some(batch_id)) {
-                    Ok(id) => {
-                        let buyer_key = params.buyer.clone();
-                        let seller_key = params.seller.clone();
-
-                        if !buyer_next_counts.contains_key(buyer_key.clone()) {
-                            let existing_count =
-                                buyer_count_state.get(buyer_key.clone()).unwrap_or(0u32);
-                            buyer_next_counts.set(buyer_key.clone(), existing_count);
-                        }
-                        let buyer_count = buyer_next_counts.get(buyer_key.clone()).unwrap();
-
-                        let buyer_index_key =
-                            DataKey::BuyerEscrowIndexed(buyer_key.clone(), buyer_count);
-                        env.storage().persistent().set(&buyer_index_key, &id);
-                        Self::extend_persistent(&env, &buyer_index_key);
-
-                        buyer_next_counts.set(buyer_key, buyer_count + 1);
-
-                        if !seller_next_counts.contains_key(seller_key.clone()) {
-                            let existing_count =
-                                seller_count_state.get(seller_key.clone()).unwrap_or(0u32);
-                            seller_next_counts.set(seller_key.clone(), existing_count);
-                        }
-                        let seller_count = seller_next_counts.get(seller_key.clone()).unwrap();
-
-                        let seller_index_key =
-                            DataKey::SellerEscrowIndexed(seller_key.clone(), seller_count);
-                        env.storage().persistent().set(&seller_index_key, &id);
-                        Self::extend_persistent(&env, &seller_index_key);
-
-                        seller_next_counts.set(seller_key, seller_count + 1);
-
-                        let escrow_opt: Option<Escrow> =
-                            env.storage().persistent().get(&(ESCROW, id as u32));
-                        if let Some(escrow) = escrow_opt {
-                            Self::emit_escrow_created(
-                                &env,
-                                EscrowEvent {
-                                    schema_version: 1,
-                                    escrow_id: id,
-                                    action: EscrowAction::BatchCreated,
-                                    buyer: escrow.buyer,
-                                    seller: escrow.seller,
-                                    amount: escrow.amount,
-                                    token: escrow.token,
-                                    timestamp: env.ledger().timestamp(),
-                                },
-                            );
-                        }
-                        results.push_back(id);
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
+            DisputeTransition::AcceptRefund(proposer) => {
+                // Must be the counterparty to the proposer
+                if proposer == escrow.buyer && *caller != escrow.seller {
+                    return Err(Error::Unauthorized);
+                }
+                if proposer == escrow.seller && *caller != escrow.buyer {
+                    return Err(Error::Unauthorized);
+                }
+                if *caller != escrow.buyer && *caller != escrow.seller {
+                    return Err(Error::Unauthorized);
+                }
+            }
+            DisputeTransition::CancelRefund(proposer) => {
+                // Must be the proposer
+                if *caller != proposer {
+                    return Err(Error::Unauthorized);
+                }
+            }
+            DisputeTransition::ResolveArbitrated => {
+                let is_privileged = *caller == config.admin
+                    || *caller == config.arbitrator
+                    || Some(caller.clone()) == config.moderator;
+                if !is_privileged {
+                    return Err(Error::Unauthorized);
+                }
+                if *caller != config.admin && Self::arbitrator_on_blacklist(env, caller) {
+                    return Err(Error::ArbitratorBlacklisted);
                 }
             }
         }
+        Ok(())
+    }
 
         let mut i = 0;
         loop {

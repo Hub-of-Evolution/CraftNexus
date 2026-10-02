@@ -434,3 +434,38 @@ fn test_trigger_liquidation_records_are_auditable() {
     assert_eq!(record.seized_amount, 2_000_000);
     assert!(record.timestamp >= 1711368000);
 }
+
+#[test]
+fn test_evaluate_stake_health_rejected_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _buyer, seller, token_id, token_admin) = setup_test(&env, true);
+    
+    token_admin.mint(&seller, &50_000_000);
+    client.set_min_stake_required(&10_000_000);
+    client.stake_tokens(&seller, &token_id, &20_000_000);
+    
+    let initial_balance = client.get_stake(&seller);
+    client.set_paused(&true);
+    
+    // Attempt evaluate_stake_health while paused
+    let res = client.try_evaluate_stake_health(&seller);
+    
+    // Check it returns Error::ContractPaused
+    assert_eq!(res.unwrap_err(), Ok(Error::ContractPaused));
+    
+    let balance_after = client.get_stake(&seller);
+    assert_eq!(initial_balance, balance_after, "Balances must be unchanged after rejection");
+}
+
+#[test]
+#[should_panic(expected = "HostError: Error(Auth, InvalidAction)")]
+fn test_evaluate_stake_health_unauthorized() {
+    let env = Env::default();
+    // Do not mock auths, so require_auth() will fail
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    let seller = Address::generate(&env);
+    
+    client.evaluate_stake_health(&seller);
+}
