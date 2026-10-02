@@ -172,6 +172,9 @@ mod tests {
     }
 }
 
+// Guard logic for `close_challenge_window` (#1317).
+mod challenge_window;
+
 /// Per-token fee configuration introduced for #239.
 ///
 /// The legacy `FeeTokenIndex` storage held only a flat `Vec<Address>` of
@@ -8664,28 +8667,50 @@ impl CraftNexusContract {
     /// Explicitly close the challenge window after its deadline has elapsed.
     ///
     /// The window closes exactly once — a second call fails with
-    /// `SettlementAlreadyFinalized`. This is a permissionless finalization
-    /// guard: any account may close the window once the bounded challenge
-    /// period has elapsed, mirroring `resolve_expired_dispute`. Normal
-    /// settlement paths (`resolve_dispute`, `resolve_dispute_partial`,
-    /// `accept_partial_refund`) close the window automatically as part of
-    /// commitment, so calling this function is optional. It exists to make
-    /// the exactly-once closure testable off-chain.
-    pub fn close_challenge_window(env: Env, order_id: u32) -> Result<(), Error> {
-        let escrow = Self::get_stored_escrow(&env, order_id);
-        if escrow.status != EscrowStatus::Disputed {
-            return Err(Error::InvalidEscrowState);
-        }
-        if Self::is_challenge_closed(&env, order_id) || Self::has_settlement_receipt(&env, order_id)
-        {
-            return Err(Error::SettlementAlreadyFinalized);
-        }
+    /// `SettlementAlreadyFinalized`. Normal settlement paths (`resolve_dispute`,
+    /// `resolve_dispute_partial`, `accept_partial_refund`) close the window
+    /// automatically as part of commitment, so calling this function is
+    /// optional.
+    ///
+    /// `caller` must authorize the call and be a party to the dispute (buyer or
+    /// seller) or a privileged resolver (admin, arbitrator, moderator). The call
+    /// is rejected while the platform is paused.
+    ///
+    /// Every guard is evaluated before the only write (the closed-window
+    /// marker), and every rejection is a typed error — see
+    /// [`challenge_window`] for the guard table and order:
+    /// `ContractPaused`, `Unauthorized`, `InvalidEscrowState`,
+    /// `SettlementAlreadyFinalized`, `CounterOverflow`, `ChallengeWindowActive`.
+    /// A rejected call therefore changes no storage and moves no funds.
+    pub fn close_challenge_window(env: Env, order_id: u32, caller: Address) -> Result<(), Error> {
         let config = Self::get_platform_config_internal(&env);
-        let deadline = Self::challenge_deadline(&env, order_id, &escrow, &config);
-        let now = env.ledger().timestamp();
-        if time_policy::is_deadline_pending(now, deadline) {
-            return Err(Error::ChallengeWindowActive);
-        }
+        caller.require_auth();
+
+        let escrow = Self::get_stored_escrow(&env, order_id);
+        let challenge = Self::fetch_evidence_challenge(&env, order_id);
+        let state = challenge_window::CloseWindowState {
+            paused: config.is_paused,
+            disputed: escrow.status == EscrowStatus::Disputed,
+            already_closed: challenge
+                .as_ref()
+                .map_or(false, |c| c.state == ChallengeState::Closed),
+            settlement_final: Self::has_settlement_receipt(&env, order_id),
+            stored_deadline: challenge.as_ref().map(|c| c.deadline),
+            dispute_started_at: escrow
+                .dispute_initiated_at
+                .unwrap_or(escrow.created_at as u64),
+            challenge_window: config.evidence_challenge_window,
+            now: env.ledger().timestamp(),
+        };
+        let parties = challenge_window::ChallengeParties {
+            buyer: &escrow.buyer,
+            seller: &escrow.seller,
+            admin: &config.admin,
+            arbitrator: &config.arbitrator,
+            moderator: config.moderator.as_ref(),
+        };
+        challenge_window::check_close(&caller, &parties, &state)?;
+
         Self::close_evidence_challenge(&env, order_id)
     }
 
