@@ -11,6 +11,7 @@ use soroban_sdk::{
 extern crate alloc;
 
 /// Centralised time-boundary policy for the contract.
+pub mod compatibility;
 pub mod time_policy;
 
 #[cfg(test)]
@@ -204,11 +205,11 @@ pub enum Error {
     /// Invalid dispute session for evidence submission (#927)
     InvalidDisputeSession = 55,
     /// Contract does not implement the supported token interface.
-    UnsupportedToken = 56,
+    UnsupportedToken = 57,
     /// The requested continuation size is outside the scheduler bound.
-    InvalidBatchWorkLimit = 57,
+    InvalidBatchWorkLimit = 1001,
     /// The scheduled batch was cancelled.
-    BatchJobCancelled = 58,
+    BatchJobCancelled = 1002,
     /// The requested scheduled batch does not exist.
     BatchJobNotFound = 59,
     /// The caller is not the account that scheduled the batch.
@@ -2201,7 +2202,7 @@ impl CraftNexusContract {
             MetadataVerifiedEvent {
                 order_id: order_id as u64,
                 verifier,
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
     }
@@ -2211,7 +2212,7 @@ impl CraftNexusContract {
             (Symbol::new(env, "admin_platform_paused"), initiator.clone()),
             PlatformPausedEvent {
                 initiator,
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
     }
@@ -2224,7 +2225,7 @@ impl CraftNexusContract {
             ),
             PlatformUnpausedEvent {
                 initiator,
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
     }
@@ -2326,7 +2327,7 @@ impl CraftNexusContract {
         let modified_key = DataKey::StakeLastModified(artisan.clone());
         env.storage()
             .persistent()
-            .set(&modified_key, &env.ledger().timestamp());
+            .set(&modified_key, &crate::compatibility::Protocol::get_ledger_timestamp(&env));
         Self::extend_persistent(env, &modified_key);
 
         // Emit audit event
@@ -2434,16 +2435,12 @@ impl CraftNexusContract {
     /// Extend the TTL of a persistent storage entry using standardized values.
     #[inline(always)]
     fn extend_persistent(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
-        env.storage()
-            .persistent()
-            .extend_ttl(key, TTL_THRESHOLD, TTL_EXTENSION);
+        crate::compatibility::Protocol::extend_persistent_ttl(&env, key, TTL_THRESHOLD, TTL_EXTENSION);
     }
 
     #[inline(always)]
     fn extend_persistent_read(env: &Env, key: &impl soroban_sdk::IntoVal<Env, soroban_sdk::Val>) {
-        env.storage()
-            .persistent()
-            .extend_ttl(key, READ_TTL_THRESHOLD, TTL_EXTENSION);
+        crate::compatibility::Protocol::extend_persistent_ttl(&env, key, READ_TTL_THRESHOLD, TTL_EXTENSION);
     }
 
     /// Read a persistent `u32` and extend its TTL when the key exists (#515).
@@ -2650,7 +2647,7 @@ impl CraftNexusContract {
     fn emit_onboarding_call_failed(env: &Env, method: Symbol, address: Address) {
         env.events().publish(
             (ONBOARD_CALL_FAILED, method),
-            (address, env.ledger().timestamp()),
+            (address, crate::compatibility::Protocol::get_ledger_timestamp(&env)),
         );
     }
 
@@ -3077,15 +3074,11 @@ impl CraftNexusContract {
         // Probe the SEP-41 read interface before persisting an administrator
         // supplied address. Missing or malformed methods become a stable
         // contract error instead of an opaque host panic.
-        let token_client = token::Client::new(&env, &token);
-        let decimals = token_client
-            .try_decimals()
-            .map_err(|_| Error::UnsupportedToken)?
-            .map_err(|_| Error::UnsupportedToken)?;
+        let decimals = crate::compatibility::Protocol::get_token_decimals(&env, &token).map_err(|_| Error::UnsupportedToken)?;
         if decimals > 18 {
             return Err(Error::InvalidTokenDecimals);
         }
-        token_client
+        soroban_sdk::token::Client::new(&env, &token)
             .try_balance(&env.current_contract_address())
             .map_err(|_| Error::UnsupportedToken)?
             .map_err(|_| Error::UnsupportedToken)?;
@@ -3630,7 +3623,7 @@ impl CraftNexusContract {
 
         let threshold = Self::get_admin_action_threshold(&env);
         let delay = Self::get_admin_action_timelock_delay(&env);
-        let created_at = env.ledger().timestamp();
+        let created_at = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         let next_id = Self::get_next_admin_action_id(&env);
 
         let mut approvals = Vec::new(&env);
@@ -3722,7 +3715,7 @@ impl CraftNexusContract {
         if action.approvals.len() < action.threshold {
             return Err(Error::AdminActionNeedsApprovals);
         }
-        let now = env.ledger().timestamp();
+        let now = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         if now < action.ready_at {
             return Err(Error::AdminActionTimelockActive);
         }
@@ -4040,7 +4033,7 @@ impl CraftNexusContract {
         // Check if recovery time lock has passed (#431 â€” TTL-friendly read)
         let recovery_time = Self::get_persistent_u64(&env, &DataKey::AdminRecoveryTime);
 
-        let current_time = env.ledger().timestamp();
+        let current_time = crate::compatibility::Protocol::get_ledger_timestamp(&env);
 
         // If this is the first recovery request, initiate time lock and record
         // the delay used so that malicious direct writes to `AdminRecoveryTime`
@@ -4209,7 +4202,7 @@ impl CraftNexusContract {
 
         Self::validate_onboarding_state(&env, &buyer, &seller);
 
-        let created_at_u64 = env.ledger().timestamp();
+        let created_at_u64 = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         assert!(
             created_at_u64 <= u32::MAX as u64,
             "Ledger timestamp overflow"
@@ -4314,7 +4307,7 @@ impl CraftNexusContract {
                 seller: seller.clone(),
                 amount,
                 token: token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
 
@@ -4356,7 +4349,7 @@ impl CraftNexusContract {
 
         Self::validate_onboarding_state(&env, &buyer, &seller);
 
-        let created_at_u64 = env.ledger().timestamp();
+        let created_at_u64 = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         assert!(
             created_at_u64 <= u32::MAX as u64,
             "Ledger timestamp overflow"
@@ -4447,7 +4440,7 @@ impl CraftNexusContract {
                 seller: seller.clone(),
                 amount,
                 token: token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
 
@@ -4492,7 +4485,7 @@ impl CraftNexusContract {
                 seller: escrow.seller.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
 
@@ -4507,12 +4500,12 @@ impl CraftNexusContract {
     /// and prevent indefinite stub accumulation.
     pub fn cancel_unfunded_escrow(env: Env, order_id: u32, caller: Address) -> Result<(), Error> {
         let _guard = ReentryGuardScope::new(&env);
-        let escrow = Self::get_stored_escrow(&env, order_id);
+        let mut escrow = Self::get_stored_escrow(&env, order_id);
         if escrow.funded {
             return Err(Error::InvalidEscrowState);
         }
 
-        let current_time = env.ledger().timestamp();
+        let current_time = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         // Use the stored funding_deadline when available; fall back to the
         // legacy created_at + UNFUNDED_CANCEL_TIMEOUT calculation for escrows
         // created before this field was added.
@@ -4584,7 +4577,7 @@ impl CraftNexusContract {
         }
         admin.require_auth();
 
-        let current_time = env.ledger().timestamp();
+        let current_time = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         let mut cancelled_count: u32 = 0;
 
         for order_id in order_ids.iter() {
@@ -4788,9 +4781,7 @@ impl CraftNexusContract {
             .unwrap_or_else(|| env.panic_with_error(crate::Error::PlatformNotInitialized));
 
         let config = PlatformConfig::try_from_val(env, &stored).expect("Corrupted PlatformConfig");
-        env.storage()
-            .instance()
-            .extend_ttl(TTL_THRESHOLD, TTL_EXTENSION);
+        crate::compatibility::Protocol::extend_instance_ttl(&env, TTL_THRESHOLD, TTL_EXTENSION);
         config
     }
 
@@ -5365,7 +5356,7 @@ impl CraftNexusContract {
         config: &PlatformConfig,
     ) -> Result<(), Error> {
         let initiated_at = Self::dispute_clock(escrow)?;
-        let now = env.ledger().timestamp();
+        let now = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         let challenge = config.evidence_challenge_window as u64;
         // Time policy: challenge window is active while now < initiated_at + challenge_window
         if time_policy::is_window_active(now, initiated_at, challenge) {
@@ -5384,7 +5375,7 @@ impl CraftNexusContract {
         config: &PlatformConfig,
     ) -> Result<(), Error> {
         let initiated_at = Self::dispute_clock(escrow)?;
-        let now = env.ledger().timestamp();
+        let now = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         // Time policy: dispute is expired when now >= initiated_at + max_dispute_duration
         if time_policy::is_window_active(now, initiated_at, config.max_dispute_duration as u64) {
             return Err(Error::DisputeExpired);
@@ -5416,7 +5407,7 @@ impl CraftNexusContract {
             &SettlementReceipt {
                 order_id,
                 path,
-                executed_at: env.ledger().timestamp(),
+                executed_at: crate::compatibility::Protocol::get_ledger_timestamp(&env),
                 proposal_nonce,
             },
         );
@@ -5719,7 +5710,7 @@ impl CraftNexusContract {
             actor: actor.clone(),
             amount,
             reason,
-            timestamp: env.ledger().timestamp(),
+            timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             balance_impact,
         };
 
@@ -5752,8 +5743,7 @@ impl CraftNexusContract {
         // Commit effects before interaction. A failed token call rolls back the
         // complete Soroban invocation, including this audit record.
         Self::append_fund_audit_record(env, actor, amount, reason, balance_impact);
-        let token_client = token::Client::new(env, token);
-        token_client.transfer(from, to, &amount);
+        crate::compatibility::Protocol::transfer_tokens(env, token, from, to, amount);
     }
 
     fn transfer_platform_fee(
@@ -5888,12 +5878,12 @@ impl CraftNexusContract {
                 seller: escrow.seller.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
 
         // Emit reputation update events â€” decoupled from onboarding contract (#211)
-        let ts = env.ledger().timestamp();
+        let ts = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
@@ -5932,7 +5922,7 @@ impl CraftNexusContract {
             env.panic_with_error(crate::Error::InvalidEscrowState);
         }
 
-        let current_time = env.ledger().timestamp();
+        let current_time = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         // Time policy: window is elapsed when now >= created_at + release_window
         if time_policy::is_window_active(current_time, escrow_for_window.created_at as u64, escrow_for_window.release_window as u64) {
             env.panic_with_error(crate::Error::ReleaseWindowNotElapsed);
@@ -6003,12 +5993,12 @@ impl CraftNexusContract {
                 seller: escrow.seller.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
 
         // Emit reputation update events â€” decoupled from onboarding contract (#211)
-        let ts = env.ledger().timestamp();
+        let ts = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
@@ -6077,7 +6067,7 @@ impl CraftNexusContract {
                 seller: escrow.seller.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
     }
@@ -6110,7 +6100,7 @@ impl CraftNexusContract {
                 action,
                 wasm_hash,
                 admin,
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
                 upgrade_at,
             },
         );
@@ -6144,7 +6134,7 @@ impl CraftNexusContract {
             .persistent()
             .get::<DataKey, u64>(&DataKey::LastUpgradeCancelledAt)
         {
-            let now = env.ledger().timestamp();
+            let now = crate::compatibility::Protocol::get_ledger_timestamp(&env);
             // Time policy: cooldown is active while now < cancelled_at + CANCEL_REPROPOSE_COOLDOWN
             if time_policy::is_window_active(now, cancelled_at, CANCEL_REPROPOSE_COOLDOWN) {
                 return Err(Error::UpgradeCooldownActive);
@@ -6239,7 +6229,7 @@ impl CraftNexusContract {
         env.storage().persistent().remove(&state_key);
 
         let config = Self::get_platform_config_internal(&env);
-        let proposed_at = env.ledger().timestamp();
+        let proposed_at = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         let upgrade_at = proposed_at + config.wasm_upgrade_cooldown as u64;
         let proposal = WasmUpgradeProposal {
             wasm_hash: new_wasm_hash.clone(),
@@ -6504,7 +6494,7 @@ impl CraftNexusContract {
             return Err(Error::InvalidUpgradeHash);
         }
 
-        if env.ledger().timestamp() < proposal.upgrade_at {
+        if crate::compatibility::Protocol::get_ledger_timestamp(&env) < proposal.upgrade_at {
             return Err(Error::UpgradeCooldownActive);
         }
 
@@ -6538,7 +6528,7 @@ impl CraftNexusContract {
                 to_version: new_version,
                 wasm_hash: proposal.wasm_hash.clone(),
                 admin: admin.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
         Self::append_upgrade_compatibility_history(
@@ -6549,7 +6539,7 @@ impl CraftNexusContract {
                 wasm_hash: proposal.wasm_hash.clone(),
                 state_commitment: manifest.state_commitment,
                 migration_checkpoint: manifest.migration_checkpoint,
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
 
@@ -6616,7 +6606,7 @@ impl CraftNexusContract {
         // Issue #618: Record the cancellation timestamp so propose_upgrade_wasm
         // can enforce CANCEL_REPROPOSE_COOLDOWN against the cancel-and-repropose
         // bypass pattern.
-        let cancelled_at = env.ledger().timestamp();
+        let cancelled_at = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         env.storage()
             .persistent()
             .set(&DataKey::LastUpgradeCancelledAt, &cancelled_at);
@@ -6784,12 +6774,12 @@ impl CraftNexusContract {
                 seller: escrow.seller.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
 
         // Emit reputation update events â€” decoupled from onboarding contract (#211)
-        let ts = env.ledger().timestamp();
+        let ts = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
@@ -7000,7 +6990,7 @@ impl CraftNexusContract {
             return false;
         }
 
-        let current_time = env.ledger().timestamp();
+        let current_time = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         let elapsed = current_time - (escrow.created_at as u64);
 
         elapsed >= escrow.release_window as u64
@@ -7098,7 +7088,7 @@ impl CraftNexusContract {
             });
 
         if rate_config.max_calls > 0 && rate_config.window > 0 {
-            let current_time = env.ledger().timestamp();
+            let current_time = crate::compatibility::Protocol::get_ledger_timestamp(&env);
             let window_index = current_time / (rate_config.window as u64);
             let rate_key = DataKey::RateLimitCount(authorized_address.clone(), window_index);
             let count: u32 = env.storage().persistent().get(&rate_key).unwrap_or(0);
@@ -7142,7 +7132,7 @@ impl CraftNexusContract {
         escrow.dispute_reason = Some(dispute_reason); // Assign Symbol
                                                       // dispute_initiated_at is the single source of truth for all three
                                                       // downstream timers (evidence window, escalation window, max duration).
-        escrow.dispute_initiated_at = Some(env.ledger().timestamp());
+        escrow.dispute_initiated_at = Some(crate::compatibility::Protocol::get_ledger_timestamp(&env));
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
         // Increment the global active dispute counter used by emergency-op
         // guards (admin recovery, upgrade proposals) to detect unsafe conditions.
@@ -7158,7 +7148,7 @@ impl CraftNexusContract {
                 seller: escrow.seller.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
     }
@@ -7309,7 +7299,7 @@ impl CraftNexusContract {
                 seller: escrow.seller.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
         Self::emit_escrow_resolved_event(
@@ -7322,12 +7312,12 @@ impl CraftNexusContract {
                 arbitrator: authorized_address.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
 
         // Emit reputation update events — decoupled from onboarding contract (#211).
-        let ts = env.ledger().timestamp();
+        let ts = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         match resolution {
             Resolution::ReleaseToSeller => {
                 Self::emit_reputation_update(
@@ -7396,7 +7386,7 @@ impl CraftNexusContract {
     ) -> u64 {
         submitter.require_auth();
 
-        let escrow = Self::get_stored_escrow(&env, order_id);
+        let mut escrow = Self::get_stored_escrow(&env, order_id);
         if escrow.status != EscrowStatus::Disputed {
             env.panic_with_error(crate::Error::NotInDispute);
         }
@@ -7430,7 +7420,7 @@ impl CraftNexusContract {
         Self::authorize_onboarding_state(&env, &submitter, operation_id, expected_role);
 
         let id = log.len() as u64;
-        let submitted_at = env.ledger().timestamp();
+        let submitted_at = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         let expires_at = submitted_at + DEFAULT_EVIDENCE_EXPIRY_WINDOW;
 
         let evidence = DisputeEvidence {
@@ -7460,7 +7450,7 @@ impl CraftNexusContract {
     ) -> u64 {
         submitter.require_auth();
 
-        let escrow = Self::get_stored_escrow(&env, order_id);
+        let mut escrow = Self::get_stored_escrow(&env, order_id);
         if escrow.status != EscrowStatus::Disputed {
             env.panic_with_error(crate::Error::NotInDispute);
         }
@@ -7506,7 +7496,7 @@ impl CraftNexusContract {
         env.storage().persistent().set(&hash_key, &true);
 
         let id = log.len() as u64;
-        let submitted_at = env.ledger().timestamp();
+        let submitted_at = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         let expires_at = submitted_at + DEFAULT_EVIDENCE_EXPIRY_WINDOW;
 
         let evidence = DisputeEvidence {
@@ -7536,7 +7526,7 @@ impl CraftNexusContract {
             .get(&key)
             .unwrap_or_else(|| Vec::new(&env));
 
-        let current_time = env.ledger().timestamp();
+        let current_time = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         let mut updated_log = Vec::new(&env);
         let mut modified = false;
 
@@ -7560,7 +7550,7 @@ impl CraftNexusContract {
     pub fn get_valid_evidence(env: Env, order_id: u32) -> Vec<DisputeEvidence> {
         let all_evidence = Self::get_evidence(env.clone(), order_id);
         let mut valid_log = Vec::new(&env);
-        let current_time = env.ledger().timestamp();
+        let current_time = crate::compatibility::Protocol::get_ledger_timestamp(&env);
 
         for item in all_evidence.into_iter() {
             // Time policy: evidence is valid while now < expires_at (window active)
@@ -7575,7 +7565,7 @@ impl CraftNexusContract {
     pub fn escalate_dispute(env: Env, order_id: u32, caller: Address) {
         caller.require_auth();
 
-        let escrow = Self::get_stored_escrow(&env, order_id);
+        let mut escrow = Self::get_stored_escrow(&env, order_id);
         if escrow.status != EscrowStatus::Disputed {
             env.panic_with_error(crate::Error::NotInDispute);
         }
@@ -7596,7 +7586,7 @@ impl CraftNexusContract {
         let dispute_initiated_at = escrow
             .dispute_initiated_at
             .unwrap_or(escrow.created_at as u64);
-        let current_time = env.ledger().timestamp();
+        let current_time = crate::compatibility::Protocol::get_ledger_timestamp(&env);
 
         // Time policy: escalation window is active while now < dispute_initiated_at + escalation_window
         if time_policy::is_window_active(current_time, dispute_initiated_at, config.dispute_escalation_window as u64) {
@@ -7723,7 +7713,7 @@ impl CraftNexusContract {
                 seller: escrow.seller.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
         Self::emit_escrow_resolved_event(
@@ -7736,11 +7726,11 @@ impl CraftNexusContract {
                 arbitrator: authorized_address.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
 
-        let ts = env.ledger().timestamp();
+        let ts = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
@@ -8120,7 +8110,7 @@ impl CraftNexusContract {
 
         // Default to 7 days if not specified
         let window = params.release_window.unwrap_or(604800u32);
-        let created_at_u64 = env.ledger().timestamp();
+        let created_at_u64 = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         assert!(
             created_at_u64 <= u32::MAX as u64,
             "Ledger timestamp overflow"
@@ -8182,7 +8172,7 @@ impl CraftNexusContract {
                 seller: params.seller.clone(),
                 amount: params.amount,
                 token: params.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
 
@@ -8379,7 +8369,7 @@ impl CraftNexusContract {
                                     seller: escrow.seller,
                                     amount: escrow.amount,
                                     token: escrow.token,
-                                    timestamp: env.ledger().timestamp(),
+                                    timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
                                 },
                             );
                         }
@@ -8733,7 +8723,7 @@ impl CraftNexusContract {
                             seller: escrow.seller.clone(),
                             amount: escrow.amount,
                             token: escrow.token.clone(),
-                            timestamp: env.ledger().timestamp(),
+                            timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
                         },
                     );
                     results.push_back(order_id as u64);
@@ -8864,13 +8854,10 @@ impl CraftNexusContract {
             return Err(Error::EscrowNotFound);
         }
         Self::extend_persistent(&env, &(ESCROW, order_id));
-        let snapshot = snapshot_opt.unwrap();
-
+        let mut escrow = snapshot_opt.unwrap();
         let config = Self::get_platform_config_internal(&env);
-        // The deadline guard: if the dispute is still within the allowed window
-        // the arbitrator must resolve it via `resolve_dispute`. Returning an
-        // error (rather than panicking) allows the caller to detect this case
-        // without rolling back unrelated ledger state.
+        let initiated_at = escrow.dispute_initiated_at.unwrap_or(0);
+        let current_time = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         if (initiated_at as u64) + config.max_dispute_duration as u64 > current_time {
             return Err(Error::DisputeExpired);
         }
@@ -8893,7 +8880,7 @@ impl CraftNexusContract {
         Self::safe_update_active_contracts(&env, escrow.seller.clone(), -1);
         Self::update_total_locked(&env, &escrow.token, -escrow.amount);
 
-        let fee_bps = Self::get_effective_fee_bps(env.clone(), snapshot.seller.clone());
+        let fee_bps = Self::get_effective_fee_bps(env.clone(), escrow.seller.clone());
         let settlement_kind = match config.expired_dispute_fee_policy {
             ExpiredDisputeFeePolicy::RefundFullNoPlatformFee => {
                 SettlementKind::ExpiredDisputeDeductFromSeller
@@ -8907,7 +8894,7 @@ impl CraftNexusContract {
             ExpiredDisputeFeePolicy::SplitFee => SettlementKind::ExpiredDisputeSplitFee,
         };
         let allocation =
-            Self::compute_fee_allocation(&env, snapshot.amount, fee_bps, settlement_kind);
+            Self::compute_fee_allocation(&env, escrow.amount, fee_bps, settlement_kind);
 
         let escrow = Self::claim_disputed_settlement(&env, order_id)?;
         let escrow =
@@ -8922,7 +8909,7 @@ impl CraftNexusContract {
             "expired_dispute_seller",
         );
 
-        let current_time = env.ledger().timestamp();
+        let current_time = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         Self::emit_escrow_created(
             &env,
             EscrowEvent {
@@ -9032,7 +9019,7 @@ impl CraftNexusContract {
         let cooldown_end = if existing_cooldown == 0 {
             // No existing cooldown, initialize new one
             let config = Self::get_platform_config_internal(&env);
-            env.ledger().timestamp() + config.stake_cooldown as u64
+            crate::compatibility::Protocol::get_ledger_timestamp(&env) + config.stake_cooldown as u64
         } else {
             existing_cooldown
         };
@@ -9107,7 +9094,7 @@ impl CraftNexusContract {
             return;
         }
 
-        let now = env.ledger().timestamp();
+        let now = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         let mut write_index = 0u32;
         let mut matured_aggregate: Option<StakeDeposit> = None;
 
@@ -9211,7 +9198,7 @@ impl CraftNexusContract {
         let count_key = DataKey::ArtisanStakeQueueCount(artisan.clone());
         let current_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
 
-        let now = env.ledger().timestamp();
+        let now = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         let mut matured_amount: i128 = 0;
         let mut write_index = 0u32;
 
@@ -9490,8 +9477,8 @@ impl CraftNexusContract {
             order_id,
             refund_amount,
             proposed_by: caller,
-            proposed_at: env.ledger().timestamp(),
-            nonce: env.ledger().timestamp(),
+            proposed_at: crate::compatibility::Protocol::get_ledger_timestamp(&env),
+            nonce: crate::compatibility::Protocol::get_ledger_timestamp(&env),
         };
 
         env.storage().persistent().set(&proposal_key, &proposal);
@@ -9631,8 +9618,8 @@ impl CraftNexusContract {
             return Err(Error::Unauthorized);
         }
         let operation_id = Self::onboarding_operation_id(&env, b"accept_partial_refund:", order_id);
-        Self::authorize_onboarding_state(&env, &escrow.buyer, operation_id.clone(), UserRole::Buyer);
-        Self::authorize_onboarding_state(&env, &escrow.seller, operation_id, UserRole::Artisan);
+        Self::authorize_onboarding_state(&env, &snapshot.buyer, operation_id.clone(), UserRole::Buyer);
+        Self::authorize_onboarding_state(&env, &snapshot.seller, operation_id, UserRole::Artisan);
 
         let (_seller_gross, allocation) =
             Self::validate_partial_refund_solvency(&env, &snapshot, proposal.refund_amount)?;
@@ -9666,7 +9653,7 @@ impl CraftNexusContract {
                 seller: escrow.seller.clone(),
                 amount: escrow.amount,
                 token: escrow.token.clone(),
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
 
@@ -9701,7 +9688,7 @@ impl CraftNexusContract {
         Self::authorize_onboarding_state(&env, &proposal.proposed_by, operation_id, expected_role);
 
         // Remove the proposal from storage
-        env.storage().persistent().remove(&proposal_key);
+        env.storage().persistent().remove(&Self::proposal_key(order_id));
 
         Ok(())
     }
@@ -9768,7 +9755,7 @@ impl CraftNexusContract {
         );
         Self::extend_persistent(&env, &DataKey::RecurringEscrowCount);
 
-        let now = env.ledger().timestamp();
+        let now = crate::compatibility::Protocol::get_ledger_timestamp(&env);
 
         let escrow = RecurringEscrow {
             id,
@@ -9840,7 +9827,7 @@ impl CraftNexusContract {
             env.panic_with_error(crate::Error::CycleNotReady);
         }
 
-        let now = env.ledger().timestamp();
+        let now = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         if now < escrow.last_release_time + escrow.frequency {
             env.panic_with_error(crate::Error::CycleNotReady);
         }
@@ -9917,7 +9904,7 @@ impl CraftNexusContract {
         );
 
         // Emit reputation update events â€” decoupled from onboarding contract (#211)
-        let ts = env.ledger().timestamp();
+        let ts = crate::compatibility::Protocol::get_ledger_timestamp(&env);
         Self::emit_reputation_update(
             &env,
             ReputationUpdateEvent {
@@ -10001,7 +9988,7 @@ impl CraftNexusContract {
                 buyer: escrow.buyer.clone(),
                 artisan: escrow.artisan.clone(),
                 amount: remaining,
-                timestamp: env.ledger().timestamp(),
+                timestamp: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             },
         );
     }
@@ -10062,7 +10049,7 @@ impl CraftNexusContract {
     }
 
     fn fund_allocation(env: &Env, token: &Address) -> FundAllocation {
-        let balance = token::Client::new(env, token).balance(&env.current_contract_address());
+        let balance = crate::compatibility::Protocol::get_token_balance(env, token, &env.current_contract_address());
         let total_locked = env
             .storage()
             .persistent()
@@ -10178,8 +10165,7 @@ impl CraftNexusContract {
 
         let report = ReconciliationReport {
             token: token.clone(),
-            balance: token::Client::new(&env, &token)
-                .balance(&env.current_contract_address()),
+            balance: crate::compatibility::Protocol::get_token_balance(&env, &token, &env.current_contract_address()),
             expected_locked,
             expected_staked,
             tracked_locked: env
@@ -10257,7 +10243,7 @@ impl CraftNexusContract {
             observed_balance: report.balance,
             observed_tracked_locked: report.tracked_locked,
             observed_tracked_staked: report.tracked_staked,
-            created_at: env.ledger().timestamp(),
+            created_at: crate::compatibility::Protocol::get_ledger_timestamp(&env),
             applied: false,
             cancelled: false,
         };
