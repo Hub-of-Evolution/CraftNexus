@@ -73,6 +73,26 @@ pub enum ContractError {
     InvalidDuration,
 }
 
+pub fn get_arbitrator_assign_revision(env: Env) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ArbitratorAssignRevision)
+        .expect("revision missing")
+}
+
+
+pub fn get_arbitrator_assign_revision(env: Env) -> Result<u32, Error> {
+    let key = DataKey::ArbitratorAssignRevision;
+    match env.storage().persistent().get::<_, u32>(&key) {
+        Some(rev) => {
+            // Keep a hot key alive. Use the helper's real signature from step 2.
+            extend_persistent_read(&env, &key);
+            Ok(rev)
+        }
+        None => Err(Error::NotFound), // replace with the existing variant from step 2
+    }
+}
+
 pub type Result<T> = core::result::Result<T, ContractError>;
 
 /// Storage key for the maximum dispute duration.
