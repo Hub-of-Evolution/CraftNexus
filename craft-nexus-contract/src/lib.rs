@@ -134,8 +134,8 @@ pub impl CraftNexusContract {
     }
 }
 
-#test
-}
+
+
 mod tests {
     use super::*;
     use sorban_std::Env;
@@ -159,7 +159,7 @@ mod tests {
         );
     }
 
-    #test]
+    #[test]
     fn set_max_dispute_duration_rejects_zero() {
         let env = Env::default();
         assert_eq!(
@@ -25136,11 +25136,24 @@ mod tests {
                 }
             }
         }
+        // Persist updated buyer counts
+        for buyer_key in buyer_next_counts.keys().iter() {
+            if let Some(new_count) = buyer_next_counts.get(buyer_key.clone()) {
+                let count_key = DataKey::BuyerEscrowCount(buyer_key);
+                env.storage().persistent().set(&count_key, &new_count);
+                Self::extend_persistent(&env, &count_key);
+            }
+        }
 
-        let mut i = 0;
-        loop {
-            if i >= buyer_next_counts.len() {
-                break;Sorry, something went wrong. Please try your request again.
+        // Persist updated seller counts
+        for seller_key in seller_next_counts.keys().iter() {
+            if let Some(new_count) = seller_next_counts.get(seller_key.clone()) {
+                let count_key = DataKey::SellerEscrowCount(seller_key);
+                env.storage().persistent().set(&count_key, &new_count);
+                Self::extend_persistent(&env, &count_key);
+            }
+        }
 
-
-}}}}}}}}
+        Ok(results)
+    }
+}
