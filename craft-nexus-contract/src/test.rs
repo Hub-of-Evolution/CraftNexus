@@ -5634,6 +5634,17 @@ fn test_set_paused_emits_platform_status_events() {
     assert_eq!(unpaused_event.timestamp, 1711368000);
 }
 
+#[test]
+fn test_set_paused_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = CraftNexusContractClient::new(&env, &env.register_contract(None, CraftNexusContract));
+
+    // Not initialized yet, get_admin will fail with Unauthorized.
+    let result = client.try_set_paused(&true);
+    assert_panic_contract_error(result, Error::Unauthorized);
+}
+
 /// Test metadata reveal verification with invalid content (Issue #122)
 #[test]
 fn test_verify_metadata_reveal_invalid_content() {
