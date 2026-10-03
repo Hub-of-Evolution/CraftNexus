@@ -44,13 +44,13 @@
 //!
 //! | Topic tuple | Data payload | Emitted by |
 //! |-------------|--------------|------------|
-//! | `("UserOnboarded",)` | [`UserOnboardedEvent`] `{ user, username, role }` | [`OnboardingContract::onboard_user`] |
-//! | `("RoleUpdated",)` | `(user: Address, old_role: UserRole, new_role: UserRole)` | [`OnboardingContract::update_user_role`] |
-//! | `("UserVerified",)` | `user: Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
-//! | `("ProfileDeactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::deactivate_profile`] |
-//! | `("ProfileReactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::reactivate_profile`] |
-//! | `("UsernameChanged",)` | `user: Address` | [`OnboardingContract::change_username`] |
-//! | `("PortfolioUpdated",)` | `user: Address` | [`OnboardingContract::update_portfolio`] |
+//! | `("user_onboarded",)` | [`UserOnboardedEvent`] `{ user, username, role }` | [`OnboardingContract::onboard_user`] |
+//! | `("role_updated",)` | `(user: Address, old_role: UserRole, new_role: UserRole)` | [`OnboardingContract::update_user_role`] |
+//! | `("user_verified",)` | `user: Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
+//! | `("profile_deactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::deactivate_profile`] |
+//! | `("profile_reactivated", user: Address)` | `(user: Address, role: UserRole)` | [`OnboardingContract::reactivate_profile`] |
+//! | `("username_changed",)` | `user: Address` | [`OnboardingContract::change_username`] |
+//! | `("portfolio_updated",)` | `user: Address` | [`OnboardingContract::update_portfolio`] |
 //!
 //! Notes for consumers:
 //! - `ProfileDeactivated` / `ProfileReactivated` carry the user **in the topic
@@ -656,7 +656,7 @@ pub struct UserMetrics {
 
 /// Event emitted when a new user successfully onboards via [`OnboardingContract::onboard_user`].
 ///
-/// Topic: `("UserOnboarded",)` — emitted to the contract's event stream.
+/// Topic: `("user_onboarded",)` — emitted to the contract's event stream.
 /// Data shape: `UserOnboardedEvent { schema_version, user, username, role }`.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
@@ -674,7 +674,7 @@ pub struct UserOnboardedEvent {
 
 /// Event emitted when [`onboard_user`] fails due to a validation error.
 ///
-/// Topic: `("OnboardCallFailed",)` — emitted before panicking,
+/// Topic: `("onboard_call_failed",)` — emitted before panicking,
 /// so off-chain indexers can distinguish validation failures from
 /// host panics / network errors without parsing host error codes.
 ///
@@ -1845,7 +1845,7 @@ impl OnboardingContract {
 
         if let Some((scope, window_start)) = limited_scope {
             env.events().publish(
-                (Symbol::new(env, "AttemptRateLimited"), operation.clone()),
+                (Symbol::new(env, "attempt_rate_limited"), operation.clone()),
                 AttemptRateLimitedEvent {
                     schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                     user: user.clone(),
@@ -3143,7 +3143,7 @@ impl OnboardingContract {
     /// - **Read** [`DataKey::UserProfile(user)`] — existence check (TTL extended if found)
     ///
     /// # Emitted Events
-    /// - Topic: `(Symbol("UserOnboarded"),)` — Data: [`UserOnboardedEvent`]
+    /// - Topic: `(Symbol("user_onboarded"),)` — Data: [`UserOnboardedEvent`]
     ///   `{ user, username: normalized, role }`
     ///
     /// # Errors
@@ -3166,7 +3166,7 @@ impl OnboardingContract {
     /// Emit an [`OnboardCallFailedEvent`] before panicking with the given error.
     fn emit_onboard_failed_and_panic(env: &Env, user: &Address, reason: Error) -> ! {
         env.events().publish(
-            (Symbol::new(env, "OnboardCallFailed"),),
+            (Symbol::new(env, "onboard_call_failed"),),
             OnboardCallFailedEvent {
                 schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
@@ -3270,7 +3270,7 @@ impl OnboardingContract {
             if let Some(existing_user) = Self::read_persistent::<_, Address>(&env, &corr_key) {
                 if existing_user != user {
                     env.events().publish(
-                        (Symbol::new(&env, "SybilPatternDetected"),),
+                        (Symbol::new(&env, "sybil_pattern_detected"),),
                         SybilPatternDetectedEvent {
                             schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                             user: user.clone(),
@@ -3279,7 +3279,7 @@ impl OnboardingContract {
                         },
                     );
                     env.events().publish(
-                        (Symbol::new(&env, "IdentityCorrelated"),),
+                        (Symbol::new(&env, "identity_correlated"),),
                         IdentityCorrelatedEvent {
                             schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                             user: user.clone(),
@@ -3296,7 +3296,7 @@ impl OnboardingContract {
                 env.storage().persistent().set(&corr_key, &user);
                 Self::extend_persistent(&env, &corr_key);
                 env.events().publish(
-                    (Symbol::new(&env, "IdentityCorrelated"),),
+                    (Symbol::new(&env, "identity_correlated"),),
                     IdentityCorrelatedEvent {
                         schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                         user: user.clone(),
@@ -3339,7 +3339,7 @@ impl OnboardingContract {
         // event can safely query `get_user` and `get_user_by_username` immediately.
         //
         // Integration notes for off-chain indexers (#108):
-        //   - Subscribe to topic `"UserOnboarded"` to build a real-time user registry
+        //   - Subscribe to topic `"user_onboarded"` to build a real-time user registry
         //     without polling `get_user` for every address.
         //   - The `username` field carries the canonical on-chain form; use it verbatim
         //     for reverse lookups and display.  Do not re-normalise on the client side
@@ -3351,7 +3351,7 @@ impl OnboardingContract {
         //   - This event is emitted exactly once per address. An identical retry
         //     returns the canonical profile without emitting another event.
         env.events().publish(
-            (Symbol::new(&env, "UserOnboarded"),),
+            (Symbol::new(&env, "user_onboarded"),),
             UserOnboardedEvent {
                 schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
@@ -3980,7 +3980,7 @@ impl OnboardingContract {
         // downstream consumers don't need a follow-up read to know what
         // the role transitioned from.
         env.events().publish(
-            (Symbol::new(&env, "RoleUpdated"),),
+            (Symbol::new(&env, "role_updated"),),
             (user.clone(), old_role, new_role),
         );
 
@@ -4075,7 +4075,7 @@ impl OnboardingContract {
         // deactivation to "an artisan left" vs "a customer left"
         // without a follow-up profile read.
         env.events().publish(
-            (Symbol::new(&env, "ProfileDeactivated"), user.clone()),
+            (Symbol::new(&env, "profile_deactivated"), user.clone()),
             (user, profile.role),
         );
     }
@@ -4147,7 +4147,7 @@ impl OnboardingContract {
         Self::update_active_user_count(&env, 1);
 
         env.events().publish(
-            (Symbol::new(&env, "ProfileReactivated"), user.clone()),
+            (Symbol::new(&env, "profile_reactivated"), user.clone()),
             (user, profile.role),
         );
 
@@ -4212,7 +4212,7 @@ impl OnboardingContract {
 
         // Emit event
         env.events()
-            .publish((Symbol::new(&env, "UserVerified"),), &user);
+            .publish((Symbol::new(&env, "user_verified"),), &user);
 
         profile
     }
@@ -4471,7 +4471,7 @@ impl OnboardingContract {
     ///   internal `try_auto_verify` path.
     ///
     /// ## Emitted event — `UserVerified` (conditional)
-    /// - **Topics:** `(Symbol::new("UserVerified"),)`
+    /// - **Topics:** `(Symbol::new("user_verified"),)`
     /// - **Data:** `Address` — the verified user
     /// - Emitted only when auto-verification triggers inside `try_auto_verify`
     ///   after this call. No event is emitted when thresholds are not met.
@@ -4677,7 +4677,7 @@ impl OnboardingContract {
 
             // auto-verification triggered — emit AutoVerifiedEvent (#713)
             env.events().publish(
-                (Symbol::new(env, "AutoVerifiedEvent"), address.clone()),
+                (Symbol::new(env, "auto_verified"), address.clone()),
                 AutoVerifiedEvent {
                     schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                     user: address.clone(),
@@ -4865,7 +4865,7 @@ impl OnboardingContract {
     ///   `"rejected"` and `by = Some(platform_admin)`.
     ///
     /// ## Emitted event — `UserVerified` (on approval only)
-    /// - **Topics:** `(Symbol::new("UserVerified"),)`
+    /// - **Topics:** `(Symbol::new("user_verified"),)`
     /// - **Data:** `Address` — the newly verified `user`
     /// - Not emitted when `approve == false`.
     ///
@@ -4921,7 +4921,7 @@ impl OnboardingContract {
 
         if approve {
             env.events()
-                .publish((Symbol::new(&env, "UserVerified"),), &user);
+                .publish((Symbol::new(&env, "user_verified"),), &user);
         }
     }
 
@@ -5495,7 +5495,7 @@ impl OnboardingContract {
     /// - **Read/Write** [`DataKey::VerificationHistory(user)`] — appends `"username_changed_revoked"`.
     ///
     /// # Emitted Events
-    /// - Topic: `("UsernameChanged",)` — Data: `user` address.
+    /// - Topic: `("username_changed",)` — Data: `user` address.
     ///
     /// # Errors
     /// - Panics with [`Error::NotInitialized`] if config is missing.
@@ -5614,7 +5614,7 @@ impl OnboardingContract {
 
         // Emit event
         env.events()
-            .publish((Symbol::new(&env, "UsernameChanged"),), &user);
+            .publish((Symbol::new(&env, "username_changed"),), &user);
 
         // Interaction (CEI pattern: external transfer is the last step)
         Self::collect_username_change_fee(&env, &user, &config, snapshotted_fee_token);
@@ -5875,7 +5875,7 @@ impl OnboardingContract {
     ///   a non-empty CID is present.
     ///
     /// ## Emitted event — `PortfolioUpdated`
-    /// - **Topics:** `(Symbol::new("PortfolioUpdated"),)`
+    /// - **Topics:** `(Symbol::new("portfolio_updated"),)`
     /// - **Data:** `Address` — the `user` whose portfolio changed
     /// - The event does **not** include the CID itself; indexers should
     ///   call `get_user(user)` or `get_user_by_username` after observing
@@ -5924,7 +5924,7 @@ impl OnboardingContract {
 
         // Emit event
         env.events()
-            .publish((Symbol::new(&env, "PortfolioUpdated"),), &user);
+            .publish((Symbol::new(&env, "portfolio_updated"),), &user);
 
         profile
     }
@@ -6053,7 +6053,7 @@ impl OnboardingContract {
 
         env.events().publish(
             (
-                Symbol::new(&env, "ConfigUpdated"),
+                Symbol::new(&env, "config_updated"),
                 Symbol::new(&env, "sybil_config"),
             ),
             &config.platform_admin,
@@ -6108,7 +6108,7 @@ impl OnboardingContract {
         Self::extend_persistent(&env, &poh_hash_key);
 
         env.events().publish(
-            (Symbol::new(&env, "PohCredentialRegistered"),),
+            (Symbol::new(&env, "poh_credential_registered"),),
             PohCredentialRegisteredEvent {
                 schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
@@ -6202,7 +6202,7 @@ impl OnboardingContract {
         Self::advance_review_head(env);
 
         env.events().publish(
-            (Symbol::new(env, "SybilReviewDecision"),),
+            (Symbol::new(env, "sybil_review_decision"),),
             SybilReviewDecisionEvent {
                 schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
@@ -6213,7 +6213,7 @@ impl OnboardingContract {
             },
         );
         env.events().publish(
-            (Symbol::new(env, "ReviewCompleted"),),
+            (Symbol::new(env, "review_completed"),),
             ReviewCompletedEvent {
                 schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: user.clone(),
@@ -6290,7 +6290,7 @@ impl OnboardingContract {
         Self::enqueue_review_request(&env, &target_user);
 
         env.events().publish(
-            (Symbol::new(&env, "ProfileFlagged"),),
+            (Symbol::new(&env, "profile_flagged"),),
             ProfileFlaggedEvent {
                 schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: target_user.clone(),
@@ -6299,7 +6299,7 @@ impl OnboardingContract {
             },
         );
         env.events().publish(
-            (Symbol::new(&env, "SybilPatternDetected"),),
+            (Symbol::new(&env, "sybil_pattern_detected"),),
             SybilPatternDetectedEvent {
                 schema_version: crate::LIFECYCLE_EVENT_SCHEMA_VERSION,
                 user: target_user,
