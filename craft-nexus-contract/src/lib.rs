@@ -8219,6 +8219,7 @@ impl CraftNexusContract {
         }
         valid_log
     }
+}
 
     /// Escalate a stalled dispute to the next checkpoint on the escalation
     /// ladder (#941, #1080).
@@ -8605,13 +8606,7 @@ impl CraftNexusContract {
             .set(&DataKey::PlatformConfig, &config);
     }
 
-    pub fn set_evidence_challenge_window(env: Env, window: u32) {
-        let mut config = Self::get_platform_config_internal(&env);
-        config.admin.require_auth();
-        config.evidence_challenge_window = window;
-        env.storage()
-            .instance()
-            .set(&DataKey::PlatformConfig, &config);
+        Ok(())
     }
 
     /// Retrieve the persisted challenge window for a disputed order (#942).
@@ -8729,25 +8724,10 @@ impl CraftNexusContract {
         );
     }
 
-    /// Resolve a dispute by splitting funds between buyer and seller.
-    ///
-    /// `buyer_amount` is the gross amount returned to the buyer. The platform
-    /// fee is charged once on the seller's portion only, matching the logic of
-    /// a normal release but applied to a reduced seller share.
-    pub fn resolve_dispute_partial(
-        env: Env,
-        order_id: u32,
-        buyer_amount: i128,
-        authorized_address: Address,
-    ) {
-        let _guard = ReentryGuardScope::new(&env);
-        let config = Self::get_platform_config_internal(&env);
-        authorized_address.require_auth();
-        let is_authorized = authorized_address == config.admin
-            || Some(authorized_address.clone()) == config.moderator
-            || authorized_address == config.arbitrator;
-        if !is_authorized {
-            env.panic_with_error(crate::Error::Unauthorized);
+        // Check if we need to prune before adding new entry
+        if current_count >= MAX_STAKE_HISTORY_SIZE {
+            // Queue is full, cannot add more entries
+            return Err(Error::StakeQueueFull);
         }
 
         let mut escrow = Self::get_stored_escrow(&env, order_id);
@@ -8775,24 +8755,12 @@ impl CraftNexusContract {
             env.panic_with_error(crate::Error::InvalidRefundAmount);
         }
 
-        let escrow = Self::claim_disputed_settlement(&env, order_id)
-            .unwrap_or_else(|e| env.panic_with_error(e));
-        let escrow = Self::commit_resolved_escrow(
-            &env,
-            order_id,
-            escrow,
-            SettlementPath::ArbitratedPartial,
-            0,
-        );
-
-        Self::apply_fee_allocation_transfers(
-            &env,
-            &escrow,
-            &allocation,
-            &config.platform_wallet,
-            "partial_refund_buyer",
-            "partial_refund_seller",
-        );
+        // Record timestamp of this operation for maintenance checks
+        let modified_key = DataKey::StakeLastModified(artisan.clone());
+        env.storage()
+            .persistent()
+            .set(&modified_key, &env.ledger().timestamp());
+        Self::extend_persistent(env, &modified_key);
 
         Self::emit_escrow_created(
             &env,
@@ -8903,6 +8871,7 @@ impl CraftNexusContract {
         if new_fee_bps > MAX_PLATFORM_FEE_BPS {
             env.panic_with_error(crate::Error::InvalidFee);
         }
+    }
 
         let mut payload = Bytes::new(&env);
         payload.extend_from_slice(&new_fee_bps.to_be_bytes());
