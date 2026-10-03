@@ -91,6 +91,74 @@ pub const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = 7 * 24 * 60 * 60;
 /// Default timelock delay for pending critical admin actions (24 hours).
 pub const ADMIN_ACTION_TIMELOCK_DELAY: u64 = 24 * 60 * 60;
 
+// ── Per-action-type minimum timelock delays ────────────────────────────────
+//
+// Each sensitive admin action has a documented hard minimum delay that cannot
+// be overridden by `set_admin_action_timelock_delay`.  These minimums are
+// snapshotted into every proposal at creation time so that a later policy
+// change can never shorten an in-flight delay.
+//
+// | Action kind                   | Minimum delay | Rationale                               |
+// |-------------------------------|---------------|-----------------------------------------|
+// | PausePlatform                 | 0 s           | Emergency pause must be instant         |
+// | SetPlatformFee                | 48 h          | Revenue-sensitive; community notice     |
+// | SetPlatformWallet             | 48 h          | Fund-destination change; high risk      |
+// | SetWasmUpgradeCooldown        | 24 h          | Meta-governance parameter               |
+// | SetMinStakeRequired           | 24 h          | Collateral threshold                    |
+// | SweepUnallocatedFunds         | 24 h          | Moves real funds                        |
+// | ExecuteUpgrade                | 7 d           | Code upgrade; longest review window     |
+// | SetMaxDisputeDuration         | 24 h          | Dispute mechanics                       |
+// | SetStakeCooldown              | 24 h          | Staking mechanics                       |
+// | SetArtisanFeeTier             | 24 h          | Fee change for a specific artisan       |
+// | SetModerator                  | 24 h          | Role assignment                         |
+// | SetMinEscrowAmount            | 24 h          | Minimum escrow threshold                |
+// | SetMaxReleaseWindow           | 24 h          | Release window ceiling                  |
+// | SetMinReleaseWindow           | 24 h          | Release window floor                    |
+// | SetOnboardingContract         | 48 h          | Core infrastructure pointer             |
+// | SetExpiredDisputePolicy       | 24 h          | Dispute outcome policy                  |
+// | ApplyReconciliationRepair     | 24 h          | Emergency accounting mutation           |
+
+/// Minimum delay for `PausePlatform` actions (0 — emergency pause must be instant).
+pub const MIN_DELAY_PAUSE_PLATFORM: u64 = 0;
+/// Minimum delay for `SetPlatformFee` actions (48 hours).
+pub const MIN_DELAY_SET_PLATFORM_FEE: u64 = 48 * 60 * 60;
+/// Minimum delay for `SetPlatformWallet` actions (48 hours).
+pub const MIN_DELAY_SET_PLATFORM_WALLET: u64 = 48 * 60 * 60;
+/// Minimum delay for `SetWasmUpgradeCooldown` actions (24 hours).
+pub const MIN_DELAY_SET_WASM_UPGRADE_COOLDOWN: u64 = 24 * 60 * 60;
+/// Minimum delay for `SetMinStakeRequired` actions (24 hours).
+pub const MIN_DELAY_SET_MIN_STAKE_REQUIRED: u64 = 24 * 60 * 60;
+/// Minimum delay for `SweepUnallocatedFunds` actions (24 hours).
+pub const MIN_DELAY_SWEEP_UNALLOCATED_FUNDS: u64 = 24 * 60 * 60;
+/// Minimum delay for `ExecuteUpgrade` actions (7 days — longest review window).
+pub const MIN_DELAY_EXECUTE_UPGRADE: u64 = 7 * 24 * 60 * 60;
+/// Minimum delay for `SetMaxDisputeDuration` actions (24 hours).
+pub const MIN_DELAY_SET_MAX_DISPUTE_DURATION: u64 = 24 * 60 * 60;
+/// Minimum delay for `SetStakeCooldown` actions (24 hours).
+pub const MIN_DELAY_SET_STAKE_COOLDOWN: u64 = 24 * 60 * 60;
+/// Minimum delay for `SetArtisanFeeTier` actions (24 hours).
+pub const MIN_DELAY_SET_ARTISAN_FEE_TIER: u64 = 24 * 60 * 60;
+/// Minimum delay for `SetModerator` actions (24 hours).
+pub const MIN_DELAY_SET_MODERATOR: u64 = 24 * 60 * 60;
+/// Minimum delay for `SetMinEscrowAmount` actions (24 hours).
+pub const MIN_DELAY_SET_MIN_ESCROW_AMOUNT: u64 = 24 * 60 * 60;
+/// Minimum delay for `SetMaxReleaseWindow` actions (24 hours).
+pub const MIN_DELAY_SET_MAX_RELEASE_WINDOW: u64 = 24 * 60 * 60;
+/// Minimum delay for `SetMinReleaseWindow` actions (24 hours).
+pub const MIN_DELAY_SET_MIN_RELEASE_WINDOW: u64 = 24 * 60 * 60;
+/// Minimum delay for `SetOnboardingContract` actions (48 hours).
+pub const MIN_DELAY_SET_ONBOARDING_CONTRACT: u64 = 48 * 60 * 60;
+/// Minimum delay for `SetExpiredDisputePolicy` actions (24 hours).
+pub const MIN_DELAY_SET_EXPIRED_DISPUTE_POLICY: u64 = 24 * 60 * 60;
+/// Minimum delay for `ApplyReconciliationRepair` actions (24 hours).
+pub const MIN_DELAY_APPLY_RECONCILIATION_REPAIR: u64 = 24 * 60 * 60;
+
+/// Maximum age of a pending admin action proposal before it expires and can
+/// no longer be executed (30 days).  This prevents indefinitely-pending
+/// proposals from being executed long after the context that justified them
+/// has changed.
+pub const ADMIN_ACTION_PROPOSAL_EXPIRY: u64 = 30 * 24 * 60 * 60;
+
 /// Duration an active record remains in the fast active index before becoming
 /// eligible for immutable archival storage (90 days).
 pub const ARCHIVE_RETENTION_WINDOW: u64 = 90 * 24 * 60 * 60;

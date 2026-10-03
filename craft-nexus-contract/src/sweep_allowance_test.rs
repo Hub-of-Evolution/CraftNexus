@@ -342,9 +342,11 @@ fn sweep_via_admin_action_enforces_the_same_hardened_preconditions() {
     let result = client.try_execute_admin_action(&action.id);
     assert!(matches!(result, Err(Ok(Error::ReconciliationRequired))));
 
-    // Once reconciled, the same proposed action succeeds.
+    // Once reconciled, advance past the per-action-type minimum delay (24 h)
+    // (#1132) and execute.
     let report = client.reconcile_token(&token, &0, &20);
     assert!(report.complete && !report.unresolved);
+    _env.ledger().with_mut(|li| li.timestamp += 86_401);
     client.execute_admin_action(&action.id);
 
     assert_eq!(token::Client::new(&_env, &token).balance(&wallet), 25_000);

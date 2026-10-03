@@ -182,6 +182,8 @@ fn test_repair_plan_requires_approval_and_is_idempotent() {
         &admin,
         &AdminActionKind::ApplyReconciliationRepair(plan.id),
     );
+    // Advance past the per-action-type minimum delay (24 h) (#1132).
+    env.ledger().with_mut(|li| li.timestamp += 86_401);
     client.execute_admin_action(&action.id);
 
     let repaired = client.get_reconciliation_repair_plan(&plan.id).unwrap();
@@ -273,6 +275,8 @@ fn test_repair_plan_blocked_when_state_digest_changes() {
         &AdminActionKind::ApplyReconciliationRepair(plan.id),
     );
 
+    // Advance past the per-action-type minimum delay (24 h) (#1132).
+    env.ledger().with_mut(|li| li.timestamp += 86_401);
     // Execution fails because state digest does not match expected digest
     let res = client.try_execute_admin_action(&action.id);
     assert!(res.is_err());
