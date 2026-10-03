@@ -5864,7 +5864,7 @@ impl CraftNexusContract {
         }
 
         env.events().publish(
-            (Symbol::new(&env, "fee_cfg_migrated"),),
+            (Symbol::new(&env, "fee_config_migrated"),),
             FeeTokenConfigsMigratedEvent {
                 schema_version: LIFECYCLE_EVENT_SCHEMA_VERSION,
                 scanned_tokens,
@@ -16478,7 +16478,7 @@ impl CraftNexusContract {
         }
 
         env.events().publish(
-            (Symbol::new(&env, "fee_cfg_migrated"),),
+            (Symbol::new(&env, "fee_config_migrated"),),
             FeeTokenConfigsMigratedEvent {
                 scanned_tokens,
                 migrated_configs: migrated,
@@ -23219,7 +23219,7 @@ impl CraftNexusContract {
         }
 
         env.events().publish(
-            (Symbol::new(&env, "fee_cfg_migrated"),),
+            (Symbol::new(&env, "fee_config_migrated"),),
             FeeTokenConfigsMigratedEvent {
                 scanned_tokens,
                 migrated_configs: migrated,
