@@ -4714,6 +4714,24 @@ impl CraftNexusContract {
         config
     }
 
+    /// Safe variant of [`Self::get_platform_config_internal`] that returns a
+    /// typed error instead of panicking when the config key is absent (#1307).
+    fn try_get_platform_config(env: &Env) -> Result<PlatformConfig, Error> {
+        let key = DataKey::PlatformConfig;
+        let stored: Val = env
+            .storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::PlatformNotInitialized)?;
+
+        let config = PlatformConfig::try_from_val(env, &stored)
+            .map_err(|_| Error::PlatformNotInitialized)?;
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTENSION);
+        Ok(config)
+    }
+
     fn set_paused_internal(env: &Env, paused: bool) -> Result<(), Error> {
         let mut config = Self::get_platform_config_internal(env);
         config.is_paused = paused;
@@ -8473,9 +8491,13 @@ impl CraftNexusContract {
     /// Derived purely from the operator's `expired_dispute_fee_policy`, so the
     /// outcome of letting a dispute time out is knowable in advance and cannot
     /// be influenced by whoever happens to call `resolve_expired_dispute`.
-    pub fn get_timeout_outcome(env: Env) -> TimeoutOutcome {
-        let config = Self::get_platform_config_internal(&env);
-        Self::timeout_outcome(config.expired_dispute_fee_policy)
+    ///
+    /// # Errors
+    /// * Returns [`Error::PlatformNotInitialized`] if the platform config has
+    ///   not been set (e.g. after archival or before initialization).
+    pub fn get_timeout_outcome(env: Env) -> Result<TimeoutOutcome, Error> {
+        let config = Self::try_get_platform_config(&env)?;
+        Ok(Self::timeout_outcome(config.expired_dispute_fee_policy))
     }
 
     /// Read the configured escalation checkpoint schedule (#1080).
