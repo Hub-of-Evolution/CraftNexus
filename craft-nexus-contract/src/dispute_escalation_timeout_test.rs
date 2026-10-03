@@ -542,7 +542,7 @@ fn timeout_settlement_is_deterministic_and_runs_exactly_once() {
 
     // The outcome is knowable before the timeout happens.
     assert_eq!(
-        h.escrow.get_timeout_outcome(),
+        h.escrow.get_timeout_outcome().unwrap(),
         TimeoutOutcome::RefundBuyerFull
     );
     assert_eq!(
@@ -612,7 +612,7 @@ fn timeout_outcome_tracks_the_configured_fee_policy() {
 
     for (policy, expected) in cases {
         h.escrow.update_expired_dispute_policy(&policy);
-        assert_eq!(h.escrow.get_timeout_outcome(), expected);
+        assert_eq!(h.escrow.get_timeout_outcome().unwrap(), expected);
     }
 }
 
@@ -625,7 +625,7 @@ fn timeout_under_fee_deducting_policy_matches_the_previewed_outcome() {
     let buyer_before = h.balance(&h.buyer);
 
     assert_eq!(
-        h.escrow.get_timeout_outcome(),
+        h.escrow.get_timeout_outcome().unwrap(),
         TimeoutOutcome::RefundBuyerMinusFee
     );
 
@@ -635,6 +635,23 @@ fn timeout_under_fee_deducting_policy_matches_the_previewed_outcome() {
     // 5% platform fee is withheld from the refund.
     let fee = AMOUNT * 500 / 10_000;
     assert_eq!(h.balance(&h.buyer) - buyer_before, AMOUNT - fee);
+}
+
+/// `get_timeout_outcome` must not trap when the platform config is missing
+/// (e.g. before initialization or after archival) — it returns the typed
+/// `Error::PlatformNotInitialized` instead (#1307).
+#[test]
+fn timeout_outcome_returns_error_when_platform_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let escrow_id = env.register_contract(None, CraftNexusContract);
+    let escrow = CraftNexusContractClient::new(&env, &escrow_id);
+
+    // No initialize() call — the config key is absent.
+    assert_typed_error(
+        escrow.try_get_timeout_outcome(),
+        Error::PlatformNotInitialized,
+    );
 }
 
 #[test]
