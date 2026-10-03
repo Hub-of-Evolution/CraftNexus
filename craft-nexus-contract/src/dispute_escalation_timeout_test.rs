@@ -716,3 +716,106 @@ fn party_escalation_still_presents_an_onboarding_attestation() {
         h.seller
     );
 }
+
+// Missing-storage regressions (#1304). Direct calls distinguish a returned
+// Result from panic_with_error, which the generated try_* client also catches.
+#[test]
+fn escalation_status_returns_error_before_escrow_exists() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, CraftNexusContract);
+    env.as_contract(&contract_id, || {
+        assert!(matches!(
+            CraftNexusContract::get_dispute_escalation_status(env.clone(), 1),
+            Err(Error::EscrowNotFound)
+        ));
+    });
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    assert_typed_error(
+        client.try_get_dispute_escalation_status(&1),
+        Error::EscrowNotFound,
+    );
+}
+
+#[test]
+fn escalation_status_returns_error_after_terminal_escrow_is_removed() {
+    let h = Harness::new();
+    h.dispute(1);
+    h.warp_to(DEFAULT_MAX_DISPUTE_DURATION as u64);
+    h.escrow.resolve_expired_dispute(&1);
+    assert_typed_error(
+        h.escrow.try_get_dispute_escalation_status(&1),
+        Error::InvalidEscrowState,
+    );
+
+    h.env.as_contract(&h.escrow.address, || {
+        h.env.storage().persistent().remove(&(ESCROW, 1u32));
+        assert!(matches!(
+            CraftNexusContract::get_dispute_escalation_status(h.env.clone(), 1),
+            Err(Error::EscrowNotFound)
+        ));
+    });
+    assert_typed_error(
+        h.escrow.try_get_dispute_escalation_status(&1),
+        Error::EscrowNotFound,
+    );
+}
+
+#[test]
+fn escalation_status_returns_error_when_platform_config_is_missing() {
+    let h = Harness::new();
+    h.dispute(1);
+    h.env.as_contract(&h.escrow.address, || {
+        h.env.storage().instance().remove(&DataKey::PlatformConfig);
+        assert!(matches!(
+            CraftNexusContract::get_dispute_escalation_status(h.env.clone(), 1),
+            Err(Error::PlatformNotInitialized)
+        ));
+    });
+    assert_typed_error(
+        h.escrow.try_get_dispute_escalation_status(&1),
+        Error::PlatformNotInitialized,
+    );
+}
+
+#[test]
+fn escalation_status_returns_error_when_platform_config_is_corrupt() {
+    let h = Harness::new();
+    h.dispute(1);
+    h.env.as_contract(&h.escrow.address, || {
+        h.env
+            .storage()
+            .instance()
+            .set(&DataKey::PlatformConfig, &0u32);
+        assert!(matches!(
+            CraftNexusContract::get_dispute_escalation_status(h.env.clone(), 1),
+            Err(Error::CorruptedPlatformConfig)
+        ));
+    });
+}
+
+#[test]
+fn escalation_status_uses_defaults_when_optional_keys_are_missing() {
+    let h = Harness::new();
+    h.dispute(1);
+    h.env.as_contract(&h.escrow.address, || {
+        h.env
+            .storage()
+            .persistent()
+            .remove(&DataKey::EscalationCheckpoints);
+        h.env
+            .storage()
+            .persistent()
+            .remove(&DataKey::DisputeEscalationState(1));
+        h.env
+            .storage()
+            .persistent()
+            .remove(&DataKey::SettlementReceipt(1));
+    });
+    let status = h.escrow.get_dispute_escalation_status(&1);
+    assert_eq!(status.recorded_tier, EscalationTier::Assigned);
+    assert_eq!(
+        status.schedule.party_deadline,
+        START + DEFAULT_DISPUTE_ESCALATION_WINDOW as u64
+    );
+    assert!(!status.is_finalized);
+}
