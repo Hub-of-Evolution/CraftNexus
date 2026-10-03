@@ -8538,9 +8538,12 @@ impl CraftNexusContract {
 
     /// Return the assignment snapshot for a disputed order.
     pub fn get_dispute_assignment(env: Env, order_id: u32) -> Option<DisputeAssignment> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::DisputeAssignment(order_id))
+        let key = DataKey::DisputeAssignment(order_id);
+        let assignment = env.storage().persistent().get(&key);
+        if assignment.is_some() {
+            Self::extend_persistent_read(&env, &key);
+        }
+        assignment
     }
 
     /// Reassign an open dispute to the current arbitrator assignment.
