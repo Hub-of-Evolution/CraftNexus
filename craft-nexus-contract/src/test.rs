@@ -7803,6 +7803,101 @@ fn test_partial_refund_cancel_allows_new_proposal_but_not_replay() {
 }
 
 #[test]
+fn test_propose_recon_repair_details_rejects_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
+
+    let admin = client.get_platform_config().admin;
+    let token_client = token::Client::new(&env, &token_id);
+    let admin_balance_before = token_client.balance(&admin);
+    let contract_address = client.address.clone();
+    let contract_balance_before = token_client.balance(&contract_address);
+
+    // Pause platform
+    client.set_paused(&true);
+
+    let actions = soroban_sdk::vec![&env];
+
+    // Attempt to propose
+    let res = client.try_propose_recon_repair_details(
+        &token_id,
+        &100,
+        &actions
+    );
+    assert_eq!(res.unwrap_err(), Ok(crate::Error::ContractPaused));
+
+    let admin_balance_after = token_client.balance(&admin);
+    let contract_balance_after = token_client.balance(&contract_address);
+
+    assert_eq!(admin_balance_before, admin_balance_after);
+    assert_eq!(contract_balance_before, contract_balance_after);
+}
+
+#[test]
+fn test_create_recurring_escrow_rejects_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1000);
+
+    // Pause platform
+    client.set_paused(&true);
+
+    let token_client = token::Client::new(&env, &token_id);
+    let buyer_balance_before = token_client.balance(&buyer);
+    let seller_balance_before = token_client.balance(&seller);
+
+    // Attempt to create recurring escrow
+    let res = client.try_create_recurring_escrow(
+        &buyer,
+        &seller,
+        &token_id,
+        &500,
+        &3600,
+        &12
+    );
+    assert_eq!(res.unwrap_err(), Ok(crate::Error::ContractPaused));
+
+    let buyer_balance_after = token_client.balance(&buyer);
+    let seller_balance_after = token_client.balance(&seller);
+
+    assert_eq!(buyer_balance_before, buyer_balance_after);
+    assert_eq!(seller_balance_before, seller_balance_after);
+}
+
+#[test]
+fn test_cancel_partial_refund_rejects_when_paused() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    token_admin.mint(&buyer, &1000);
+    client.create_escrow(&buyer, &seller, &token_id, &1000, &1, &None);
+    client.dispute_escrow(&1, &Symbol::new(&env, "Test"), &buyer);
+
+    client.propose_partial_refund(&1, &300, &buyer);
+
+    // Pause platform
+    client.set_paused(&true);
+
+    let token_client = token::Client::new(&env, &token_id);
+    let buyer_balance_before = token_client.balance(&buyer);
+    let seller_balance_before = token_client.balance(&seller);
+
+    // Attempt to cancel
+    let res = client.try_cancel_partial_refund(&1);
+    assert_eq!(res.unwrap_err(), Ok(crate::Error::ContractPaused));
+
+    let buyer_balance_after = token_client.balance(&buyer);
+    let seller_balance_after = token_client.balance(&seller);
+
+    assert_eq!(buyer_balance_before, buyer_balance_after);
+    assert_eq!(seller_balance_before, seller_balance_after);
+}
+
+#[test]
 fn test_dispute_cannot_be_resolved_twice_via_partial_and_arbitration() {
     let env = Env::default();
     env.mock_all_auths();
