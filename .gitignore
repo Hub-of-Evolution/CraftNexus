@@ -6,3 +6,5 @@ create_issues_v2.py
 __pycache__/
 *.py[cod]
 *$py.class
+config.bat
+node_modules
