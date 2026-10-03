@@ -36,6 +36,7 @@ jobs:
           name: safety-gate-report
           path: |
             craft-nexus-contract/target/safety-gate-report.json
+            craft-nexus-contract/target/native-wasm-differential.json
             craft-nexus-contract/target/cross-lifecycle-failure.txt
             craft-nexus-contract/target/wasm32v1-none/release/craft_nexus_contract.wasm
           if-no-files-found: ignore
