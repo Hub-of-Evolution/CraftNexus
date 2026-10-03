@@ -1,20 +1,21 @@
-use soroban_std::{address, contract, contractimpl, contracttype, symbol_short};
-use sorban_std::stroktype;
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, String, Symbol, Vec, Map};
 
-const MAX_DISPUTING_DURATION_KEY: symbol_short!("MaxDipDur");
+/// Resource-aware model for batch-escrow continuations (Issue #1146).
+pub mod resource_model;
 
-const DEFAULT_MAx_DISPUTE_DURATION: u64 = 60; // 60 seconds
-
-/// Error types for the craft-nexus contract.
-const ERROR_NOT_INITIALIZED: u32 = 1;
-const ERROR_INVALID_DURATION: u32 = 2;
-
-trait Error {
-    fn; code(&Self) -> u32;
-    fn message(&Self) -> String;
-}
-
-pub struct NotInitialized;
+/// Error codes grouped by category for off-chain triage.
+///
+/// # Categories
+///
+/// | Range   | Category     | Meaning                                         | Triage                    |
+/// |---------|-------------|-------------------------------------------------|---------------------------|
+/// | 1–9     | Auth/Access | Authorization, ownership, or existence failures | Rollback immediately      |
+/// | 10–19   | State       | Invalid state transitions or preconditions      | Retry after state change  |
+/// | 20–29   | Config      | Operator-configurable limits or misconfig       | Operator must act         |
+/// | 30–39   | Operational | System or cooldown gates                        | Retry after cooldown      |
+/// | 40–42   | Validation  | Input validation failures                       | Fix caller input          |
+///
+/// Use [`is_retryable`] to determine whether an error may succeed on retry.
 
 /// Centralised TTL thresholds and refresh helpers.
 pub mod ttl;
@@ -67,106 +68,1655 @@ impl Error for InvalidDuration {
     }
 }
 
-#[derive(Clone, Debug, Eq,PartialEq)]
-pub enum ContractError {
-    NotInitialized,
-    InvalidDuration,
+#[must_use]
+pub fn is_retryable(error: Error) -> bool {
+    matches!(
+        error,
+        Error::InvalidEscrowState
+            | Error::ReleaseWindowNotElapsed
+            | Error::ContractPaused
+            | Error::DisputeExpired
+            | Error::StakeCooldownActive
+            | Error::ReentryDetected
+            | Error::StakeQueueFull
+            | Error::UpgradeCooldownActive
+            | Error::CycleNotReady
+            | Error::BatchLimitExceeded
+            | Error::ChallengeWindowActive
+            | Error::EscalationWindowActive
+            | Error::ArbitratorDeadlineExceeded
+    )
 }
 
-pub type Result<T> = core::result::Result<T, ContractError>;
+const ESCROW: Symbol = symbol_short!("ESCROW");
+const PLATFORM_FEE: Symbol = symbol_short!("PLAT_FEE");
+const PLATFORM_WALLET: Symbol = symbol_short!("PLAT_WAL");
+const ONBOARD_CALL_FAILED: Symbol = symbol_short!("OB_FAIL");
 
-/// Storage key for the maximum dispute duration.
-pub fn max_dispute_duration_key() -> symbol_short {
-    MAX_DISPUTE_DURATION_KEY
-}
+const BASE58_BTC_CHARSET: [bool; 256] = {
+    let mut chars = [false; 256];
 
-/// Returns the current maximum dispute duration in seconds.
+    let mut i = b'1' as usize;
+    while i <= b'9' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'A' as usize;
+    while i <= b'H' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'J' as usize;
+    while i <= b'N' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'P' as usize;
+    while i <= b'Z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'a' as usize;
+    while i <= b'k' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    i = b'm' as usize;
+    while i <= b'z' as usize {
+        chars[i] = true;
+        i += 1;
+    }
+
+    chars
+};
+
+/// Storage lifecycle, compaction, and TTL-management framework (#920).
+pub use storage_lifecycle::{
+    CompactionReport, StorageRetentionPolicy, DEFAULT_RETAINED_AUDIT_ENTRIES,
+    DEFAULT_RETAINED_EMERGENCY_HISTORY, DEFAULT_RETAINED_STAKE_HISTORY,
+    DEFAULT_RETAINED_UPGRADE_HISTORY,
+};
+const TOTAL_FEES: Symbol = symbol_short!("TOT_FEES");
+
+/// Standard TTL threshold for persistent storage (approx 14 hours at 5s ledger)
+const TTL_THRESHOLD: u32 = 10_000;
+/// Lower TTL threshold used for hot index reads to reduce the cost of frequent
+/// TTL refresh calls (Issue #533).
+const READ_TTL_THRESHOLD: u32 = 1_000;
+/// Standard TTL extension for persistent storage (approx 30 days)
+const TTL_EXTENSION: u32 = 518_400;
+
+// Default configuration constants (can be overridden via PlatformConfig)
+// Re-exported from the centralised time_policy module for single source of truth.
+/// Default grace period for WASM upgrades (7 days in seconds)
+const DEFAULT_WASM_UPGRADE_COOLDOWN: u32 = time_policy::WASM_UPGRADE_COOLDOWN as u32;
+/// Minimum enforceable WASM upgrade cooldown (1 day in seconds) (#1062).
 ///
-/// Returns `Err(ContractError::NotInitialized)` when the key is absent,
-/// e.g. after archival or a partial migration. This function must never trap.
-pub fn get_max_dispute_duration(env: &Env) -> Result<u64> {
-    let key = max_dispute_duration_key();
-    // Use extend_persistent_read to avoid panicking on hot persistent keys.
-    env.extend_persistent_read(&key);
-    match env.storage().persistent().get::|_|>(&key) {
-        Some(duration) => {
-            if duration == 0 {
-                Err(ContractError::InvalidDuration)
-            } else {
-                Ok(duration)
-            }
-        }
-        None => Err(ContractError::NotInitialized),
-    }
+/// `execute_upgrade` correctly rejects execution before `upgrade_at`, but that
+/// review window is only meaningful if it cannot be trivially shortened. Without
+/// a floor here, a single admin call to `set_wasm_upgrade_cooldown(0)` right
+/// before proposing an upgrade would let it execute immediately, defeating the
+/// whole point of the timelock.
+const MIN_WASM_UPGRADE_COOLDOWN: u32 = 24 * 60 * 60;
+/// Minimum time (seconds) that must elapse after a cancel_upgrade_wasm call
+/// before propose_upgrade_wasm is accepted again (Issue #618).
+/// Prevents the cancel-and-repropose pattern that resets the review window.
+const CANCEL_REPROPOSE_COOLDOWN: u64 = time_policy::CANCEL_REPROPOSE_COOLDOWN;
 
-/// Sets the maximum dispute duration in seconds.
-pub fn set_max_dispute_duration(env: &Env, duration: u64) -> Result<u64> {
-    if duration == 0 {
-        return Err(ContractError::InvalidDuration);
-    }
-    let key = max_dispute_duration_key();
-    env.storage().persistent().set(&key, &duration);
-    env.extend_persistent_read(&key);
-    Ok(duration)
+/// Default maximum duration a dispute can remain open before it can be force-resolved (30 days in seconds)
+const DEFAULT_MAX_DISPUTE_DURATION: u32 = time_policy::MAX_DISPUTE_DURATION as u32;
+
+/// Default cooldown period after staking before tokens can be unstaked (7 days in seconds)
+const DEFAULT_STAKE_COOLDOWN: u32 = time_policy::STAKE_COOLDOWN as u32;
+
+/// Default minimum release window to prevent "flash" auto-releases (1 day in seconds)
+const DEFAULT_MIN_RELEASE_WINDOW: u32 = time_policy::MIN_RELEASE_WINDOW as u32;
+/// Absolute safety ceiling for admin-configurable max release window (365 days).
+const ABSOLUTE_MAX_RELEASE_WINDOW: u32 = time_policy::ABSOLUTE_MAX_RELEASE_WINDOW as u32;
+
+/// Default evidence expiry / retention window (7 days in seconds) (#927)
+const DEFAULT_EVIDENCE_EXPIRY_WINDOW: u64 = time_policy::EVIDENCE_EXPIRY_WINDOW;
+/// Schema version stamped on every persisted [`DisputeEvidence`] record (#1077).
+///
+/// Bump this whenever the structured evidence layout changes so indexers can
+/// branch on `DisputeEvidence.version` (and the `dispute_evidence`/`submitted`
+/// event's version field) without inferring the shape from field presence.
+const EVIDENCE_SCHEMA_VERSION: u32 = 1;
+/// Default challenge period window before a dispute can be resolved (1 day in seconds) (#942)
+const DEFAULT_EVIDENCE_CHALLENGE_WINDOW: u32 = time_policy::EVIDENCE_CHALLENGE_WINDOW as u32;
+/// Default dispute escalation window (3 days in seconds) (#941)
+const DEFAULT_DISPUTE_ESCALATION_WINDOW: u32 = time_policy::DISPUTE_ESCALATION_WINDOW as u32;
+/// Default moderator-review escalation checkpoint (7 days in seconds) (#1080)
+const DEFAULT_MODERATOR_ESCALATION_CHECKPOINT: u32 =
+    time_policy::MODERATOR_ESCALATION_CHECKPOINT as u32;
+/// Default admin-review escalation checkpoint (14 days in seconds) (#1080)
+const DEFAULT_ADMIN_ESCALATION_CHECKPOINT: u32 = time_policy::ADMIN_ESCALATION_CHECKPOINT as u32;
+/// Default rate limit max calls per window (#943)
+const DEFAULT_RATE_LIMIT_MAX_CALLS: u32 = 5;
+/// Default rate limit window (1 hour in seconds) (#943)
+const DEFAULT_RATE_LIMIT_WINDOW: u32 = time_policy::RATE_LIMIT_WINDOW as u32;
+// ─── Liquidation / collateral health (#1111) ────────────────────────────────
+/// Default maximum fraction of the deficit that may be seized in a single
+/// liquidation call, expressed in basis points (10_000 = 100%).
+const DEFAULT_LIQUIDATION_MAX_SEIZURE_BPS: u32 = 5000; // 50%
+/// Default grace period (seconds) after under-collateralization before
+/// an artisan may be flagged as LiquidationEligible.
+const DEFAULT_LIQUIDATION_GRACE_PERIOD: u64 = 2 * 24 * 60 * 60; // 2 days
+/// Maximum liquidation record history retained.
+const MAX_LIQUIDATION_HISTORY: u32 = 256;
+
+/// Maximum platform fee in basis points (10000 = 100%)
+const MAX_PLATFORM_FEE_BPS: u32 = 1000; // 10% max
+const MAX_TOTAL_RELEASE_WINDOW: u32 = time_policy::MAX_TOTAL_RELEASE_WINDOW as u32;
+const CURRENT_ESCROW_VERSION: u32 = 4;
+/// Current version for all lifecycle event payload schemas.
+///
+/// Compatibility rules:
+/// - Keep field ordering deterministic and append-only within a version.
+/// - Increment this value when adding, removing, renaming, or reordering fields.
+/// - Consumers must branch on `schema_version` before decoding payload fields.
+pub const LIFECYCLE_EVENT_SCHEMA_VERSION: u32 = 1;
+/// Explicit storage layout version for persisted contract state.
+///
+/// New deployments initialize this to `CURRENT_STORAGE_LAYOUT_VERSION`; legacy
+/// deployments without the key must run `migrate_storage_layout` before any
+/// WASM upgrade can be executed.
+const CURRENT_STORAGE_LAYOUT_VERSION: u32 = 1;
+/// Maximum number of escrows per batch operation (Issue #111)
+// Conservative batch size to avoid exceeding instruction/read-write limits
+// observed on Soroban testnets. Reduced from 100 to 20 (Issue #198).
+const MAX_BATCH_SIZE: u32 = 20;
+/// Maximum number of escrows a scheduled continuation may process.
+const MAX_SCHEDULED_BATCH_WORK: u32 = 5;
+const MAX_PAGE_SIZE: u32 = 100;
+/// Timeout for unfunded escrows before they can be cancelled (24 hours) (#213)
+const UNFUNDED_CANCEL_TIMEOUT: u64 = time_policy::UNFUNDED_CANCEL_TIMEOUT;
+/// Hard ceiling for `NextRecurringEscrowId` (Issue #233).
+///
+/// `u64::MAX` is reserved as a sentinel so the allocator can detect an
+/// exhausted ID space without wrapping. At the realistic peak rate of
+/// one new recurring escrow per ledger this cap is far beyond any
+/// practical deployment lifetime, but the explicit bound lets us fail
+/// fast with `Error::RecurringEscrowIdExhausted` instead of silently
+/// colliding with an existing entry.
+const MAX_RECURRING_ESCROW_ID: u64 = u64::MAX - 1;
+/// Deterministic fee policy version. Bump when fee allocation formulas change.
+const FEE_POLICY_VERSION: u32 = 1;
+/// Schema version for the observability snapshot returned by
+/// `get_observability_snapshot`. Bump when adding or reordering fields so
+/// off-chain dashboards never misread a historical snapshot.
+const OBSERVABILITY_SNAPSHOT_VERSION: u32 = 1;
+/// Persistent key for the admin-controlled observability reset epoch.
+const OBSERVABILITY_RESET_EPOCH: Symbol = symbol_short!("OBS_EPOC");
+/// Maximum number of upgrade records retained in `UpgradeHistory`. Older
+/// records are dropped FIFO once the cap is reached. Sized so a contract
+/// upgraded twice a year for ~16 years still has full visibility.
+const MAX_UPGRADE_HISTORY: u32 = 32;
+/// Default retention window for immutable archival summaries (90 days).
+const DEFAULT_ARCHIVAL_RETENTION_WINDOW: u64 = 90 * 24 * 60 * 60;
+/// Default number of archive index entries scanned per compaction step.
+const DEFAULT_ARCHIVAL_COMPACTION_BATCH: u32 = 25;
+/// Upper bound for one archival maintenance step (migration or compaction).
+const MAX_ARCHIVAL_COMPACTION_BATCH: u32 = 50;
+/// Maximum number of records a single migration precondition scan will inspect
+/// before the gate fails closed with `MigrationPrecondition::ScanBudgetExceeded`
+/// (#1118).
+///
+/// The gate is deliberately *not* allowed to validate a prefix of the state and
+/// then report success: a partially-scanned deployment would let a migration
+/// start while an unscanned record still violated a precondition. Exceeding the
+/// budget is therefore reported as a failure, and the operator is told to use
+/// the staged, resumable migration runner (see
+/// `docs/versioned-state-migration.md`) rather than the single-shot migration
+/// entrypoints.
+const MAX_MIGRATION_PRECONDITION_SCAN: u32 = 200;
+/// Maximum number of migration precondition audit records retained in the
+/// bounded FIFO log (#1118). Older records are dropped; long-term audit trails
+/// should mirror the `migration_precondition_audited` events off-chain.
+const MAX_MIGRATION_PRECONDITION_AUDITS: u32 = 32;
+
+/// Symbol topics emitted alongside `UpgradeProposalEvent`.
+const UPGRADE_PROPOSED: Symbol = symbol_short!("UPG_PROP");
+const UPGRADE_APPROVED: Symbol = symbol_short!("UPG_APPR");
+const UPGRADE_CANCELLED: Symbol = symbol_short!("UPG_CANC");
+const UPGRADE_EXECUTED: Symbol = symbol_short!("UPG_EXEC");
+/// Maximum number of stake history entries per artisan (bounded queue to prevent storage bloat) (#237)
+const MAX_STAKE_HISTORY_SIZE: u32 = 100;
+/// Threshold at which to trigger automatic pruning of old stake history entries (#237)
+const STAKE_HISTORY_PRUNE_THRESHOLD: u32 = 80;
+/// Maximum number of stake deposits per artisan queue (bounded to prevent storage bloat)
+const MAX_STAKE_QUEUE_SIZE: u32 = 50;
+/// Threshold at which to trigger automatic pruning of matured stake deposits
+const STAKE_QUEUE_PRUNE_THRESHOLD: u32 = 40;
+/// Time lock period before admin recovery is allowed (7 days) (#240)
+const ADMIN_RECOVERY_DELAY: u64 = time_policy::ADMIN_RECOVERY_DELAY;
+/// Minimum allowed admin recovery cooldown. Deploys attempting to set a
+/// shorter window (including zero) will be rejected during recovery.
+const MIN_ADMIN_RECOVERY_COOLDOWN: u64 = time_policy::MIN_ADMIN_RECOVERY_COOLDOWN;
+/// Default timelock delay for pending critical admin actions (24 hours).
+const DEFAULT_ADMIN_ACTION_TIMELOCK_DELAY: u64 = time_policy::ADMIN_ACTION_TIMELOCK_DELAY;
+/// Default bounded expiration window for two-step admin transfers (7 days).
+const DEFAULT_ADMIN_TRANSFER_WINDOW: u64 = time_policy::ADMIN_TRANSFER_WINDOW;
+
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum DisputeTransition {
+    Initiate,
+    SubmitEvidence,
+    Escalate,
+    ProposeRefund,
+    AcceptRefund(Address), // address of the proposer
+    CancelRefund(Address), // address of the proposer
+    ResolveArbitrated,
 }
 
-/// Clears the max dispute duration, modeling a terminal state or archival.
-pub fn clear_max_dispute_duration(env: &Env) {
-    let key = max_dispute_duration_key();
-    env.storage().persistent().remove(&key);
+/// The kind of critical admin action that requires multi-sig approval
+/// and timelock enforcement.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum AdminActionKind {
+    PausePlatform(bool),
+    SetPlatformFee(u32),
+    SetPlatformWallet(Address),
+    SetWasmUpgradeCooldown(u32),
+    SetMinStakeRequired(i128),
+    SweepUnallocatedFunds(Address, Address),
+    ExecuteUpgrade(BytesN<32>),
+    SetMaxDisputeDuration(u32),
+    SetStakeCooldown(u32),
+    SetArtisanFeeTier(Address, u32),
+    SetModerator(Address),
+    SetMinEscrowAmount(Address, i128),
+    SetMaxReleaseWindow(u32),
+    SetMinReleaseWindow(u32),
+    SetOnboardingContract(Address),
+    SetExpiredDisputePolicy(ExpiredDisputeFeePolicy),
+    ApplyReconciliationRepair(u64),
 }
 
-#[contract]
-pub struct CraftNexusContract;
-
-#[impl]
-pub impl CraftNexusContract {
-    pub fn get_max_dispute_duration(env: &Env) -> Result<u64> {
-        get_max_dispute_duration(env)
-    }
-
-    pub fn set_max_dispute_duration(env: &Env, duration: u64) -> Result<u64> {
-        set_max_dispute_duration(env, duration)
-    }
-
-    pub fn clear_max_dispute_duration(env: &Env) {
-        clear_max_dispute_duration(env)
-    }
+/// A pending critical admin action proposal that requires multi-sig
+/// approvals and a timelock before execution.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct AdminActionProposal {
+    pub id: u64,
+    pub kind: AdminActionKind,
+    pub proposer: Address,
+    pub approvals: Vec<Address>,
+    pub threshold: u32,
+    pub signers: Vec<Address>,
+    pub created_at: u64,
+    pub ready_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+    /// Revision consumed when this action executed. Zero until execution.
+    pub applied_revision: u32,
 }
 
-#test
+/// Storage keys for the admin action proposal system.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum AdminActionDataKey {
+    NextAdminActionId,
+    AdminAction(u64),
+    AdminActionSigners,
+    AdminActionThreshold,
+    AdminActionTimelockDelay,
 }
-mod tests {
-    use super::*;
-    use sorban_std::Env;
 
-    #[test]
-    fn get_max_dispute_duration_missing_key_returns_error() {
-        let env = Env::default();
-        let result = get_max_dispute_duration(&env);
-        assert_eq!(result, Err(ContractError::NotInitialized));
-    }
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum DataKey {
+    Escrow(u32),
+    /// DEPRECATED: Legacy vector-based storage. Kept for backward compatibility.
+    /// New implementations should use BuyerEscrowIndexed instead.
+    BuyerEscrows(Address),
+    /// DEPRECATED: Legacy vector-based storage. Kept for backward compatibility.
+    /// New implementations should use SellerEscrowIndexed instead.
+    SellerEscrows(Address),
+    MinEscrowAmount(Address),
+    TotalFees(Address),
+    FeeTokenIndex,
+    FeeTokenConfig(Address),
+    ContractVersion,
+    /// Platform configuration storage key
+    PlatformConfig,
+    /// Explicit storage layout version for persisted state.
+    StorageLayoutVersion,
+    /// Custom fee tier for an artisan (basis points)
+    ArtisanFeeTier(Address),
+    /// Staked token amount and asset for an artisan
+    ArtisanStake(Address),
+    /// DEPRECATED legacy storage: Token address backing an artisan's staked balance.
+    ///
+    /// Replaced by [`ArtisanStake::token`] in [`ArtisanStakeData`]. Kept for
+    /// lazy migration of pre-v2 stake records during contract upgrades.
+    ArtisanStakeToken(Address),
+    StakeCooldownEnd(Address),
+    /// DEPRECATED single-cooldown timestamp for an artisan.
+    ///
+    /// Active stake/unstake logic uses [`DataKey::ArtisanStakeQueue`]; this
+    /// key is **never read** by any code path in the live contract and
+    /// cannot influence cooldown decisions. It is updated alongside the
+    /// queue (set to the latest `cooldown_end`) purely so older read-only
+    /// clients still see a meaningful value. Once a queue is fully
+    /// drained the key is removed in `unstake_tokens`.
+    ///
+    ///
+    /// Per-deposit stake queue for an artisan. Each entry represents an
+    /// individual deposit and its cooldown end timestamp. This allows
+    /// accurate tracking of staking timeframes when multiple deposits
+    /// are made at different times.
+    ArtisanStakeQueue(Address),
+    /// Count of entries in the artisan stake queue (for bounds checking)
+    ArtisanStakeQueueCount(Address),
+    /// Indexed storage of stake deposits (Address, index) -> StakeDeposit
+    ArtisanStakeQueueIndexed(Address, u32),
+    /// Partial refund proposal for a disputed order
+    PartialRefundProposal(u32),
+    /// Monotonic revision counter for partial refund proposals
+    PartialRefundNonce(u32),
+    /// Terminal settlement receipt; presence means the dispute is finalized.
+    SettlementReceipt(u32),
+    /// Blacklisted arbitrator address
+    ArbitratorBlacklist(Address),
+    /// Count of currently open disputes
+    ActiveDisputeCount,
+    /// Cumulative funded escrow volume
+    TotalVolume,
+    /// Re-entrancy guard key
+    ReentryGuard,
+    /// Pending admin address for two-step transfer
+    PendingAdmin,
+    /// Monotonic revision counter for two-step admin transfer proposals
+    AdminTransferRevision,
+    /// Proposal for contract WASM upgrade
+    WasmUpgradeProposal,
+    /// Configurable maximum release window (in seconds)
+    MaxReleaseWindow,
+    /// Address of the deployed onboarding contract for cross-contract reputation calls
+    OnboardingContractAddress,
+    /// DEPRECATED legacy storage: Map of whitelisted token addresses (Address -> bool).
+    /// New code stores each token as an individual key-value pair.
+    WhitelistedTokens,
+    /// Individual whitelisted token entry (Address -> bool)
+    WhitelistedTokenIndexed(Address),
+    /// Count of whitelisted tokens for efficient enumeration.
+    WhitelistedTokenCount,
+    /// DEPRECATED: Legacy monolithic Vec of all escrow order IDs.
+    /// New writes use [`DataKey::GlobalEscrowIdIndexed`] (#515). Kept for
+    /// lazy migration on the next index update or paginated read.
+    AllEscrowIds,
+    /// Total count of escrows ever created; O(1) length for indexed enumeration
+    EscrowCount,
+    /// Indexed global escrow order ID by creation sequence (#515).
+    /// Each entry stores one `u32` order ID, avoiding Vec rewrites on batch create.
+    GlobalEscrowIdIndexed(u32),
+    /// Fallback admin address for recovery if primary admin storage is corrupted (#240)
+    FallbackAdmin,
+    /// Timestamp when admin recovery mechanism becomes available (time-lock safety).
+    /// Stored as a compact `u64` ledger timestamp (#431 / key index #30).
+    AdminRecoveryTime,
+    /// The configured delay (seconds) that was recorded when the recovery time
+    /// was initiated. Used to validate that a minimum cooldown was respected.
+    AdminRecoveryDelay,
+    /// Historical record of stake changes per artisan (bounded queue for audit trail) (#237)
+    StakeHistory(Address),
+    /// Count of entries in the stake history queue (bounds checking)
+    StakeHistoryCount(Address),
+    /// Timestamp when an artisan's stake was last modified (for maintenance checks)
+    StakeLastModified(Address),
+    /// Number of fund-movement audit entries for a given actor/account.
+    FundAuditCount(Address),
+    /// Indexed fund-movement audit entry for an actor/account.
+    FundAuditIndexed(Address, u32),
+    /// Indexed storage of a buyer's escrow ID by position
+    BuyerEscrowIndexed(Address, u32),
+    /// Indexed storage of a seller's escrow ID by position
+    SellerEscrowIndexed(Address, u32),
+    /// Count of a buyer's escrows
+    BuyerEscrowCount(Address),
+    /// Count of a seller's escrows
+    SellerEscrowCount(Address),
+    /// Total locked funds across all active escrows for a given token address.
+    TotalLocked(Address),
+    /// Total amount of funds currently staked by artisans for a token address.
+    TotalStaked(Address),
+    /// Indexed artisan address with a persisted stake record.
+    StakedArtisanIndexed(u32),
+    /// Number of indexed artisan stake records.
+    StakedArtisanCount,
+    /// Latest completed reconciliation result for a token address.
+    ReconciliationReport(Address),
+    /// In-progress reconciliation accumulator for a token address.
+    ReconciliationProgress(Address),
+    /// Repair plan awaiting explicit admin-action approval.
+    ReconciliationRepairPlan(u64),
+    /// Monotonic repair-plan identifier.
+    NextReconciliationRepairPlanId,
+    /// Consumed marker for executed repair plans to ensure double application is harmless
+    ConsumedRepairPlan(u64),
+    /// Cumulative residual balance allocated across repair plans for a token
+    AllocatedResidualBalance(Address),
+    /// Bounded log of completed WASM upgrades. Capped at MAX_UPGRADE_HISTORY
+    UpgradeHistory,
+    /// Compatibility evidence for completed WASM upgrades.
+    UpgradeCompatibilityHistory,
+    /// Key for a recurring escrow by its ID
+    RecurringEscrow(u64),
+    /// ID counter for recurring escrows
+    NextRecurringEscrowId,
+    /// Number of recurring escrow records created.
+    RecurringEscrowCount,
+    /// Persisted resource-aware batch escrow job.
+    BatchEscrowJob(u64),
+    /// Count of currently active (non-released, non-refunded) escrows or recurring escrows for a user address.
+    ActiveObligations(Address),
+    /// Required number of distinct signer approvals before a WASM upgrade proposal is committed.
+    UpgradeThreshold,
+    /// Canonical per-round approval state (signers snapshot, threshold snapshot,
+    /// round nonce, and accumulated approvals).  Replaces the old hash-keyed
+    /// `UpgradeApprovals(BytesN<32>)` to prevent cross-round replay.
+    /// Always stored at index 0; the nonce lives inside the struct.
+    UpgradeApprovalState(u32),
+    /// Ordered list of addresses authorized to co-sign WASM upgrade proposals.
+    UpgradeSigners,
+    /// Ledger timestamp (u64) recorded when the last upgrade proposal was
+    /// cancelled. Used to enforce CANCEL_REPROPOSE_COOLDOWN (Issue #618).
+    LastUpgradeCancelledAt,
+    /// Differential compatibility manifest keyed by the proposed WASM hash.
+    UpgradeCompatibilityManifest(BytesN<32>),
+    /// Immutable upgrade state commitment record keyed by the deployed WASM hash.
+    /// Persists after successful upgrade execution to provide a verifiable,
+    /// tamper-evident record of the migrated state and compatibility evidence.
+    UpgradeStateCommitment(BytesN<32>),
+    /// Structured evidence log for a disputed escrow order (#927)
+    EvidenceLog(u32),
+    /// Submitted evidence hash to prevent reuse across disputes (#927)
+    UsedEvidenceHash(BytesN<32>),
+    /// Escalation record for a dispute (#941)
+    DisputeEscalation(u32),
+    /// Assignment snapshot for a disputed escrow.
+    DisputeAssignment(u32),
+    /// Monotonic revision of the active arbitrator assignment.
+    ArbitratorAssignmentRevision,
+    /// Configurable dispute escalation window in seconds (#941)
+    DisputeEscalationWindow,
+    /// Tiered escalation ladder state for a pending dispute (#1080)
+    DisputeEscalationState(u32),
+    /// Admin-configurable escalation checkpoint schedule (#1080)
+    EscalationCheckpoints,
+    /// Counter for rate-limited calls per address per window (#943)
+    RateLimitCount(Address, u64),
+    /// Platform rate limit configuration (max_calls, window) (#943)
+    RateLimitConfig,
+    /// Bounded evidence challenge window for a disputed order (#942).
+    /// Stores the immutable deadline and closure state so the window
+    /// closes exactly once and finalization is blocked until the deadline.
+    EvidenceChallenge(u32),
+    /// Caller-scoped idempotency record keyed by (caller, operation_key) (#1025)
+    IdempotencyRecord(Address, BytesN<32>),
+    /// Current emergency operation in flight (only one at a time) (#1072)
+    CurrentEmergencyOperation,
+    /// Historical log of completed/failed emergency operations (#1072)
+    EmergencyOperationHistory,
+    /// Count of entries in emergency operation history (#1072)
+    EmergencyOperationHistoryCount,
+    /// Indexed history entry by position (#1072)
+    EmergencyOperationHistoryIndexed(u32),
+    /// Count of currently active recurring escrows for conflict detection (#1072)
+    ActiveRecurringCount,
+    // ─── Liquidation / collateral health (#1111) ────────────────────────────────
+    /// Snapshot of an artisan's collateral health status.
+    StakeHealthSnapshot(Address),
+    /// Current liquidation-eligibility status for an artisan.
+    LiquidationStatus(Address),
+    /// Audit record for a completed liquidation, keyed by liquidation ID.
+    LiquidationRecord(u64),
+    /// Monotonic counter for liquidation IDs.
+    NextLiquidationId,
+    /// Configurable liquidation policy thresholds.
+    LiquidationPolicyConfig,
+    /// Number of liquidation records (for indexed enumeration).
+    LiquidationRecordCount,
+    /// Indexed liquidation record by position.
+    LiquidationRecordIndexed(u32),
+    /// Monotonic admin-mutation revision. Incremented on every successful
+    /// configuration, pause, recovery, or governance write (#1071).
+    AdminRevision,
+    /// SHA-256 fingerprint of the last successfully applied admin mutation.
+    AdminMutationFingerprint,
+    /// Revision that was consumed by the last successful admin mutation.
+    LastAppliedAdminRevision,
+    /// Canonical per-signer upgrade approval keyed by proposal nonce and
+    /// signer address so each signer can count at most once (#1059).
+    UpgradeSignerApproval(u32, Address),
+    /// Configured archival record policy.
+    ArchivalPolicy,
+    /// Immutable archival summary of a terminal escrow, keyed by order ID.
+    ArchivalSummary(u32),
+    /// Monotonic count of archival summaries ever written.
+    ArchivalSummaryCount,
+    /// Indexed order IDs of archival summaries, keyed by archive position.
+    ArchivalSummaryIndexed(u32),
+    /// Next cursor for bounded/resumable archival compaction.
+    ArchivalCompactionCursor,
+    /// Most recent migration precondition audit record (#1118). Kept as its own
+    /// single key so an operator can read the blocking condition with one O(1)
+    /// call instead of paging the log.
+    LastMigrationPreconditionAudit,
+    /// Monotonic counter of migration precondition audits ever recorded (#1118).
+    MigrationPreconditionAuditCount,
+    /// Bounded FIFO log of migration precondition audit records (#1118),
+    /// capped at MAX_MIGRATION_PRECONDITION_AUDITS.
+    MigrationPreconditionAudits,
+}
 
-    #[test]
-    fn get_max_dispute_duration_after_terminal_state_returns_error() {
-        let env = Env::default();
-        set_max_dispute_duration(&env, 120).unwrap();
-        assert_eq!(get_max_dispute_duration(&env), Ok(120));
-        clear_max_dispute_duration(&env);
-        assert_eq!(
-            get_max_dispute_duration(&env),
-            Err(ContractError::NotInitialized)
-        );
-    }
+/// Emergency operation kinds: the four types of critical control operations
+/// that must be serialized to prevent interference (#1072).
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum IdempotencyOp {
+    CreateEscrow = 1,
+    ReleaseFunds = 2,
+    Refund = 3,
+}
 
-    #test]
-    fn set_max_dispute_duration_rejects_zero() {
-        let env = Env::default();
-        assert_eq!(
-            set_max_dispute_duration(&env, 0),
-            Err(ContractError::InvalidDuration)
-        );
-    }
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct IdempotencyRecord {
+    pub op: IdempotencyOp,
+    pub order_id: u32,
+    pub params_hash: BytesN<32>,
+    pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EmergencyOpKind {
+    /// Admin account recovery via fallback admin
+    AdminRecovery = 0,
+    /// Unallocated fund sweep operation
+    Sweep = 1,
+    /// WASM contract upgrade operation
+    Upgrade = 2,
+    /// Platform pause/unpause operation
+    Pause = 3,
+}
+
+/// Emergency operation execution phases: tracks lifecycle of in-flight operations
+/// to support timeout/force-release and audit trails (#1072).
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EmergencyOpPhase {
+    /// Operation is currently acquiring the lock and performing work
+    Executing = 0,
+    /// Operation completed successfully
+    Completed = 1,
+    /// Operation failed and was aborted (state reset to Idle)
+    Failed = 2,
+}
+
+/// Current emergency operation state: tracks which operation (if any) is in flight,
+/// who initiated it, which phase it's in, and a revision counter for optimistic
+/// concurrency control (#1072).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EmergencyOperation {
+    /// The type of in-flight operation
+    pub kind: EmergencyOpKind,
+    /// The actor who initiated the operation
+    pub actor: Address,
+    /// Current phase (Executing, Completed, or Failed)
+    pub phase: EmergencyOpPhase,
+    /// Operation revision: increments on every state transition (enter/exit/fail)
+    /// Serves as optimistic-concurrency guard and audit trail (#1072)
+    pub revision: u32,
+    /// Timestamp when operation started (in ledger seconds)
+    pub started_at: u64,
+    /// Success flag: true if operation completed successfully
+    pub success: bool,
+    /// Optional: amount affected by operation (e.g., swept funds)
+    pub amount: i128,
+}
+
+/// Policy controlling archival retention and maintenance batching.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArchivalRecordPolicy {
+    pub retention_window: u64,
+    pub compaction_batch_size: u32,
+}
+
+/// Immutable summary of a terminal escrow.
+///
+/// Written once an escrow reaches a terminal state and used for fund
+/// reconstruction after the active escrow record is pruned by historical
+/// maintenance. `finalized_at` is the ledger timestamp when the summary was
+/// created, which also drives the retention window for compaction.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArchivalSummary {
+    pub order_id: u32,
+    pub escrow: Escrow,
+    pub finalized_at: u64,
+}
+
+/// Progress for a bounded archival compaction run.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArchivalCompactionProgress {
+    pub cursor: u32,
+    pub scanned: u32,
+    pub pruned: u32,
+    pub total: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArtisanStakeData {
+    pub amount: i128,
+    pub token: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct StakeDeposit {
+    pub amount: i128,
+    pub cooldown_end: u64,
+}
+
+/// Lifecycle status of an artisan's stake collateral health.
+///
+/// # State machine
+///
+/// ```text
+/// Healthy ──► UnderCollateralized ──► LiquidationEligible ──► Liquidated
+///    ▲                   │                       │               │
+///    │               cure_liquidation()       cure_liquidation() │
+///    └─────────────────┘                       └───────────────┘
+/// ```
+///
+/// An artisan enters `UnderCollateralized` when `evaluate_stake_health`
+/// detects `stake < required_collateral`. After a configurable grace period
+/// (or immediate admin action), the artisan may be promoted to
+/// `LiquidationEligible`, at which point authorized parties may call
+/// `trigger_liquidation`. Curing (topping up stake) always returns to
+/// `Healthy` regardless of prior state.
+#[contracttype(export = false)]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum LiquidationStatus {
+    /// Stake meets or exceeds required collateral.
+    Healthy = 0,
+    /// Active obligations exceed staked collateral but no liquidation action yet.
+    UnderCollateralized = 1,
+    /// Admin has flagged the artisan; authorized parties may trigger liquidation.
+    LiquidationEligible = 2,
+    /// Liquidation has been executed; only cure can restore health.
+    Liquidated = 3,
+}
+
+/// Deterministic snapshot of an artisan's collateral health at a specific
+/// ledger timestamp. All fields are derived from on-chain state and the
+/// provided timestamp; no external oracles are consulted.
+///
+/// # Health formula
+///
+/// ```text
+/// required_collateral = active_obligations × min_stake_required
+/// health_ratio        = current_stake / max(required_collateral, 1)
+/// deficit             = max(0, required_collateral − current_stake)
+/// ```
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct StakeHealthSnapshot {
+    /// The artisan address evaluated.
+    pub artisan: Address,
+    /// Ledger timestamp at which this snapshot is valid.
+    pub evaluated_at: u64,
+    /// Current staked amount (i128).
+    pub current_stake: i128,
+    /// Number of active escrow/recurring-escrow obligations.
+    pub active_obligations: u32,
+    /// Required collateral (obligations × min_stake_required).
+    pub required_collateral: i128,
+    /// health_ratio = current_stake / max(required_collateral, 1), scaled by
+    /// 10_000 (100.00% = 10_000). A value of 0 means zero stake.
+    pub health_ratio_bps: u32,
+    /// Deficit amount: max(0, required − current). Zero when healthy.
+    pub deficit: i128,
+    /// Current liquidation lifecycle status.
+    pub status: LiquidationStatus,
+}
+
+/// Configurable policy thresholds for the liquidation subsystem.
+///
+/// Stored under [`DataKey::LiquidationPolicy`] and admin-adjustable via
+/// `set_liquidation_policy`.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct LiquidationPolicyData {
+    /// Maximum fraction of the deficit that may be seized in a single
+    /// liquidation call, expressed in basis points (10_000 = 100%).
+    /// Prevents over-seizure relative to actual harm.
+    pub max_seizure_bps: u32,
+    /// Grace period (seconds) after an artisan becomes under-collateralized
+    /// before they can be flagged as LiquidationEligible.
+    pub grace_period_secs: u64,
+    /// Whether liquidation is enabled at all (admin kill-switch).
+    pub enabled: bool,
+}
+
+/// Audit record for a completed liquidation event.
+#[contracttype(export = false)]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct LiquidationRecord {
+    /// Monotonically increasing liquidation identifier.
+    pub id: u64,
+    /// The artisan whose stake was partially seized.
+    pub artisan: Address,
+    /// Admin or authorized party that triggered the liquidation.
+    pub liquidator: Address,
+    /// Amount actually seized (≤ deficit, ≤ max_seizure policy).
+    pub seized_amount: i128,
+    /// Ledger timestamp when liquidation executed.
+    pub executed_at: u64,
+    /// The artisan's health_ratio_bps at execution time.
+    pub health_ratio_bps: u32,
+    /// Whether the artisan has since cured (topped up).
+    pub cured: bool,
+    /// Ledger timestamp when cured, or 0 if not yet cured.
+    pub cured_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum RecurringEscrowAction {
+    Created = 0,
+    CycleReleased = 1,
+    Cancelled = 2,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RecurringEscrow {
+    pub id: u64,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub token: Address,
+    pub total_amount: i128,
+    pub released_amount: i128,
+    pub frequency: u64,
+    pub duration: u32,
+    pub current_cycle: u64,
+    pub last_release_time: u64,
+    pub is_active: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RecurringEscrowEvent {
+    pub schema_version: u32,
+    pub id: u64,
+    pub action: RecurringEscrowAction,
+    pub buyer: Address,
+    pub artisan: Address,
+    pub amount: i128,
+    pub timestamp: u64,
+}
+
+/// Lifecycle status of an escrow order.
+///
+/// # Live variants
+/// - `Active` — funded (or created) and open for release / refund / dispute
+/// - `Released` — funds sent to the seller
+/// - `Refunded` — funds returned to the buyer
+/// - `Disputed` — dispute opened; awaiting arbitrator resolution
+/// - `Resolved` — dispute resolved (release or refund completed)
+/// - `ReleasePending` / `RefundPending` / `DisputePending` — in-flight
+///  CEI transitions claimed while an external call is outstanding
+///
+/// # Removed legacy variants (issue #706)
+/// `Draft` and `UnderReview` were deprecated in contract version 1.2 and are
+/// **not** part of this enum. Do not reintroduce them — they caused confusion
+/// with the live lifecycle and are unused by every transition path.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformStats {
+    pub total_volume: i128,
+    pub total_escrows: u32,
+    pub active_users: u32,
+    pub whitelist_count: u32,
+}
+
+/// Aggregate, non-sensitive observability snapshot for off-chain monitoring.
+///
+/// Every count is derived with saturating arithmetic and intentionally omits
+/// buyer, seller, arbitrator, and token addresses.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ObservabilitySnapshot {
+    /// Schema version for this snapshot; bump when fields change.
+    pub version: u32,
+    /// Incremented by `reset_observability_metrics` to delineate eras.
+    pub reset_epoch: u64,
+    pub total_escrows: u64,
+    pub total_volume: i128,
+    pub active_disputes: u64,
+    pub staked_artisans: u64,
+    pub total_failures: u64,
+    pub active_jobs: u64,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum EscrowStatus {
+    Active = 0,
+    Released = 1,
+    Refunded = 2,
+    Disputed = 3,
+    Resolved = 4,
+    ReleasePending = 5,
+    RefundPending = 6,
+    DisputePending = 7,
+    /// In-flight exclusive claim while a dispute settlement path executes.
+    SettlementPending = 8,
+}
+
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EscrowStateIssue {
+    None = 0,
+    EscrowNotFound = 1,
+    PendingTransitionUnfinished = 2,
+    MissingDisputeTimestamp = 3,
+    InvalidTerminalState = 4,
+    SettlementReceiptConflict = 5,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowStateDiagnostic {
+    pub order_id: u32,
+    pub status: EscrowStatus,
+    pub is_consistent: bool,
+    pub issue: EscrowStateIssue,
+}
+
+/// Choice of resolution for a disputed escrow.
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum Resolution {
+    /// Release funds to the seller.
+    /// Platform fees ARE collected in this case.
+    ReleaseToSeller = 0,
+    /// Refund funds to the buyer.
+    /// Full amount is returned; platform fees ARE NOT collected.
+    RefundToBuyer = 1,
+}
+
+/// Describes which settlement formula to apply when computing a `FeeAllocation`.
+///
+/// Every terminal settlement path must supply one of these variants so that
+/// `compute_fee_allocation` can deterministically decide how the escrow pot is
+/// split among platform, seller, and buyer.  Adding a new path means adding a
+/// new variant here; all existing invariant tests will catch regressions.
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum SettlementKind {
+    /// Normal release (buyer-approved or auto-release).
+    /// Platform fee deducted from the seller's portion; buyer pays nothing.
+    ReleaseFunds,
+    /// Full refund with no fee (admin-initiated or dispute RefundToBuyer).
+    /// Buyer receives the entire escrow amount; platform collects nothing.
+    FullRefundNoFee,
+    /// Expired-dispute resolution: buyer receives full amount, platform fee
+    /// comes only from the seller's locked pot.
+    ExpiredDisputeDeductFromSeller,
+    /// Expired-dispute resolution: platform fee deducted from the buyer's
+    /// refund; seller receives nothing additional.
+    ExpiredDisputeDeductFromBuyer,
+    /// Expired-dispute resolution: fee split equally between buyer and seller.
+    ExpiredDisputeSplitFee,
+    /// Partial-refund settlement. `refund_gross` and `seller_gross` are the
+    /// gross portions *before* fees, supplied as context fields.
+    PartialRefund(i128, i128),
+}
+
+/// Output of `compute_fee_allocation`.
+///
+/// Every value is non-negative and the three amounts sum exactly to the
+/// original `escrow.amount`, guaranteeing the contract never leaks or
+/// over-pays:
+///
+/// ```text
+/// platform_fee + seller_amount + buyer_amount == escrow_amount
+/// ```
+///
+/// Callers **must** use these three values — and only these three values —
+/// when performing token transfers in any settlement path.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FeeAllocation {
+    /// Amount transferred to the platform wallet.
+    pub platform_fee: i128,
+    /// Net amount transferred to the seller (artisan).
+    pub seller_amount: i128,
+    /// Net amount transferred back to the buyer.
+    pub buyer_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct Escrow {
+    pub version: u32,
+    pub id: u64,
+    pub batch_id: Option<u64>,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32, // Time in seconds before auto-release
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<Symbol>,
+    pub dispute_initiated_at: Option<u64>,
+    pub funded: bool,
+    /// Ledger timestamp after which any party (or admin) may cancel this escrow
+    /// if it has not yet been funded. Set to created_at + UNFUNDED_CANCEL_TIMEOUT
+    /// for unfunded escrows; None for escrows that were funded at creation (#656).
+    pub funding_deadline: Option<u64>,
+    pub service_agreement_hash: Option<Bytes>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct LegacyEscrow {
+    pub id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<String>,
+    pub dispute_initiated_at: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct EscrowWithoutBatch {
+    pub version: u32,
+    pub id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<String>,
+    pub dispute_initiated_at: Option<u64>,
+}
+
+/// Escrow format before service_agreement_hash was added (#708).
+/// Used for backward-compatible deserialization during v4→v5 migration.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+struct EscrowV4 {
+    pub version: u32,
+    pub id: u64,
+    pub batch_id: Option<u64>,
+    pub buyer: Address,
+    pub seller: Address,
+    pub token: Address,
+    pub amount: i128,
+    pub status: EscrowStatus,
+    pub release_window: u32,
+    pub created_at: u32,
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub dispute_reason: Option<Symbol>,
+    pub dispute_initiated_at: Option<u64>,
+    pub funded: bool,
+    pub funding_deadline: Option<u64>,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum EscrowAction {
+    Created = 0,
+    Released = 1,
+    Refunded = 2,
+    Disputed = 3,
+    Resolved = 4,
+    Extended = 5,
+    BatchCreated = 6,
+    BatchReleased = 7,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FundMovementAuditEntry {
+    pub actor: Address,
+    pub amount: i128,
+    pub reason: Symbol,
+    pub timestamp: u64,
+    pub balance_impact: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct FundAllocation {
+    pub balance: i128,
+    pub total_locked: i128,
+    pub total_staked: i128,
+    pub unallocated: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReconciliationReport {
+    pub token: Address,
+    pub balance: i128,
+    pub expected_locked: i128,
+    pub expected_staked: i128,
+    pub tracked_locked: i128,
+    pub tracked_staked: i128,
+    pub scanned_escrows: u32,
+    pub next_cursor: u32,
+    pub complete: bool,
+    pub unresolved: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct RepairAction {
+    pub action_type: u32,
+    pub target: Option<Address>,
+    pub amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReconciliationRepairPlan {
+    pub id: u64,
+    pub version: u32,
+    pub token: Address,
+    pub expected_locked: i128,
+    pub expected_staked: i128,
+    pub observed_balance: i128,
+    pub observed_tracked_locked: i128,
+    pub observed_tracked_staked: i128,
+    pub discrepancy_digest: BytesN<32>,
+    pub allocated_amount: i128,
+    pub actions: Vec<RepairAction>,
+    pub approvals: Vec<Address>,
+    pub created_at: u64,
+    pub applied: bool,
+    pub cancelled: bool,
+    pub consumed: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowEvent {
+    /// Schema version for this event payload. Increment when fields are added
+    /// or reordered so off-chain indexers can handle multiple schema generations
+    /// without breaking across upgrades. Current version: 1.
+    pub schema_version: u32,
+    pub escrow_id: u64,
+    pub action: EscrowAction,
+    pub buyer: Address,
+    pub seller: Address,
+    /// Monetary fields are emitted as raw integer types (i128/u64). Avoid
+    /// converting integers to strings inside the contract — emit numeric
+    /// values and perform human-friendly formatting off-chain (UI/indexer).
+    pub amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowResolvedEvent {
+    /// Schema version for this event payload. Increment when fields are added
+    /// or reordered so off-chain indexers can handle multiple schema generations
+    /// without breaking across upgrades. Current version: 1.
+    pub schema_version: u32,
+    pub escrow_id: u64,
+    pub buyer: Address,
+    pub seller: Address,
+    pub arbitrator: Address,
+    pub amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ReputationUpdateEvent {
+    pub schema_version: u32,
+    pub address: Address,
+    pub successful_delta: u32,
+    pub disputed_delta: u32,
+    pub metrics_sales_delta: u32,
+    pub metrics_amount: i128,
+    pub token: Address,
+    pub timestamp: u64,
+}
+
+/// Tagged union used to carry a single configuration value inside
+/// [`ConfigUpdatedEvent`].
+///
+/// Soroban events must be self-describing for off-chain indexers, but
+/// `PlatformConfig` fields are heterogeneous (counts, monetary amounts,
+/// addresses, and free-form strings). Rather than emit a separate event type
+/// per field — which would bloat the contract's event ABI — every admin
+/// configuration change is normalized into one of these four variants. Indexers
+/// match on the variant tag to recover the underlying Rust type without any
+/// loss of precision (in particular, `I128` monetary values are never
+/// stringified on-chain; see the note on [`EscrowEvent::amount`]).
+///
+/// # Variant mapping
+///
+/// * `U32`     — bounded counters and basis-point fees (e.g. `platform_fee_bps`).
+/// * `I128`    — monetary thresholds such as `min_escrow_amount`.
+/// * `Address` — role and token addresses (e.g. `fee_collector`).
+/// * `String`  — human-readable identifiers that have no compact encoding.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub enum ConfigValue {
+    U32(u32),
+    I128(i128),
+    Address(Address),
+    String(String),
+}
+
+/// Emitted whenever an admin mutates a single field of the on-chain
+/// `PlatformConfig`.
+///
+/// # Topics
+///
+/// Published under `(symbol "config_updated", symbol field_name)` so indexers
+/// can subscribe to changes of a specific field cheaply. The `field_name` topic
+/// mirrors the `field_name` payload member.
+///
+/// # Preconditions
+///
+/// * The caller must be the current platform admin; the emitting function
+///   asserts `admin.require_auth()` before the storage write, so this event is
+///   only ever observed for an authorized change.
+///
+/// # Storage side-effects
+///
+/// * The corresponding `PlatformConfig` field has already been persisted by the
+///   time this event fires. The event is emitted *after* the storage write,
+///   in keeping with the check-effects-interactions ordering used throughout
+///   the contract.
+///
+/// # Payload
+///
+/// * `field_name` — symbolic name of the mutated field.
+/// * `old_value`  — value held immediately before the write.
+/// * `new_value`  — value persisted by this update.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ConfigUpdatedEvent {
+    pub schema_version: u32,
+    pub field_name: Symbol,
+    pub old_value: ConfigValue,
+    pub new_value: ConfigValue,
+    /// Admin revision consumed by the write that produced this event (#1071).
+    pub revision: u32,
+}
+
+/// Emitted when an artisan's negotiated platform-fee tier is set or changed.
+///
+/// Per-artisan fee tiers let the platform reward high-reputation sellers with a
+/// reduced `fee_bps` (basis points, where `10_000` == 100%). The persisted tier
+/// overrides the global `platform_fee_bps` for that artisan's future escrows.
+///
+/// # Topics
+///
+/// Published under `(symbol "artisan_fee_tier_updated", address artisan)` so a
+/// client can stream the fee history of a single artisan.
+///
+/// # Preconditions
+///
+/// * The caller must be the platform admin (`require_auth`).
+/// * `fee_bps` is validated against `MAX_PLATFORM_FEE_BPS`; an out-of-range
+///   value aborts with [`Error::InvalidFee`] and no event is emitted.
+///
+/// # Storage side-effects
+///
+/// * The artisan's fee-tier ledger entry is written (and its TTL extended)
+///   before this event fires.
+///
+/// # Payload
+///
+/// * `artisan` — address whose fee tier was updated.
+/// * `fee_bps` — the new fee in basis points applied to future escrows.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct ArtisanFeeTierUpdatedEvent {
+    pub schema_version: u32,
+    pub artisan: Address,
+    pub fee_bps: u32,
+}
+
+/// Emitted when an artisan stakes collateral tokens into the platform.
+///
+/// Staking is a precondition for accepting high-value escrows; the staked
+/// balance backs the artisan's dispute exposure. Token movement obeys the
+/// check-effects-interactions pattern: the artisan's persistent stake balance
+/// is increased and committed *before* the external `token.transfer` callback,
+/// so a malicious token contract cannot re-enter and observe a stale balance.
+///
+/// # Topics
+///
+/// Published under `(symbol "tokens_staked", address artisan)`.
+///
+/// # Preconditions
+///
+/// * `artisan.require_auth()` — only the staker may stake on their own behalf.
+/// * `amount` must be positive and `token` whitelisted.
+///
+/// # Storage side-effects
+///
+/// * The artisan's staked-balance entry is incremented and its TTL extended.
+///
+/// # Payload
+///
+/// * `artisan` — the staking address.
+/// * `token`   — the staked token's contract address.
+/// * `amount`  — raw token amount staked (never stringified on-chain).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct TokensStakedEvent {
+    pub schema_version: u32,
+    pub artisan: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an artisan withdraws previously staked collateral.
+///
+/// # Topics
+///
+/// Published under `(symbol "tokens_unstaked", address artisan)`.
+///
+/// # Preconditions
+///
+/// * `artisan.require_auth()`.
+/// * The stake cooldown must have elapsed, otherwise the call aborts with
+///   [`Error::StakeCooldownActive`] and no event is emitted.
+/// * The withdrawal token must match the original staking token
+///   ([`Error::StakeTokenMismatch`]).
+///
+/// # Storage side-effects
+///
+/// * The artisan's staked-balance entry is decremented *before* the outbound
+///   `token.transfer`, preserving reentrancy safety (the transfer is the final
+///   interaction in the call path).
+///
+/// # Payload
+///
+/// * `artisan` — the withdrawing address.
+/// * `token`   — the unstaked token's contract address.
+/// * `amount`  — raw token amount returned to the artisan.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct TokensUnstakedEvent {
+    pub schema_version: u32,
+    pub artisan: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+/// Emitted when an order's off-chain metadata is verified against its on-chain
+/// commitment.
+///
+/// The contract stores only a compact hash of an order's metadata (see
+/// [`EscrowMetadata`]); the full document lives off-chain (e.g. IPFS). When a
+/// verifier reveals the document and the contract confirms its hash matches the
+/// stored commitment, this event records the successful verification so
+/// indexers can mark the order's metadata as trusted.
+///
+/// # Topics
+///
+/// Published under `(symbol "metadata_verified", u64 order_id)`.
+///
+/// # Preconditions
+///
+/// * The stored commitment must exist and the revealed content must hash to it,
+///   otherwise the call aborts with [`Error::InvalidMetadataHash`].
+///
+/// # Storage side-effects
+///
+/// * None beyond TTL refresh of the order entry; verification is a read-and-
+///   compare operation that emits this audit event.
+///
+/// # Payload
+///
+/// * `order_id`  — the escrow/order whose metadata was verified.
+/// * `verifier`  — address that submitted the reveal proof.
+/// * `timestamp` — ledger timestamp at verification time.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MetadataVerifiedEvent {
+    pub schema_version: u32,
+    pub order_id: u64,
+    pub verifier: Address,
+    pub timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformPausedEvent {
+    pub schema_version: u32,
+    pub initiator: Address,
+    pub timestamp: u64,
+    /// Admin revision consumed by this pause (#1071).
+    pub revision: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct PlatformUnpausedEvent {
+    pub schema_version: u32,
+    pub initiator: Address,
+    pub timestamp: u64,
+    /// Admin revision consumed by this unpause (#1071).
+    pub revision: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct EscrowMetadata {
+    pub ipfs_hash: Option<String>,
+    pub metadata_hash: Option<Bytes>,
+    pub service_agreement_hash: Option<Bytes>,
+}
+
+/// Metadata reveal proof for privacy verification (Issue #122)
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MetadataRevealProof {
+    /// The full metadata content (off-chain document)
+    pub content: Bytes,
+    /// Optional secret key for additional verification
+    pub secret: Option<Bytes>,
+}
+
+/// Test-only metadata structure for simplified testing
+#[cfg(test)]
+#[derive(Clone, Eq, PartialEq)]
+pub struct Metadata {
+    pub title: String,
+    pub description: String,
+    pub category: String,
+}
+
+/// Proposal record for a pending WASM upgrade.
+///
+/// `upgrade_at` is the earliest ledger timestamp at which `execute_upgrade` may
+/// run; it equals `proposed_at + wasm_upgrade_cooldown` from `PlatformConfig`.
+/// `proposed_by` records the admin that submitted the proposal — note that the
+/// admin role can rotate via the two-step transfer (`update_admin` /
+/// `claim_admin`), so the value reflects the admin at proposal time, not at
+/// execution time. `execute_upgrade` re-checks the *current* admin's auth, so
+/// rotating admins cannot bypass authorization.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct WasmUpgradeProposal {
+    pub wasm_hash: BytesN<32>,
+    pub upgrade_at: u64,
+    pub proposed_by: Address,
+    pub proposed_at: u64,
+}
+
+/// Lifecycle event emitted whenever a WASM upgrade proposal is created,
+/// replaced, cancelled, or executed. Indexers can use the `action` symbol to
+/// reconstruct the upgrade audit trail without scanning storage.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeProposalEvent {
+    pub schema_version: u32,
+    pub action: Symbol,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+    pub upgrade_at: u64,
+}
+
+/// Emitted for every distinct upgrade-signer approval of a proposal round.
+///
+/// Indexers key on `(nonce, signer)` — the same pair can never appear twice
+/// for a live round because storage is canonicalized under
+/// `DataKey::UpgradeSignerApproval(nonce, signer)` (#1059).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeApprovalEvent {
+    /// Proposal round nonce (revision) this approval belongs to.
+    pub nonce: u32,
+    /// Signer that submitted this approval.
+    pub signer: Address,
+    /// WASM hash being approved.
+    pub wasm_hash: BytesN<32>,
+    pub timestamp: u64,
+    /// Number of distinct approvals recorded after this one was accepted.
+    pub approval_count: u32,
+}
+
+/// On-chain record of a completed WASM upgrade.
+///
+/// One entry is appended to `UpgradeHistory` per successful `execute_upgrade`
+/// call, providing operators and auditors visibility into how the contract
+/// reached its current `ContractVersion`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeRecord {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Additive audit record for compatibility evidence. Kept separate from
+/// `UpgradeRecord` so existing serialized upgrade history remains readable.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeCompatibilityRecord {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub state_commitment: BytesN<32>,
+    pub migration_checkpoint: BytesN<32>,
+    pub timestamp: u64,
+}
+
+/// Immutable upgrade state commitment record. Persists after successful upgrade
+/// execution to provide a verifiable, tamper-evident record of the migrated
+/// state and compatibility evidence. Commitments become immutable once activated.
+///
+/// # Immutability
+///
+/// Once `activated_at` is set and `immutable` is `true`, this record cannot be
+/// modified. Any attempt to re-execute an upgrade with the same `wasm_hash`
+/// will be rejected. This ensures upgrade state commitments are permanent and
+/// cannot be tampered with after activation.
+///
+/// # Fields
+///
+/// - `from_version` / `to_version` — version transition recorded at execution
+/// - `wasm_hash` — the deployed contract code hash
+/// - `state_digest` — SHA-256 of the migrated contract state snapshot
+/// - `migration_result_digest` — SHA-256 of migration outcome evidence
+/// - `admin` — the address that executed the upgrade
+/// - `timestamp` — ledger timestamp when the commitment was created
+/// - `activated_at` — ledger timestamp when the commitment became immutable
+/// - `immutable` — flag indicating if the commitment is locked
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeStateCommitment {
+    pub from_version: u32,
+    pub to_version: u32,
+    pub wasm_hash: BytesN<32>,
+    pub state_digest: BytesN<32>,
+    pub migration_result_digest: BytesN<32>,
+    pub admin: Address,
+    pub timestamp: u64,
+    pub activated_at: u64,
+    pub immutable: bool,
+}
+
+/// Evidence produced by an isolated old/new implementation compatibility run.
+/// Hash fields commit to the complete manifest and its test evidence; the
+/// contract deliberately does not trust an uncommitted human-readable report.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeCompatibilityManifest {
+    pub source_version: u32,
+    pub target_version: u32,
+    pub state_commitment: BytesN<32>,
+    pub interface_commitment: BytesN<32>,
+    pub authorization_commitment: BytesN<32>,
+    pub preconditions_commitment: BytesN<32>,
+    pub postconditions_commitment: BytesN<32>,
+    pub rollback_commitment: BytesN<32>,
+    pub migration_checkpoint: BytesN<32>,
+    pub migration_complete: bool,
+    pub manual_records: u32,
+}
+
+/// Stable, representative state used by migration tooling when creating a
+/// differential snapshot. The resulting hash is supplied in the manifest.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeStateSnapshot {
+    pub contract_version: u32,
+    pub escrow_count: u32,
+    pub recurring_escrow_next_id: u64,
+    pub upgrade_threshold: u32,
+    pub paused: bool,
+    pub onboarding_configured: bool,
+}
+
+/// Immutable per-round state for the multi-sig upgrade approval flow.
+///
+/// Written once on the **first** approval call for a given proposal nonce and
+/// never mutated except to append new approvals.  Keyed by
+/// `DataKey::UpgradeApprovalState(nonce)`.
+///
+/// # Security properties
+///
+/// * `signers`   — snapshotted from `UpgradeSigners` (or admin fallback) at
+///   round open.  Subsequent `set_upgrade_signers` calls cannot alter which
+///   addresses are eligible for this round, closing the signer-rotation race.
+///
+/// * `threshold` — snapshotted from `UpgradeThreshold` at round open.
+///   Mid-round `set_upgrade_threshold` calls therefore cannot lower the bar
+///   for the current round.
+///
+/// * `approvals` — grows monotonically as valid signers call
+///   `propose_upgrade_wasm`.  Only addresses present in `signers` may appear
+///   here; duplicates are rejected with `AlreadyApproved`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct UpgradeApprovalState {
+    /// Monotonically increasing round counter.  Incremented on every
+    /// `cancel_upgrade_wasm` call so that residual state from a prior
+    /// round cannot be replayed in a subsequent round.
+    pub nonce: u32,
+    /// Signer set captured when the round was opened (first approval).
+    pub signers: Vec<Address>,
+    /// Approval threshold captured when the round was opened.
+    pub threshold: u32,
+    /// Addresses that have submitted a valid approval this round.
+    pub approvals: Vec<Address>,
 }
 
 /// Per-token fee configuration introduced for #239.
@@ -884,6 +2434,286 @@ impl<'a> Drop for ReentryGuardScope<'a> {
     fn drop(&mut self) {
         CraftNexusContract::exit_reentry_guard(self.env);
     }
+}
+
+/// Stable identifier for every condition the migration gate evaluates (#1118).
+///
+/// Discriminants are grouped by the five families named in the issue and are
+/// **append-only**: existing codes must never be renumbered or reused, because
+/// operators persist them in migration tickets and off-chain runbooks. The
+/// numeric code is carried on [`MigrationPreconditionFailure::code`].
+///
+/// | Range | Family                | Question the family answers                       |
+/// |-------|-----------------------|---------------------------------------------------|
+/// | 0–9   | Versions              | Is this the state the target layout expects?      |
+/// | 10–19 | Terminal states       | Is every record settled, with nothing mid-flight? |
+/// | 20–29 | Outstanding liability | Are balances at rest, with nothing in progress?    |
+/// | 30–39 | Pending governance    | Is no approval round open against this state?     |
+/// | 40–49 | Token identities      | Does every balance still point at a known token?  |
+/// | 50–59 | Gate integrity        | Was the check able to see the whole state?        |
+#[contracttype]
+#[derive(Copy, Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+#[repr(u32)]
+pub enum MigrationPrecondition {
+    // ── Versions (0–9) ──
+    /// `PlatformConfig` must be readable. An uninitialized platform has no
+    /// legacy state to migrate, and `get_platform_config_internal` would panic
+    /// mid-migration rather than before it.
+    PlatformInitialized = 0,
+    /// The recorded contract version must be non-zero, i.e. the platform was
+    /// really initialized by `initialize`. A zero version means the legacy keys
+    /// belong to something else and must not be rewritten.
+    SourceVersionRecognised = 1,
+    /// The persisted layout version must not be *ahead* of the version this
+    /// build produces. A higher value means a newer build already rewrote the
+    /// layout, and migrating again would move records the new layout owns.
+    LayoutVersionMigratable = 2,
+    /// Every legacy blob the migration reads must decode into the type the
+    /// migration expects. `storage().get` yields `None` both for a missing key
+    /// and for a value of the wrong type, so a shape mismatch would be read as
+    /// "nothing to migrate" and a fresh layout written on top of unreadable
+    /// legacy state.
+    LegacyShapeReadable = 3,
+    // ── Terminal states (10–19) ──
+    /// No dispute may be open. A dispute pins an escrow plus its evidence,
+    /// assignment, and escalation records; re-keying the layout underneath it
+    /// strands the evidence chain.
+    NoOpenDisputes = 10,
+    /// No recurring escrow may be active. Recurring records carry their own
+    /// cycle and balance state that the target layout re-keys independently.
+    NoActiveRecurringEscrows = 11,
+    /// No two-step admin transfer may be half-completed. While a transfer is
+    /// open, `PlatformConfig.admin` and `DataKey::PendingAdmin` disagree about
+    /// who holds authority, so a migration run under the wrong identity is
+    /// indistinguishable from a legitimate one.
+    NoPendingAdminTransfer = 12,
+    /// No emergency operation may be in flight; one is already mid-mutation.
+    NoEmergencyOperationInFlight = 13,
+    /// No escrow may be parked in a `*Pending` in-flight transition. Such a
+    /// record is an exclusive claim on an unsettled transition, and that claim
+    /// outlives the layout that issued it.
+    NoIncompleteTransitions = 14,
+    // ── Outstanding liabilities (20–29) ──
+    /// No token may have funds still locked in escrow. The layout migrations
+    /// re-key `TotalLocked`; re-keying a non-zero value would drop the
+    /// platform's own accounting of funds it is holding.
+    NoLockedFunds = 20,
+    /// No escrow may belong to a batch that has not fully settled. A partially
+    /// executed batch has outstanding per-escrow liabilities that the batch
+    /// job's cursor is responsible for.
+    NoBatchJobInFlight = 21,
+    /// No token reconciliation may be part-way through. A half-finished
+    /// reconciliation has not yet settled the token's balance, so its inputs
+    /// are not final.
+    NoReconciliationInFlight = 22,
+    /// No reconciliation repair plan may have ever been created. Repair plans
+    /// move `TotalLocked` against an allocated residual, so an unapplied plan
+    /// is an outstanding claim on the very balances this migration re-keys.
+    NoPendingRepairPlan = 23,
+    /// Every artisan's stake queue must be internally consistent:
+    /// `ArtisanStakeQueueCount` must equal the number of populated indexed
+    /// entries, and a surviving legacy `Vec` must agree with both. Otherwise
+    /// `migrate_artisan_stake_queue` rewrites the count and silently changes
+    /// which deposits are maturing.
+    StakeQueueConsistent = 24,
+    // ── Pending governance (30–39) ──
+    /// No WASM upgrade round may be open. A live proposal's compatibility
+    /// manifest commits to `preconditions_commitment` and `state_commitment`
+    /// describing the *pre-migration* layout; migrating underneath it leaves
+    /// the committed evidence describing state that no longer exists.
+    NoPendingWasmUpgrade = 30,
+    /// No upgrade signer may hold an outstanding approval. Residual approvals
+    /// carry a round nonce, and a migration changes the state they were
+    /// collected against.
+    NoPendingUpgradeApprovals = 31,
+    // ── Token identities (40–49) ──
+    /// The legacy `WhitelistedTokens` blob and the indexed per-token keys must
+    /// not both be present with a non-zero indexed count. That combination is a
+    /// partially-applied migration, and `migrate_whitelist_storage` assigns
+    /// `WhitelistedTokenCount` from the legacy blob alone — discarding the
+    /// already-indexed entries and making `is_token_whitelisted` start
+    /// rejecting tokens that are genuinely whitelisted.
+    NoMixedWhitelistLayout = 40,
+    /// The legacy `FeeTokenIndex` must not contain the same address twice. A
+    /// duplicate makes `migrate_fee_token_configs` process one token twice and
+    /// double-count its seeded `accumulated` total.
+    FeeTokenIndexDeduplicated = 41,
+    /// Every indexed artisan's stake must resolve to exactly one token identity
+    /// that the deployment actually tracks. A stake against a token absent from
+    /// every index cannot be re-keyed, and a record that decodes as neither
+    /// `ArtisanStakeData` nor the legacy `i128` + `ArtisanStakeToken` pair has
+    /// no recoverable identity at all.
+    NoUnknownStakeTokens = 42,
+    // ── Gate integrity (50–59) ──
+    /// A scan needed to evaluate a precondition holds more records than
+    /// `MAX_MIGRATION_PRECONDITION_SCAN`. The gate fails closed instead of
+    /// validating a prefix, so this is a refusal to certify, not a defect in the
+    /// state.
+    ScanBudgetExceeded = 50,
+}
+
+/// Stable numeric code for a [`MigrationPrecondition`].
+///
+/// Written as an explicit `match` rather than a `repr` cast so the codes stay a
+/// deliberate, reviewable contract: they are what off-chain runbooks record, and
+/// they must not drift if the enum is ever re-ordered.
+fn migration_precondition_code(precondition: MigrationPrecondition) -> u32 {
+    match precondition {
+        MigrationPrecondition::PlatformInitialized => 0,
+        MigrationPrecondition::SourceVersionRecognised => 1,
+        MigrationPrecondition::LayoutVersionMigratable => 2,
+        MigrationPrecondition::LegacyShapeReadable => 3,
+        MigrationPrecondition::NoOpenDisputes => 10,
+        MigrationPrecondition::NoActiveRecurringEscrows => 11,
+        MigrationPrecondition::NoPendingAdminTransfer => 12,
+        MigrationPrecondition::NoEmergencyOperationInFlight => 13,
+        MigrationPrecondition::NoIncompleteTransitions => 14,
+        MigrationPrecondition::NoLockedFunds => 20,
+        MigrationPrecondition::NoBatchJobInFlight => 21,
+        MigrationPrecondition::NoReconciliationInFlight => 22,
+        MigrationPrecondition::NoPendingRepairPlan => 23,
+        MigrationPrecondition::StakeQueueConsistent => 24,
+        MigrationPrecondition::NoPendingWasmUpgrade => 30,
+        MigrationPrecondition::NoPendingUpgradeApprovals => 31,
+        MigrationPrecondition::NoMixedWhitelistLayout => 40,
+        MigrationPrecondition::FeeTokenIndexDeduplicated => 41,
+        MigrationPrecondition::NoUnknownStakeTokens => 42,
+        MigrationPrecondition::ScanBudgetExceeded => 50,
+    }
+}
+
+/// A single failing precondition, with the value that tripped it (#1118).
+///
+/// `observed` is always the measured quantity the condition tested — a counter,
+/// a balance, or a version — and `expected` is the value the condition
+/// requires. The optional identifiers are populated only when the failure is
+/// attributable to a specific record, so an operator can go straight to the
+/// offending token or order id instead of re-deriving it from the counter.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MigrationPreconditionFailure {
+    /// Which condition failed.
+    pub precondition: MigrationPrecondition,
+    /// Numeric code of `precondition`, for stable off-chain reporting.
+    pub code: u32,
+    /// The value read from live state that violated the condition.
+    pub observed: i128,
+    /// The value the condition requires.
+    pub expected: i128,
+    /// Offending token address, when the failure is a token identity.
+    pub token: Option<Address>,
+    /// Offending participant (artisan, buyer, or seller), when applicable.
+    pub participant: Option<Address>,
+    /// Offending escrow order id, when the failure is a single escrow.
+    pub escrow_id: Option<u32>,
+}
+
+/// Outcome of evaluating the migration precondition gate (#1118).
+///
+/// Returned by `get_migration_preconditions` — a free, read-only call that every
+/// migration entrypoint gates on — and embedded in the audit record written by
+/// `audit_migration_preconditions`.
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MigrationPreconditionReport {
+    /// Layout version this build migrates to (`CURRENT_STORAGE_LAYOUT_VERSION`).
+    pub target_layout_version: u32,
+    /// Layout version read from storage at evaluation time.
+    pub current_layout_version: u32,
+    /// Contract version read from storage at evaluation time.
+    pub contract_version: u32,
+    /// How many conditions were evaluated before the run stopped.
+    pub checks_evaluated: u32,
+    /// First failing condition, or `None` when the gate passed.
+    pub failure: Option<MigrationPreconditionFailure>,
+    /// Tokens the liability and identity conditions could reach.
+    ///
+    /// Soroban has no storage-key enumeration, so this is only the token set
+    /// derivable from the legacy `FeeTokenIndex`, the legacy whitelist blob,
+    /// and the stake tokens of indexed artisans. The figure is reported so the
+    /// operator can see exactly how much of the deployment the verdict covers.
+    pub tokens_scanned: u32,
+    /// Escrows inspected by the terminal-state conditions.
+    pub escrows_scanned: u32,
+    /// Artisans inspected by the stake-identity condition.
+    pub artisans_scanned: u32,
+    /// SHA-256 over the canonical report body. Operators commit to this value
+    /// in the migration ticket so a pre-flight result cannot be re-interpreted
+    /// after the fact.
+    pub digest: BytesN<32>,
+}
+
+/// Durable record of one operator-run precondition audit (#1118).
+#[contracttype]
+#[derive(Clone, Eq, PartialEq)]
+#[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
+pub struct MigrationPreconditionAudit {
+    /// Monotonic audit sequence number.
+    pub sequence: u32,
+    /// The evaluated report at audit time.
+    pub report: MigrationPreconditionReport,
+    /// Ledger timestamp of the audit.
+    pub recorded_at: u64,
+    /// Admin that requested the audit.
+    pub auditor: Address,
+}
+
+/// Working set threaded through the precondition checks (#1118).
+///
+/// Internal-only (deliberately not a `contracttype`): it carries the reachable
+/// token set discovered once and reused by the liability and identity checks,
+/// plus the per-family counters reported back to the operator.
+///
+/// Every family is bounded by `MAX_MIGRATION_PRECONDITION_SCAN` and fails with
+/// `ScanBudgetExceeded` when it does not fit. The gate never degrades to a
+/// partial scan, because a partial scan reporting success is worse than no gate
+/// at all.
+struct MigrationScan {
+    /// Tokens reachable through the legacy fee index, the legacy whitelist
+    /// blob, and indexed artisans' stake tokens.
+    tokens: Map<Address, bool>,
+    /// Escrows inspected.
+    escrows_scanned: u32,
+    /// Artisans inspected.
+    artisans_scanned: u32,
+}
+
+impl MigrationScan {
+    fn new(env: &Env) -> Self {
+        Self {
+            tokens: Map::new(env),
+            escrows_scanned: 0,
+            artisans_scanned: 0,
+        }
+    }
+
+    fn insert_token(&mut self, token: &Address) {
+        if !self.tokens.contains_key(token.clone()) {
+            self.tokens.set(token.clone(), true);
+        }
+    }
+}
+
+/// Run one migration precondition condition, counting it and latching the first
+/// violation (#1118).
+///
+/// Expansion is `checks_evaluated += 1; if let Err(v) = $check { failure = Some(v) }`
+/// guarded on no prior failure, so conditions after the first violation are
+/// never evaluated — the gate reports the first blocking condition rather than
+/// an exhaustive list, and a condition that would itself need a `&mut` borrow of
+/// the shared scan stays sequenced correctly.
+macro_rules! step_precondition {
+    ($evaluated:ident, $failure:ident, $check:expr) => {
+        if $failure.is_none() {
+            $evaluated += 1;
+            if let Err(violation) = $check {
+                $failure = Some(violation);
+            }
+        }
+    };
 }
 
 #[contractimpl]
@@ -2743,6 +4573,14 @@ impl CraftNexusContract {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
+        // Gate before the first write (#1118). This is also the only thing that
+        // stops a re-run over a half-migrated whitelist from lowering
+        // `WhitelistedTokenCount` and silently changing which tokens pass
+        // `is_token_whitelisted`.
+        if Self::assert_migration_preconditions(&env).is_err() {
+            env.panic_with_error(crate::Error::MigrationPreconditionFailed);
+        }
+
         let legacy_key = DataKey::WhitelistedTokens;
 
         // Check if legacy storage exists
@@ -2834,6 +4672,13 @@ impl CraftNexusContract {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
+        // Gate before the first write (#1118): `check_stake_queue` refuses a
+        // queue whose count and entries disagree, so a re-run cannot reset the
+        // count and change which deposits are maturing.
+        if Self::assert_migration_preconditions(&env).is_err() {
+            env.panic_with_error(crate::Error::MigrationPreconditionFailed);
+        }
+
         let legacy_key = DataKey::ArtisanStakeQueue(artisan.clone());
 
         // Check if legacy storage exists
@@ -2881,6 +4726,22 @@ impl CraftNexusContract {
     /// This function is idempotent: it returns 0 if the record is already in
     /// the new format. Should be called lazily during stake reads or writes
     /// so existing artisan balances are preserved across contract upgrades.
+    ///
+    /// # Deliberately not behind the #1118 gate
+    ///
+    /// This is a lazy *per-record* rewrite on the stake read/write path, not an
+    /// operator-initiated migration, so it is intentionally **not** gated on
+    /// `assert_migration_preconditions`. Doing so would make every stake read
+    /// fail whenever an unrelated precondition (an open dispute, a pending
+    /// upgrade) is violated — trading a migration-safety property for an
+    /// availability regression.
+    ///
+    /// The assumption it does rely on — that an artisan's stake resolves to
+    /// exactly one token identity — is enforced by `check_stake_identities` /
+    /// `MigrationPrecondition::NoUnknownStakeTokens`, which gate every
+    /// operator-initiated `migrate_*` call. This function's write is confined to
+    /// a single artisan's own record and is a no-op unless the legacy pair is
+    /// present.
     pub fn migrate_legacy_artisan_stake(env: Env, artisan: Address) -> u32 {
         let stake_key = DataKey::ArtisanStake(artisan.clone());
         let token_key = DataKey::ArtisanStakeToken(artisan.clone());
@@ -5831,6 +7692,11 @@ impl CraftNexusContract {
         let config = Self::get_platform_config_internal(&env);
         config.admin.require_auth();
 
+        // Gate before the first write (#1118): `check_fee_token_index_unique`
+        // refuses a duplicated entry, which would otherwise be migrated twice
+        // and double-count the seeded `accumulated` fee total.
+        Self::assert_migration_preconditions(&env)?;
+
         let tokens: Vec<Address> = env
             .storage()
             .persistent()
@@ -6771,6 +8637,1059 @@ impl CraftNexusContract {
             .unwrap_or(0)
     }
 
+    // ─────────────────────────── Migration preconditions (#1118) ───────────────
+    //
+    // Every `migrate_*` entrypoint calls `assert_migration_preconditions`
+    // before it writes anything. The gate is a pure read: it evaluates each
+    // condition in turn and stops at the first violation, so a refused migration
+    // leaves the ledger byte-for-byte unchanged.
+    //
+    // Two ways for an operator to see the verdict:
+    //   * `get_migration_preconditions` — free, read-only, no state change.
+    //   * `audit_migration_preconditions` — admin-gated, persists the report and
+    //     emits an event so the pre-flight result is on the record.
+
+    /// Build a precondition failure with no attributable record.
+    fn migration_failure(
+        precondition: MigrationPrecondition,
+        observed: i128,
+        expected: i128,
+    ) -> MigrationPreconditionFailure {
+        MigrationPreconditionFailure {
+            precondition,
+            code: migration_precondition_code(precondition),
+            observed,
+            expected,
+            token: None,
+            participant: None,
+            escrow_id: None,
+        }
+    }
+
+    /// Build a precondition failure attributed to a single record.
+    #[allow(clippy::too_many_arguments)]
+    fn migration_failure_at(
+        precondition: MigrationPrecondition,
+        observed: i128,
+        expected: i128,
+        token: Option<Address>,
+        participant: Option<Address>,
+        escrow_id: Option<u32>,
+    ) -> MigrationPreconditionFailure {
+        MigrationPreconditionFailure {
+            precondition,
+            code: migration_precondition_code(precondition),
+            observed,
+            expected,
+            token,
+            participant,
+            escrow_id,
+        }
+    }
+
+    /// The refusal produced when a scan cannot fit inside the on-chain budget.
+    fn migration_scan_overflow(observed: u32) -> MigrationPreconditionFailure {
+        Self::migration_failure(
+            MigrationPrecondition::ScanBudgetExceeded,
+            observed as i128,
+            MAX_MIGRATION_PRECONDITION_SCAN as i128,
+        )
+    }
+
+    /// Canonical SHA-256 preimage for a precondition report.
+    ///
+    /// Every scalar in the report is folded in, plus the failing condition's
+    /// identity and measured values. Two reports share a digest only if they
+    /// describe the same evaluation of the same state, which is what makes the
+    /// digest usable as a commitment in a migration ticket.
+    #[allow(clippy::too_many_arguments)]
+    fn migration_report_digest(
+        env: &Env,
+        target_layout_version: u32,
+        current_layout_version: u32,
+        contract_version: u32,
+        checks_evaluated: u32,
+        failure: &Option<MigrationPreconditionFailure>,
+        tokens_scanned: u32,
+        escrows_scanned: u32,
+        artisans_scanned: u32,
+    ) -> BytesN<32> {
+        let mut preimage = Bytes::new(env);
+        preimage.append(&target_layout_version.to_xdr(env));
+        preimage.append(&current_layout_version.to_xdr(env));
+        preimage.append(&contract_version.to_xdr(env));
+        preimage.append(&checks_evaluated.to_xdr(env));
+        preimage.append(&tokens_scanned.to_xdr(env));
+        preimage.append(&escrows_scanned.to_xdr(env));
+        preimage.append(&artisans_scanned.to_xdr(env));
+        match failure {
+            Some(f) => {
+                preimage.append(&1u32.to_xdr(env));
+                preimage.append(&f.code.to_xdr(env));
+                preimage.append(&f.observed.to_xdr(env));
+                preimage.append(&f.expected.to_xdr(env));
+            }
+            None => preimage.append(&0u32.to_xdr(env)),
+        }
+        env.crypto().sha256(&preimage).into()
+    }
+
+    /// Collect the token set the gate can reach in one transaction (#1118).
+    ///
+    /// Soroban offers no storage-key enumeration, so a single invocation can
+    /// only see tokens reachable from an index. Three indexes are walked: the
+    /// legacy `FeeTokenIndex` Vec, the legacy `WhitelistedTokens` Map, and the
+    /// stake tokens of indexed artisans. Collection refuses as soon as a family
+    /// exceeds the budget, so the caller fails closed rather than scanning a
+    /// prefix.
+    /// Read `V` from persistent storage, yielding `None` when the key is absent
+    /// **or** when the stored value does not decode as `V`.
+    ///
+    /// `Storage::get` unwraps internally (`try_from_val(...).unwrap_optimized()`),
+    /// so a typed read *aborts* on a shape mismatch rather than returning `None`.
+    /// That is unusable here: an undecodable record is one of the conditions this
+    /// gate exists to report, so it has to surface as a `MigrationPrecondition`
+    /// failure instead of a host error. Every shape-sensitive read in the gate
+    /// goes through this helper for that reason.
+    fn try_get_persistent<V>(env: &Env, key: &DataKey) -> Option<V>
+    where
+        V: TryFromVal<Env, Val>,
+    {
+        let raw: Val = env.storage().persistent().get(key)?;
+        V::try_from_val(env, &raw).ok()
+    }
+
+    fn collect_reachable_tokens(
+        env: &Env,
+        scan: &mut MigrationScan,
+    ) -> Result<(), MigrationPreconditionFailure> {
+        let fee_index: soroban_sdk::Vec<Address> =
+            Self::try_get_persistent(env, &DataKey::FeeTokenIndex)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+        if fee_index.len() > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(fee_index.len()));
+        }
+        for index in 0..fee_index.len() {
+            if let Some(token) = fee_index.get(index) {
+                scan.insert_token(&token);
+            }
+        }
+
+        if let Some(whitelist) = Self::read_legacy_whitelist(env) {
+            let keys = whitelist.keys();
+            if keys.len() > MAX_MIGRATION_PRECONDITION_SCAN {
+                return Err(Self::migration_scan_overflow(keys.len()));
+            }
+            for index in 0..keys.len() {
+                if let Some(token) = keys.get(index) {
+                    scan.insert_token(&token);
+                }
+            }
+        }
+
+        let staked_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedArtisanCount)
+            .unwrap_or(0);
+        if staked_count > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(staked_count));
+        }
+        for index in 0..staked_count {
+            let artisan: Address = match env
+                .storage()
+                .persistent()
+                .get(&DataKey::StakedArtisanIndexed(index))
+            {
+                Some(address) => address,
+                None => continue,
+            };
+            if let Some(token) = Self::read_stake_token(env, &artisan) {
+                scan.insert_token(&token);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read the legacy `WhitelistedTokens` Map if present and decodable.
+    ///
+    /// Decoding through `Val` rather than a typed `get` is deliberate: a typed
+    /// `get` returns `None` for a wrong-shaped value, which is indistinguishable
+    /// from "not migrated yet".
+    fn read_legacy_whitelist(env: &Env) -> Option<Map<Address, bool>> {
+        let raw: Val = env.storage().persistent().get(&DataKey::WhitelistedTokens)?;
+        Map::<Address, bool>::try_from_val(env, &raw).ok()
+    }
+
+    /// Resolve an artisan's stake token under either supported record shape.
+    ///
+    /// `ArtisanStake` holds an `ArtisanStakeData` once migrated and a bare
+    /// `i128` before it, with the asset address in the sibling
+    /// `ArtisanStakeToken` key. Both shapes are accepted; the identity checks
+    /// decide whether the combination is coherent.
+    fn read_stake_token(env: &Env, artisan: &Address) -> Option<Address> {
+        let stake_key = DataKey::ArtisanStake(artisan.clone());
+        if let Some(data) = Self::try_get_persistent::<ArtisanStakeData>(env, &stake_key) {
+            return Some(data.token);
+        }
+        Self::try_get_persistent::<Address>(env, &DataKey::ArtisanStakeToken(artisan.clone()))
+    }
+
+    /// Version family: is this the state the target layout expects?
+    fn check_migration_versions(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        if !env.storage().instance().has(&DataKey::PlatformConfig) {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::PlatformInitialized,
+                0,
+                1,
+            ));
+        }
+
+        let contract_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(0);
+        if contract_version == 0 {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::SourceVersionRecognised,
+                0,
+                1,
+            ));
+        }
+
+        let layout_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StorageLayoutVersion)
+            .unwrap_or(0);
+        if layout_version > CURRENT_STORAGE_LAYOUT_VERSION {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::LayoutVersionMigratable,
+                layout_version as i128,
+                CURRENT_STORAGE_LAYOUT_VERSION as i128,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Version family: does every legacy blob decode into the shape the
+    /// migration will read it as?
+    ///
+    /// The `observed` value names which blob failed (0 = whitelist, 1 = escrow
+    /// id index, 2 = fee token index) so the operator does not have to guess
+    /// from a bare error code.
+    fn check_legacy_shapes(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        if let Some(raw) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Val>(&DataKey::WhitelistedTokens)
+        {
+            if Map::<Address, bool>::try_from_val(env, &raw).is_err() {
+                return Err(Self::migration_failure(
+                    MigrationPrecondition::LegacyShapeReadable,
+                    0,
+                    1,
+                ));
+            }
+        }
+
+        if let Some(raw) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Val>(&DataKey::AllEscrowIds)
+        {
+            if soroban_sdk::Vec::<u32>::try_from_val(env, &raw).is_err() {
+                return Err(Self::migration_failure(
+                    MigrationPrecondition::LegacyShapeReadable,
+                    1,
+                    1,
+                ));
+            }
+        }
+
+        if let Some(raw) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, Val>(&DataKey::FeeTokenIndex)
+        {
+            if soroban_sdk::Vec::<Address>::try_from_val(env, &raw).is_err() {
+                return Err(Self::migration_failure(
+                    MigrationPrecondition::LegacyShapeReadable,
+                    2,
+                    1,
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Terminal-state family: platform-wide counters and governance locks that
+    /// must be at rest before a layout is rewritten underneath them.
+    fn check_terminal_states(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        let open_disputes: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveDisputeCount)
+            .unwrap_or(0);
+        if open_disputes > 0 {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoOpenDisputes,
+                open_disputes as i128,
+                0,
+            ));
+        }
+
+        let active_recurring: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveRecurringCount)
+            .unwrap_or(0);
+        if active_recurring > 0 {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoActiveRecurringEscrows,
+                active_recurring as i128,
+                0,
+            ));
+        }
+
+        if env.storage().persistent().has(&DataKey::PendingAdmin) {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoPendingAdminTransfer,
+                1,
+                0,
+            ));
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::CurrentEmergencyOperation)
+        {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoEmergencyOperationInFlight,
+                1,
+                0,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Terminal-state family: no escrow may be parked mid-transition or belong
+    /// to a batch that has not fully settled.
+    ///
+    /// Walks `GlobalEscrowIdIndexed`, the index `migrate_storage_layout`
+    /// populates. A legacy deployment that still only holds the `AllEscrowIds`
+    /// Vec therefore reports a zero-escrow scan; that is not a silent gap,
+    /// because the legacy Vec is checked for decodability above and re-running
+    /// `migrate_legacy_all_escrow_ids` is the documented first step.
+    fn check_escrow_terminal_states(
+        env: &Env,
+        scan: &mut MigrationScan,
+    ) -> Result<(), MigrationPreconditionFailure> {
+        let total: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EscrowCount)
+            .unwrap_or(0);
+        if total > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(total));
+        }
+
+        for index in 0..total {
+            let order_id: u32 = match env
+                .storage()
+                .persistent()
+                .get(&DataKey::GlobalEscrowIdIndexed(index))
+            {
+                Some(id) => id,
+                None => continue,
+            };
+            let escrow = match Self::read_escrow_for_precondition(env, order_id) {
+                Ok(record) => record,
+                // An unparseable record is a refusal, not a crash: report it
+                // rather than skipping, because a fresh layout written over an
+                // unreadable record is precisely the corruption being guarded
+                // against.
+                Err(failure) => return Err(failure),
+            };
+            scan.escrows_scanned += 1;
+
+            let unfinished = matches!(
+                escrow.status,
+                EscrowStatus::ReleasePending
+                    | EscrowStatus::RefundPending
+                    | EscrowStatus::DisputePending
+                    | EscrowStatus::SettlementPending
+            );
+            if unfinished {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::NoIncompleteTransitions,
+                    1,
+                    0,
+                    Some(escrow.token.clone()),
+                    Some(escrow.buyer.clone()),
+                    Some(order_id),
+                ));
+            }
+
+            let settled = matches!(
+                escrow.status,
+                EscrowStatus::Released | EscrowStatus::Refunded | EscrowStatus::Resolved
+            );
+            if escrow.batch_id.is_some() && !settled {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::NoBatchJobInFlight,
+                    1,
+                    0,
+                    Some(escrow.token.clone()),
+                    Some(escrow.buyer.clone()),
+                    Some(order_id),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read an escrow record in any historical layout **without writing**.
+    ///
+    /// `get_stored_escrow` upgrades records in place and `.expect("")`s on a
+    /// shape it cannot parse. Both behaviours are wrong for a precondition
+    /// check: the gate runs against *pre*-migration state by definition, so the
+    /// newest shape is the exception rather than the rule, and a panic would
+    /// turn a reportable refusal into an opaque host error.
+    ///
+    /// This mirrors the shape detection in `get_stored_escrow` but converts in
+    /// memory only -- no `upgrade_escrow`, no `extend_persistent` -- and reports
+    /// an unparseable record as [`MigrationPrecondition::LegacyShapeReadable`].
+    fn read_escrow_for_precondition(
+        env: &Env,
+        order_id: u32,
+    ) -> Result<Escrow, MigrationPreconditionFailure> {
+        let unreadable = || {
+            Self::migration_failure_at(
+                MigrationPrecondition::LegacyShapeReadable,
+                1,
+                0,
+                None,
+                None,
+                Some(order_id),
+            )
+        };
+
+        let key = (ESCROW, order_id);
+        let stored: Val = match env.storage().persistent().get(&key) {
+            Some(value) => value,
+            // Callers skip absent records; an absent one here is unexpected.
+            None => return Err(unreadable()),
+        };
+
+        let map = match Map::<Symbol, Val>::try_from_val(env, &stored) {
+            Ok(map) => map,
+            Err(_) => return Err(unreadable()),
+        };
+
+        if !map.contains_key(Symbol::new(env, "version")) {
+            let legacy = match LegacyEscrow::try_from_val(env, &stored) {
+                Ok(legacy) => legacy,
+                Err(_) => return Err(unreadable()),
+            };
+            return Ok(Escrow {
+                version: CURRENT_ESCROW_VERSION,
+                id: legacy.id,
+                batch_id: None,
+                buyer: legacy.buyer,
+                seller: legacy.seller,
+                token: legacy.token,
+                amount: legacy.amount,
+                status: legacy.status,
+                release_window: legacy.release_window,
+                created_at: legacy.created_at,
+                ipfs_hash: legacy.ipfs_hash,
+                metadata_hash: legacy.metadata_hash,
+                dispute_reason: Self::dispute_symbol_from_text(env, legacy.dispute_reason),
+                dispute_initiated_at: legacy.dispute_initiated_at,
+                funded: true,
+                funding_deadline: None, // Legacy escrows were funded at creation
+                service_agreement_hash: None,
+            });
+        }
+
+        if !map.contains_key(Symbol::new(env, "batch_id")) {
+            return match EscrowWithoutBatch::try_from_val(env, &stored) {
+                Ok(previous) => Ok(Self::escrow_from_without_batch(env, previous)),
+                Err(_) => Err(unreadable()),
+            };
+        }
+
+        // v5 carries `service_agreement_hash`; v4 does not.
+        if map.contains_key(Symbol::new(env, "service_agreement_hash")) {
+            return match Escrow::try_from_val(env, &stored) {
+                Ok(escrow) => Ok(escrow),
+                Err(_) => Err(unreadable()),
+            };
+        }
+
+        match EscrowV4::try_from_val(env, &stored) {
+            Ok(v4) => Ok(Self::escrow_from_v4(v4)),
+            Err(_) => Err(unreadable()),
+        }
+    }
+
+    /// Decode a legacy `String` dispute reason into a `Symbol`.
+    ///
+    /// Unlike `get_stored_escrow`, bytes that are not valid UTF-8 yield `None`
+    /// instead of panicking: the gate only inspects status, batch membership, and
+    /// token, so a reason it cannot decode must not abort the whole scan.
+    fn dispute_symbol_from_text(env: &Env, reason: Option<String>) -> Option<Symbol> {
+        let text = reason?;
+        let len = text.len() as usize;
+        let slice_len = core::cmp::min(len, 32);
+        let mut buf = [0u8; 32];
+        text.copy_into_slice(&mut buf[..slice_len]);
+        match core::str::from_utf8(&buf[..slice_len]) {
+            Ok(decoded) => Some(Symbol::new(env, decoded)),
+            Err(_) => None,
+        }
+    }
+
+    /// Outstanding-liability family: no reachable token may still hold escrow
+    /// funds, and no reconciliation may be in progress against one.
+    fn check_outstanding_liabilities(
+        env: &Env,
+        scan: &MigrationScan,
+    ) -> Result<(), MigrationPreconditionFailure> {
+        let keys = scan.tokens.keys();
+        for index in 0..keys.len() {
+            let token = match keys.get(index) {
+                Some(address) => address,
+                None => continue,
+            };
+
+            let locked: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TotalLocked(token.clone()))
+                .unwrap_or(0);
+            if locked != 0 {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::NoLockedFunds,
+                    locked,
+                    0,
+                    Some(token),
+                    None,
+                    None,
+                ));
+            }
+
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::ReconciliationProgress(token.clone()))
+            {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::NoReconciliationInFlight,
+                    1,
+                    0,
+                    Some(token),
+                    None,
+                    None,
+                ));
+            }
+        }
+
+        // The counter starts at 1 and increments per plan, so anything above 1
+        // means a repair plan was raised at some point. An applied plan leaves an
+        // allocated residual, which the `TotalLocked` check above already
+        // accounts for; requiring a clean counter keeps the migration away from
+        // balances an operator may still be adjusting by hand.
+        let next_plan_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::NextReconciliationRepairPlanId)
+            .unwrap_or(1);
+        if next_plan_id > 1 {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoPendingRepairPlan,
+                next_plan_id as i128 - 1,
+                0,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Pending-governance family: no upgrade round may be open against state
+    /// that is about to change shape.
+    ///
+    /// A compatibility manifest left behind by a cancelled round is
+    /// deliberately not a blocker: `execute_upgrade` never consumes a manifest
+    /// without a matching live proposal, and the runbook expects a resuming
+    /// runner to resubmit it with a fresh checkpoint.
+    fn check_pending_governance(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        if env.storage().persistent().has(&DataKey::WasmUpgradeProposal) {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoPendingWasmUpgrade,
+                1,
+                0,
+            ));
+        }
+
+        let approvals: UpgradeApprovalState =
+            Self::try_get_persistent(env, &DataKey::UpgradeApprovalState(0)).unwrap_or(UpgradeApprovalState {
+                nonce: 0,
+                signers: Vec::new(env),
+                threshold: 0,
+                approvals: Vec::new(env),
+            });
+        if !approvals.approvals.is_empty() {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoPendingUpgradeApprovals,
+                approvals.approvals.len() as i128,
+                0,
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Token-identity family: the whitelist must not be half-migrated.
+    ///
+    /// `migrate_whitelist_storage` assigns `WhitelistedTokenCount` from the
+    /// legacy blob alone, so running it while indexed entries already exist
+    /// would lower the count and make `is_token_whitelisted` reject tokens that
+    /// are genuinely whitelisted. Catching the mixed layout here is what keeps
+    /// effective permissions unchanged across the migration.
+    fn check_whitelist_layout(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        if !env.storage().persistent().has(&DataKey::WhitelistedTokens) {
+            return Ok(());
+        }
+        let indexed: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::WhitelistedTokenCount)
+            .unwrap_or(0);
+        if indexed > 0 {
+            return Err(Self::migration_failure(
+                MigrationPrecondition::NoMixedWhitelistLayout,
+                indexed as i128,
+                0,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Token-identity family: the legacy fee index must not list a token twice.
+    fn check_fee_token_index_unique(env: &Env) -> Result<(), MigrationPreconditionFailure> {
+        let fee_index: soroban_sdk::Vec<Address> =
+            Self::try_get_persistent(env, &DataKey::FeeTokenIndex)
+                .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+        if fee_index.len() > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(fee_index.len()));
+        }
+
+        let mut seen: Map<Address, bool> = Map::new(env);
+        for index in 0..fee_index.len() {
+            let token = match fee_index.get(index) {
+                Some(address) => address,
+                None => continue,
+            };
+            if seen.contains_key(token.clone()) {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::FeeTokenIndexDeduplicated,
+                    index as i128 + 1,
+                    1,
+                    Some(token),
+                    None,
+                    None,
+                ));
+            }
+            seen.set(token, true);
+        }
+
+        Ok(())
+    }
+
+    /// Token-identity family: every indexed artisan's stake must resolve to one
+    /// known token, and their stake queue must be internally consistent.
+    fn check_stake_identities(
+        env: &Env,
+        scan: &mut MigrationScan,
+    ) -> Result<(), MigrationPreconditionFailure> {
+        let staked_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StakedArtisanCount)
+            .unwrap_or(0);
+        if staked_count > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(staked_count));
+        }
+
+        for index in 0..staked_count {
+            let artisan: Address = match env
+                .storage()
+                .persistent()
+                .get(&DataKey::StakedArtisanIndexed(index))
+            {
+                Some(address) => address,
+                None => continue,
+            };
+            scan.artisans_scanned += 1;
+
+            let token = match Self::read_stake_token(env, &artisan) {
+                Some(address) => address,
+                None => {
+                    // Neither supported shape decodes. If a stake key is present
+                    // the amount is unrecoverable, so refuse; otherwise this is a
+                    // stale index entry and nothing needs re-keying.
+                    if env
+                        .storage()
+                        .persistent()
+                        .has(&DataKey::ArtisanStake(artisan.clone()))
+                    {
+                        return Err(Self::migration_failure_at(
+                            MigrationPrecondition::NoUnknownStakeTokens,
+                            0,
+                            1,
+                            None,
+                            Some(artisan),
+                            None,
+                        ));
+                    }
+                    continue;
+                }
+            };
+
+            if !scan.tokens.contains_key(token.clone()) {
+                return Err(Self::migration_failure_at(
+                    MigrationPrecondition::NoUnknownStakeTokens,
+                    0,
+                    1,
+                    Some(token),
+                    Some(artisan.clone()),
+                    None,
+                ));
+            }
+
+            Self::check_stake_queue(env, &artisan)?;
+        }
+
+        Ok(())
+    }
+
+    /// Token-identity family: one artisan's stake queue must be internally
+    /// consistent, or re-running `migrate_artisan_stake_queue` would reset the
+    /// count and change which deposits are maturing.
+    fn check_stake_queue(
+        env: &Env,
+        artisan: &Address,
+    ) -> Result<(), MigrationPreconditionFailure> {
+        let declared: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ArtisanStakeQueueCount(artisan.clone()))
+            .unwrap_or(0);
+        if declared > MAX_MIGRATION_PRECONDITION_SCAN {
+            return Err(Self::migration_scan_overflow(declared));
+        }
+
+        let mut populated: u32 = 0;
+        for slot in 0..declared {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::ArtisanStakeQueueIndexed(artisan.clone(), slot))
+            {
+                populated += 1;
+            }
+        }
+        if populated != declared {
+            return Err(Self::migration_failure_at(
+                MigrationPrecondition::StakeQueueConsistent,
+                populated as i128,
+                declared as i128,
+                None,
+                Some(artisan.clone()),
+                None,
+            ));
+        }
+
+        // A surviving legacy Vec must agree with the indexed entries; otherwise
+        // the queue is mid-migration and the legacy length is what a re-run
+        // would adopt.
+        if declared > 0 {
+            if let Some(raw) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Val>(&DataKey::ArtisanStakeQueue(artisan.clone()))
+            {
+                if let Ok(legacy) = soroban_sdk::Vec::<StakeDeposit>::try_from_val(env, &raw) {
+                    if legacy.len() != populated {
+                        return Err(Self::migration_failure_at(
+                            MigrationPrecondition::StakeQueueConsistent,
+                            legacy.len() as i128,
+                            populated as i128,
+                            None,
+                            Some(artisan.clone()),
+                            None,
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Evaluate the migration precondition gate without writing anything (#1118).
+    ///
+    /// Read-only by construction: it uses raw `storage().get`/`has` throughout
+    /// and never calls a helper that extends a TTL or repairs a corrupt key, so
+    /// a refused migration is guaranteed to have left no trace.
+    ///
+    /// Conditions run in a fixed order — versions, then legacy shape, terminal
+    /// states, liabilities, governance, token identities — and evaluation stops
+    /// at the first violation, so `report.failure` names the single condition
+    /// that blocked the migration. `checks_evaluated` records how far the run got.
+    fn evaluate_migration_preconditions(env: &Env) -> MigrationPreconditionReport {
+        let current_layout_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StorageLayoutVersion)
+            .unwrap_or(0);
+        let contract_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(0);
+
+        let mut scan = MigrationScan::new(env);
+        let mut checks_evaluated: u32 = 0;
+        let mut failure: Option<MigrationPreconditionFailure> = None;
+
+        step_precondition!(checks_evaluated, failure, Self::check_migration_versions(env));
+        step_precondition!(checks_evaluated, failure, Self::check_legacy_shapes(env));
+        step_precondition!(checks_evaluated, failure, Self::check_terminal_states(env));
+        step_precondition!(
+            checks_evaluated,
+            failure,
+            Self::collect_reachable_tokens(env, &mut scan)
+        );
+        step_precondition!(
+            checks_evaluated,
+            failure,
+            Self::check_escrow_terminal_states(env, &mut scan)
+        );
+        step_precondition!(
+            checks_evaluated,
+            failure,
+            Self::check_outstanding_liabilities(env, &scan)
+        );
+        step_precondition!(checks_evaluated, failure, Self::check_pending_governance(env));
+        step_precondition!(checks_evaluated, failure, Self::check_whitelist_layout(env));
+        step_precondition!(
+            checks_evaluated,
+            failure,
+            Self::check_fee_token_index_unique(env)
+        );
+        step_precondition!(
+            checks_evaluated,
+            failure,
+            Self::check_stake_identities(env, &mut scan)
+        );
+
+        let tokens_scanned = scan.tokens.len();
+        let digest = Self::migration_report_digest(
+            env,
+            CURRENT_STORAGE_LAYOUT_VERSION,
+            current_layout_version,
+            contract_version,
+            checks_evaluated,
+            &failure,
+            tokens_scanned,
+            scan.escrows_scanned,
+            scan.artisans_scanned,
+        );
+
+        MigrationPreconditionReport {
+            target_layout_version: CURRENT_STORAGE_LAYOUT_VERSION,
+            current_layout_version,
+            contract_version,
+            checks_evaluated,
+            failure,
+            tokens_scanned,
+            escrows_scanned: scan.escrows_scanned,
+            artisans_scanned: scan.artisans_scanned,
+            digest,
+        }
+    }
+
+    /// Gate a migration on the precondition report.
+    ///
+    /// Returns `Err(Error::MigrationPreconditionFailed)` on the first violated
+    /// condition. Callers must invoke this *before* their first write, which is
+    /// what makes "a failed precondition causes no writes" hold.
+    fn assert_migration_preconditions(env: &Env) -> Result<(), Error> {
+        match Self::evaluate_migration_preconditions(env).failure {
+            Some(_) => Err(Error::MigrationPreconditionFailed),
+            None => Ok(()),
+        }
+    }
+
+    /// Evaluate the migration preconditions without changing any state (#1118).
+    ///
+    /// Read-only and permissionless: operators should run this before every
+    /// `migrate_*` call, because a migration that is refused writes nothing —
+    /// including no record of why. This call is the supported way to observe the
+    /// blocking condition, and its `digest` is the value to quote in the
+    /// migration ticket.
+    pub fn get_migration_preconditions(env: Env) -> MigrationPreconditionReport {
+        Self::evaluate_migration_preconditions(&env)
+    }
+
+    /// Evaluate the preconditions and persist the verdict for the audit trail
+    /// (admin only, #1118).
+    ///
+    /// Unlike the refused migration itself, this call commits. It stores the
+    /// report as the latest audit, appends it to a bounded FIFO log, and emits
+    /// `migration_precondition_audited`, so a blocked migration stays explainable
+    /// after the fact rather than only at the moment it was attempted.
+    pub fn audit_migration_preconditions(env: Env) -> MigrationPreconditionReport {
+        let config = Self::get_platform_config_internal(&env);
+        config.admin.require_auth();
+
+        let report = Self::evaluate_migration_preconditions(&env);
+        let sequence = Self::get_persistent_u32(&env, &DataKey::MigrationPreconditionAuditCount);
+
+        let audit = MigrationPreconditionAudit {
+            sequence,
+            report: report.clone(),
+            recorded_at: env.ledger().timestamp(),
+            auditor: config.admin.clone(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::LastMigrationPreconditionAudit, &audit);
+        Self::extend_persistent(&env, &DataKey::LastMigrationPreconditionAudit);
+
+        let mut history: Vec<MigrationPreconditionAudit> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MigrationPreconditionAudits)
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(audit);
+        while history.len() > MAX_MIGRATION_PRECONDITION_AUDITS {
+            history.pop_front();
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::MigrationPreconditionAudits, &history);
+        Self::extend_persistent(&env, &DataKey::MigrationPreconditionAudits);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::MigrationPreconditionAuditCount, &(sequence + 1));
+        Self::extend_persistent(&env, &DataKey::MigrationPreconditionAuditCount);
+
+        let (topic, code) = match &report.failure {
+            Some(failure) => (Symbol::new(&env, "blocked"), failure.code),
+            None => (Symbol::new(&env, "passed"), 0u32),
+        };
+        env.events().publish(
+            (Symbol::new(&env, "migration_precondition_audited"), topic),
+            (sequence, report.digest.clone(), code),
+        );
+
+        report
+    }
+
+    /// Return the most recent persisted precondition audit, if any (#1118).
+    ///
+    /// A single O(1) read of the blocking condition, for operators who want the
+    /// last verdict without paging the log.
+    pub fn get_last_precondition_audit(env: Env) -> Option<MigrationPreconditionAudit> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LastMigrationPreconditionAudit)
+    }
+
+    /// Return a page of persisted precondition audits, oldest first (#1118).
+    pub fn get_precondition_audits(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<MigrationPreconditionAudit> {
+        let page_size =
+            pagination_validation::validate_limit(limit, pagination_validation::MAX_ADMIN_PAGE_SIZE)
+                .unwrap_or(limit.min(pagination_validation::MAX_ADMIN_PAGE_SIZE));
+
+        let stored: Vec<MigrationPreconditionAudit> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MigrationPreconditionAudits)
+            .unwrap_or_else(|| Vec::new(&env));
+        let total = stored.len();
+        let mut page = Vec::new(&env);
+        let end = offset.saturating_add(page_size).min(total);
+        for index in offset..end {
+            if let Some(audit) = stored.get(index) {
+                page.push_back(audit);
+            }
+        }
+        page
+    }
+
+    /// Verify a persisted audit still matches its own report digest (#1118).
+    ///
+    /// Audits are ordinary storage and a future migration could in principle
+    /// rewrite them. Off-chain tooling that relies on the audit trail calls this
+    /// before quoting a verdict, so a rewritten record is detected rather than
+    /// trusted.
+    pub fn verify_precondition_audit(
+        env: Env,
+        sequence: u32,
+    ) -> Result<MigrationPreconditionAudit, Error> {
+        let stored: Vec<MigrationPreconditionAudit> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MigrationPreconditionAudits)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut found: Option<MigrationPreconditionAudit> = None;
+        for index in 0..stored.len() {
+            if let Some(audit) = stored.get(index) {
+                if audit.sequence == sequence {
+                    found = Some(audit);
+                    break;
+                }
+            }
+        }
+        let audit = found.ok_or(Error::CorruptedMigrationAudit)?;
+
+        let report = &audit.report;
+        let recomputed = Self::migration_report_digest(
+            &env,
+            report.target_layout_version,
+            report.current_layout_version,
+            report.contract_version,
+            report.checks_evaluated,
+            &report.failure,
+            report.tokens_scanned,
+            report.escrows_scanned,
+            report.artisans_scanned,
+        );
+        if recomputed != report.digest {
+            return Err(Error::CorruptedMigrationAudit);
+        }
+        Ok(audit)
+    }
+
     /// Migrate persisted storage to the current layout version.
     ///
     /// This is an explicit, admin-gated migration path for legacy deployments.
@@ -6788,6 +9707,13 @@ impl CraftNexusContract {
             .unwrap_or(0);
         if current_version == CURRENT_STORAGE_LAYOUT_VERSION {
             return 0;
+        }
+
+        // Gate before the first write (#1118): nothing below this point may run
+        // unless every precondition holds, so a refusal leaves the layout
+        // version, the legacy blobs, and every indexed record untouched.
+        if Self::assert_migration_preconditions(&env).is_err() {
+            env.panic_with_error(crate::Error::MigrationPreconditionFailed);
         }
 
         Self::migrate_legacy_all_escrow_ids(&env);
