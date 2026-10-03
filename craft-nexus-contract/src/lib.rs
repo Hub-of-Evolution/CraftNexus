@@ -9687,6 +9687,7 @@ impl CraftNexusContract {
     pub fn get_batch_cursor(env: Env, job_id: u64) -> Option<BatchCursor> {
         let key = DataKey::BatchEscrowJob(job_id);
         let job: BatchEscrowJob = env.storage().persistent().get(&key)?;
+        Self::extend_persistent_read(&env, &key);
         Some(BatchCursor {
             job_id,
             owner: job.owner,
@@ -9840,6 +9841,7 @@ impl CraftNexusContract {
     pub fn get_batch_escrow_progress(env: Env, job_id: u64) -> Option<BatchJobProgress> {
         let key = DataKey::BatchEscrowJob(job_id);
         let job: BatchEscrowJob = env.storage().persistent().get(&key)?;
+        Self::extend_persistent_read(&env, &key);
         Some(Self::batch_progress(job_id, &job))
     }
 
@@ -19619,6 +19621,7 @@ impl CraftNexusContract {
     pub fn get_batch_escrow_progress(env: Env, job_id: u64) -> Option<BatchJobProgress> {
         let key = DataKey::BatchEscrowJob(job_id);
         let job: BatchEscrowJob = env.storage().persistent().get(&key)?;
+        Self::extend_persistent_read(&env, &key);
         Some(BatchJobProgress {
             id: job_id,
             owner: job.owner,
