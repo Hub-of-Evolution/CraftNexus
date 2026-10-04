@@ -14,6 +14,8 @@ set -euo pipefail
 #
 # Commands:
 #   version                          Print the current on-chain contract version.
+#   preconditions                    Evaluate the #1118 migration preconditions; non-zero if blocked.
+#   audit-preconditions              Persist the precondition verdict to the audit trail (admin).
 #   check <expected_version>         Fail unless the contract is at <expected_version>.
 #   backup                           Snapshot PlatformConfig; prints the backup id.
 #   list-backups                     List retained PlatformConfig backups.
@@ -28,7 +30,7 @@ set -euo pipefail
 NETWORK=${NETWORK:-testnet}
 
 usage() {
-    echo "Usage: $0 <version|check|backup|list-backups|rollback|diff-test> [args...]"
+    echo "Usage: $0 <version|preconditions|audit-preconditions|check|backup|list-backups|rollback|diff-test> [args...]"
     echo ""
     echo "Required env vars: CONTRACT_ID, SOURCE. Optional: NETWORK (default: testnet)."
     exit 1
@@ -108,6 +110,45 @@ case "$COMMAND" in
             -- \
             rollback_platform_config --backup_id "$BACKUP_ID"
         echo "✅ Rollback complete."
+        ;;
+    preconditions)
+        # Read-only and permissionless: a blocked migration writes nothing, not
+        # even a record of why, so this is the supported way to see the blocker
+        # BEFORE attempting one. Quote the reported digest in the migration
+        # ticket.
+        REPORT=$(stellar contract invoke \
+            --id "$CONTRACT_ID" \
+            --network "$NETWORK" \
+            --send=no \
+            -- \
+            get_migration_preconditions)
+        echo "$REPORT"
+        if echo "$REPORT" | grep -q '\"failure\":\{\}'; then
+            echo "✅ Preconditions satisfied — the migration may proceed."
+        else
+            echo "❌ Preconditions NOT satisfied — the migration would be refused."
+            echo "   Resolve the condition above, then re-run. Nothing has been written."
+            exit 1
+        fi
+        ;;
+    audit-preconditions)
+        # Unlike the refused migration itself, this commits: it stores the
+        # verdict, appends it to a bounded FIFO log, and emits an event, so a
+        # blocked migration stays explainable after the fact.
+        require_env
+        echo "📝 Recording precondition verdict to the audit trail..."
+        REPORT=$(stellar contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOURCE" \
+            --network "$NETWORK" \
+            -- \
+            audit_migration_preconditions)
+        echo "$REPORT"
+        if echo "$REPORT" | grep -q '\"failure\":\{\}'; then
+            echo "✅ Recorded: preconditions satisfied."
+        else
+            echo "⚠️  Recorded: preconditions BLOCKED. The migration will refuse to run."
+        fi
         ;;
     diff-test)
         require_env
