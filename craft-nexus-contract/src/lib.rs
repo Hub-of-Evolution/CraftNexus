@@ -98,7 +98,7 @@ pub fn get_max_dispute_duration(env: &Env) -> Result<u64> {
         }
         None => Err(ContractError::NotInitialized),
     }
-
+}
 /// Sets the maximum dispute duration in seconds.
 pub fn set_max_dispute_duration(env: &Env, duration: u64) -> Result<u64> {
     if duration == 0 {
@@ -133,9 +133,9 @@ pub impl CraftNexusContract {
         clear_max_dispute_duration(env)
     }
 }
-
-#test
 }
+
+#[test]
 mod tests {
     use super::*;
     use sorban_std::Env;
@@ -159,7 +159,7 @@ mod tests {
         );
     }
 
-    #test]
+    #[test]
     fn set_max_dispute_duration_rejects_zero() {
         let env = Env::default();
         assert_eq!(
@@ -11506,6 +11506,10 @@ impl CraftNexusContract {
         ) {
             return Ok(false);
         }
+        let index = Self::get_persistent_u32(env, &DataKey::ArchivalSummaryCount);
+        let next_index = index
+            .checked_add(1)
+            .unwrap_or_else(|| env.panic_with_error(Error::CounterOverflow));
         let summary = ArchivalSummary {
             order_id,
             escrow: escrow.clone(),
@@ -11514,13 +11518,12 @@ impl CraftNexusContract {
         env.storage().persistent().set(&summary_key, &summary);
         Self::extend_persistent(env, &summary_key);
 
-        let index = Self::get_persistent_u32(env, &DataKey::ArchivalSummaryCount);
         let index_key = DataKey::ArchivalSummaryIndexed(index);
         env.storage().persistent().set(&index_key, &order_id);
         Self::extend_persistent(env, &index_key);
         env.storage()
             .persistent()
-            .set(&DataKey::ArchivalSummaryCount, &(index + 1));
+            .set(&DataKey::ArchivalSummaryCount, &next_index);
         Self::extend_persistent(env, &DataKey::ArchivalSummaryCount);
         Ok(true)
     }
@@ -11529,6 +11532,7 @@ impl CraftNexusContract {
     pub fn archive_terminal_escrow(env: Env, order_id: u32) -> Result<bool, Error> {
         let admin = Self::get_admin(&env)?;
         admin.require_auth();
+        Self::check_not_paused(&env);
         let escrow: Escrow = env
             .storage()
             .persistent()
@@ -12047,7 +12051,9 @@ mod deactivated_account_tests {
         // Full integration test requires cross-contract mocking
     }
 
-/// Default cooldown period after staking before tokens can be unstaked (7 days in seconds)
+
+}
+    /// Default cooldown period after staking before tokens can be unstaked (7 days in seconds)
 const DEFAULT_STAKE_COOLDOWN: u32 = time_policy::STAKE_COOLDOWN as u32;
 
 /// Default minimum release window to prevent "flash" auto-releases (1 day in seconds)
@@ -14233,7 +14239,7 @@ impl CraftNexusContract {
             _ => false,
         }
     }
-
+}
 /// Lightweight progress returned to clients and indexers without exposing the
 /// stored parameter vector.
 #[contracttype]
@@ -24586,6 +24592,9 @@ impl CraftNexusContract {
         if escrow.status != EscrowStatus::Disputed {
             env.panic_with_error(crate::Error::NotInDispute);
         }
+
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[contracttype]
