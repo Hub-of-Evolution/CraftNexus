@@ -1,7 +1,6 @@
-use soroban_std::{address, contract, contractimpl, contracttype, symbol_short};
-use sorban_std::stroktype;
+use soroban_sdk::{address, contract, contractimpl, contracttype, symbol_short};
 
-const MAX_DISPUTING_DURATION_KEY: symbol_short!("MaxDipDur");
+const MAX_DISPUTING_DURATION_KEY: Symbol = symbol_short!("MaxDipDur");
 
 const DEFAULT_MAx_DISPUTE_DURATION: u64 = 60; // 60 seconds
 
@@ -10,7 +9,7 @@ const ERROR_NOT_INITIALIZED: u32 = 1;
 const ERROR_INVALID_DURATION: u32 = 2;
 
 trait Error {
-    fn; code(&Self) -> u32;
+    fn code(&Self) -> u32;
     fn message(&Self) -> String;
 }
 
@@ -134,11 +133,9 @@ pub impl CraftNexusContract {
     }
 }
 
-#test
-}
 mod tests {
     use super::*;
-    use sorban_std::Env;
+    use soroban_sdk::Env;
 
     #[test]
     fn get_max_dispute_duration_missing_key_returns_error() {
@@ -159,7 +156,7 @@ mod tests {
         );
     }
 
-    #test]
+    #[test]
     fn set_max_dispute_duration_rejects_zero() {
         let env = Env::default();
         assert_eq!(
@@ -176,7 +173,7 @@ mod tests {
 /// contract upgrade. This struct gives us a per-token slot keyed by
 /// `DataKey::FeeTokenConfig(token)` that can carry forward additional fields
 /// (e.g. custom_bps overrides, token-specific receivers) without touching the
-/// global storage shape — new fields can be appended as `Option<T>` and read
+/// global storage shape ΓÇö new fields can be appended as `Option<T>` and read
 /// with safe fallbacks.
 ///
 /// # Fields
@@ -313,9 +310,9 @@ pub struct BatchEscrowJob {
 /// validates the cursor against the persisted job before doing any work:
 ///
 /// * a cursor whose `owner` differs from the job's owner is rejected
-///   (`BatchJobUnauthorized`) — a cursor cannot be used for another account;
+///   (`BatchJobUnauthorized`) ΓÇö a cursor cannot be used for another account;
 /// * a cursor whose `op_type` differs from the job's is rejected
-///   (`BatchCursorMismatch`) — a cursor cannot be used for another operation;
+///   (`BatchCursorMismatch`) ΓÇö a cursor cannot be used for another operation;
 /// * a cursor whose `revision` is **behind** the job's committed revision refers
 ///   to an already-applied chunk and is a harmless no-op returning current
 ///   progress (idempotent replay);
@@ -324,7 +321,7 @@ pub struct BatchEscrowJob {
 /// * at the live revision, `next_index` must equal the job's checkpoint or the
 ///   cursor is rejected (`BatchCursorMismatch`).
 ///
-/// `next_index` is the position the cursor resumes from — observable and bounded
+/// `next_index` is the position the cursor resumes from ΓÇö observable and bounded
 /// progress for clients and indexers (#1075 AC3, #1076 AC3).
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
@@ -358,7 +355,7 @@ pub struct BatchJobProgress {
 ///
 /// A dispute "expires" when the configured `max_dispute_duration` elapses
 /// without the arbitrator delivering a verdict (see [`PlatformConfig`]).
-/// At that point the escrow must still be unwound — but the platform fee
+/// At that point the escrow must still be unwound ΓÇö but the platform fee
 /// is suddenly ambiguous: nobody won the dispute, so the usual "loser
 /// pays the fee" rule doesn't apply. This enum is the on-chain knob the
 /// admin uses to pick a policy at configuration time.
@@ -375,7 +372,7 @@ pub struct BatchJobProgress {
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub enum ExpiredDisputeFeePolicy {
     /// Refund buyer in full, platform collects no fee. The default,
-    /// buyer-friendly policy — the platform absorbs the cost of the
+    /// buyer-friendly policy ΓÇö the platform absorbs the cost of the
     /// arbitrator timing out. Use when buyer goodwill matters more than
     /// covering operational cost on stalled disputes.
     RefundFullNoPlatformFee = 0,
@@ -386,13 +383,13 @@ pub enum ExpiredDisputeFeePolicy {
     RefundMinusPlatformFee = 1,
     /// Refund buyer in full, deduct platform fee from the seller's
     /// locked amount. The seller forfeits the fee even though they
-    /// never received payment — use when seller responsibility for
+    /// never received payment ΓÇö use when seller responsibility for
     /// presenting evidence outweighs the cost of forfeiting on a
     /// stalled arbitration.
     DeductFeeFromSeller = 2,
     /// Split the platform fee: half deducted from the buyer's refund,
     /// half from the seller's locked amount. The most "neutral" policy
-    /// — both sides share the cost of the arbitrator timing out.
+    /// ΓÇö both sides share the cost of the arbitrator timing out.
     SplitFee = 3,
 }
 
@@ -594,7 +591,7 @@ pub struct DisputeEscalationStatus {
     pub recorded_tier: EscalationTier,
     /// `true` once the final deadline has been reached.
     pub is_timed_out: bool,
-    /// `true` once a settlement receipt exists — the dispute is finalized and
+    /// `true` once a settlement receipt exists ΓÇö the dispute is finalized and
     /// no further settlement of any kind can run.
     pub is_finalized: bool,
     /// Settlement a timeout would produce for this dispute.
@@ -637,7 +634,7 @@ pub struct RateLimitConfig {
 ///
 /// Tracks the bounded period during which participants may challenge
 /// evidence before the dispute can be finalized. The window closes
-/// exactly once — the `Closed` state is terminal and cannot be reopened.
+/// exactly once ΓÇö the `Closed` state is terminal and cannot be reopened.
 #[contracttype]
 #[derive(Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -653,7 +650,7 @@ pub enum ChallengeState {
 /// Stores the immutable deadline computed at dispute time so that a later
 /// admin change to `evidence_challenge_window` cannot shorten or extend
 /// the window for an in-flight dispute. The `state` field guarantees the
-/// window closes exactly once — resolution atomically transitions `Open` → `Closed`.
+/// window closes exactly once ΓÇö resolution atomically transitions `Open` ΓåÆ `Closed`.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -956,7 +953,7 @@ impl CraftNexusContract {
     /// Panics with `Error::InvalidIpfsHash` if the CID is present but fails `validate_ipfs_cid`.
     ///
     /// # Storage side-effects
-    /// None — this is a pure validation helper with no storage reads or writes.
+    /// None ΓÇö this is a pure validation helper with no storage reads or writes.
     #[inline(always)]
     fn validate_optional_ipfs_hash(env: &Env, ipfs_hash: &Option<String>) {
         if let Some(cid) = ipfs_hash {
@@ -976,7 +973,7 @@ impl CraftNexusContract {
     /// Panics with `Error::InvalidMetadataHash` if the hash is present but its length is not exactly 32 bytes.
     ///
     /// # Storage side-effects
-    /// None — this is a pure validation helper with no storage reads or writes.
+    /// None ΓÇö this is a pure validation helper with no storage reads or writes.
     #[inline(always)]
     fn validate_optional_metadata_hash(env: &Env, metadata_hash: &Option<Bytes>) {
         if let Some(hash) = metadata_hash {
@@ -1048,10 +1045,10 @@ impl CraftNexusContract {
     /// admin-gated mutation. Checks are ordered cheapest-first so the
     /// common case (a structurally valid candidate that differs from
     /// the current contract address) returns without touching persistent
-    /// storage at all — a small but consistent gas saving across every
+    /// storage at all ΓÇö a small but consistent gas saving across every
     /// transfer / propose / accept_admin call.
     fn validate_admin_address(env: &Env, admin: &Address) -> Result<(), Error> {
-        // Ensure the address is not the contract's own address — a common
+        // Ensure the address is not the contract's own address ΓÇö a common
         // misconfiguration that would lock the contract out of admin
         // operations forever.
         let contract = env.current_contract_address();
@@ -1066,7 +1063,7 @@ impl CraftNexusContract {
     /// Validates a proposed platform wallet address (#707).
     ///
     /// Rejects addresses that would cause `transfer_platform_fee` to panic at
-    /// the host level — specifically the contract's own address, which is
+    /// the host level ΓÇö specifically the contract's own address, which is
     /// structurally valid but semantically meaningless as a fee destination and
     /// would lock collected fees inside the escrow contract forever.
     ///
@@ -1352,7 +1349,7 @@ impl CraftNexusContract {
     /// Atomically appends one escrow ID to the indexed global registry and
     /// increments `EscrowCount` (#515 / Issue #226).
     fn update_escrow_indices_atomic(env: &Env, order_id: u32) {
-        // Issue #515 — O(1) indexed append replaces monolithic AllEscrowIds Vec
+        // Issue #515 ΓÇö O(1) indexed append replaces monolithic AllEscrowIds Vec
         // rewrites. Legacy Vec entries are migrated lazily on first touch.
         Self::migrate_legacy_all_escrow_ids(env);
 
@@ -1673,7 +1670,7 @@ impl CraftNexusContract {
     }
 
     /// Returns the current in-flight emergency operation (if any) and its state.
-    /// No authorization required — this is freely queryable so operators can
+    /// No authorization required ΓÇö this is freely queryable so operators can
     /// diagnose active incident response operations (#1072).
     pub fn get_emergency_operation(env: Env) -> Option<EmergencyOperation> {
         env.storage()
@@ -2006,7 +2003,7 @@ impl CraftNexusContract {
 
     /// Build a client for the configured onboarding contract, if one is set.
     ///
-    /// This helper is used by the escrow contract’s safe cross-contract
+    /// This helper is used by the escrow contractΓÇÖs safe cross-contract
     /// integration so onboarding updates remain behind a single, explicit
     /// entry point instead of being spread across ad-hoc address lookups.
     fn get_onboarding_client(env: &Env) -> Option<(Address, OnboardingClient<'_>)> {
@@ -2118,7 +2115,7 @@ impl CraftNexusContract {
     /// Returns `Ok(true)` on a successful cross-contract call, `Ok(false)` if
     /// the call failed (so the caller can decide whether to fall back to
     /// emitting events) or no contract is configured. Never panics, never
-    /// propagates the host trap — the escrow flow MUST keep moving even if
+    /// propagates the host trap ΓÇö the escrow flow MUST keep moving even if
     /// the onboarding contract is broken or pointing at a malicious
     /// implementation (#243).
     #[allow(dead_code)]
@@ -2128,7 +2125,7 @@ impl CraftNexusContract {
         successful_delta: u32,
         disputed_delta: u32,
     ) -> bool {
-        // Issue #527 — short-circuit on the no-op call before paying
+        // Issue #527 ΓÇö short-circuit on the no-op call before paying
         // for the persistent storage read of the onboarding contract
         // address. If both reputation deltas are 0 the cross-contract
         // call has no effect; returning `true` here saves a storage
@@ -2219,7 +2216,7 @@ impl CraftNexusContract {
     ///
     /// Returns `Ok((is_active, role, is_verified, state_version))` on success,
     /// `Err(())` when no onboarding contract is configured or the cross-contract
-    /// call fails. Never panics — callers decide how to handle a missing or
+    /// call fails. Never panics ΓÇö callers decide how to handle a missing or
     /// unreachable onboarding contract.
     ///
     /// All four cross-contract reads are issued as separate `try_invoke_contract`
@@ -2315,7 +2312,7 @@ impl CraftNexusContract {
     ///
     /// # Stale cache prevention
     ///
-    /// Always reads from persistent storage via `is_profile_active` — never from
+    /// Always reads from persistent storage via `is_profile_active` ΓÇö never from
     /// instance cache. This ensures a deactivation takes effect immediately on
     /// the next call, not after a cache TTL.
     ///
@@ -2324,7 +2321,7 @@ impl CraftNexusContract {
     /// When an account is deactivated:
     /// - **Existing escrows**: follow their normal lifecycle to completion.
     ///   A deactivated account that is a counterparty to an existing escrow
-    ///   can still receive funds from that escrow's settlement — they cannot
+    ///   can still receive funds from that escrow's settlement ΓÇö they cannot
     ///   INITIATE new escrows.
     /// - **Active stakes**: remain locked. The staking contract's normal
     ///   unstake/withdraw flow applies. Deactivation does not force-unstake.
@@ -2337,15 +2334,15 @@ impl CraftNexusContract {
     /// It does not void existing obligations or freeze in-flight settlements.
     ///
     /// # Arguments
-    /// * `env` — The contract environment
-    /// * `account` — The address to check
+    /// * `env` ΓÇö The contract environment
+    /// * `account` ΓÇö The address to check
     ///
     /// # Errors
     /// * Panics with [`Error::OnboardingProfileInactive`] if the account's status
     ///   is not `Active` (i.e., Deactivated, UnderReview, or Flagged).
     /// * Does nothing if no onboarding contract is configured (open mode).
     fn assert_account_active(env: &Env, account: &Address) {
-        // No-op when no onboarding contract is configured — operate in open mode.
+        // No-op when no onboarding contract is configured ΓÇö operate in open mode.
         if Self::get_onboarding_address(env).is_none() {
             return;
         }
@@ -2355,7 +2352,7 @@ impl CraftNexusContract {
             match Self::safe_check_onboarding_state(env, account) {
                 Ok(state) => state,
                 Err(()) => {
-                    // Cross-contract call failed — emit warning but allow the
+                    // Cross-contract call failed ΓÇö emit warning but allow the
                     // operation to proceed so a temporarily unreachable onboarding
                     // contract cannot permanently brick privileged operations.
                     Self::emit_onboarding_call_failed(
@@ -2378,13 +2375,13 @@ impl CraftNexusContract {
     ///
     /// # Behaviour
     ///
-    /// When no onboarding contract is configured the check is a no-op — the
+    /// When no onboarding contract is configured the check is a no-op ΓÇö the
     /// platform operates in open mode and all accounts are permitted.
     ///
     /// When an onboarding contract is configured each user must satisfy all of:
     /// - Profile exists (state_version > 0; a zero version means no profile).
     /// - Profile is currently active (not deactivated, flagged, or under review).
-    /// - Role is not `UserRole::None` — the user must have completed onboarding
+    /// - Role is not `UserRole::None` ΓÇö the user must have completed onboarding
     ///   with a recognized role.
     /// - Profile is verified (`is_verified == true`) when the platform requires
     ///   verification for privileged operations.
@@ -2399,9 +2396,9 @@ impl CraftNexusContract {
     /// # Errors
     ///
     /// Panics with the appropriate [`Error`] variant on any validation failure:
-    /// - [`Error::OnboardingProfileNotFound`] — no profile (state_version == 0).
-    /// - [`Error::OnboardingProfileInactive`] — profile is not active.
-    /// - [`Error::OnboardingRoleMismatch`] — role is `None` (not properly onboarded).
+    /// - [`Error::OnboardingProfileNotFound`] ΓÇö no profile (state_version == 0).
+    /// - [`Error::OnboardingProfileInactive`] ΓÇö profile is not active.
+    /// - [`Error::OnboardingRoleMismatch`] ΓÇö role is `None` (not properly onboarded).
     fn validate_onboarding_state(env: &Env, buyer: &Address, seller: &Address) {
         // No-op when no onboarding contract is configured.
         if Self::get_onboarding_address(env).is_none() {
@@ -2413,7 +2410,7 @@ impl CraftNexusContract {
                 match Self::safe_check_onboarding_state(env, user) {
                     Ok(state) => state,
                     Err(()) => {
-                        // Cross-contract call failed — emit warning but allow the
+                        // Cross-contract call failed ΓÇö emit warning but allow the
                         // operation to proceed so a temporarily unreachable onboarding
                         // contract cannot permanently brick escrow creation.
                         Self::emit_onboarding_call_failed(
@@ -2508,7 +2505,7 @@ impl CraftNexusContract {
     /// Register the deployed OnboardingContract address so the escrow contract
     /// can make cross-contract reputation / metrics updates (admin only).
     ///
-    /// (#243) Rejects pointing the onboarding contract at the escrow itself —
+    /// (#243) Rejects pointing the onboarding contract at the escrow itself ΓÇö
     /// a self-call would create a re-entrancy hazard if the trait surface ever
     /// expands. Cross-contract calls into the configured address remain
     /// indirect via `safe_update_reputation` / `safe_update_user_metrics`,
@@ -2525,7 +2522,7 @@ impl CraftNexusContract {
 
         let previous = Self::get_onboarding_address(&env);
 
-        // Issue #527 — short-circuit on the no-op call before paying
+        // Issue #527 ΓÇö short-circuit on the no-op call before paying
         // for the persistent storage write and TTL extension.
         if let Some(ref current) = previous {
             if *current == contract_address {
@@ -2553,7 +2550,7 @@ impl CraftNexusContract {
     /// Clear the registered onboarding contract address (admin only) (#243).
     /// After calling this, `get_onboarding_contract` returns
     /// `OnboardingContractNotSet` and the safe cross-contract helpers become
-    /// no-ops — escrow flows continue to emit `ReputationUpdateEvent`s for
+    /// no-ops ΓÇö escrow flows continue to emit `ReputationUpdateEvent`s for
     /// off-chain reconstruction (#211).
     pub fn clear_onboarding_contract(env: Env) -> Result<(), Error> {
         let config = Self::get_platform_config_internal(&env);
@@ -2584,7 +2581,7 @@ impl CraftNexusContract {
     ///
     /// # Decimal validation
     ///
-    /// The token's `decimals()` value must be in the range 0–18 (inclusive).
+    /// The token's `decimals()` value must be in the range 0ΓÇô18 (inclusive).
     /// Tokens with more than 18 decimal places would overflow the volume
     /// normalization arithmetic in the onboarding contract and are rejected
     /// with [`Error::InvalidTokenDecimals`].
@@ -3041,7 +3038,7 @@ impl CraftNexusContract {
             env.panic_with_error(crate::Error::InvalidFee);
         }
 
-        // Validate platform_wallet — reject the contract's own address to prevent
+        // Validate platform_wallet ΓÇö reject the contract's own address to prevent
         // fee transfers from panicking at the host level (#707).
         if let Err(e) = Self::validate_platform_wallet(&env, &platform_wallet) {
             env.panic_with_error(e);
@@ -3823,7 +3820,7 @@ impl CraftNexusContract {
             }
         }
 
-        // Check if recovery time lock has passed (#431 â€” TTL-friendly read)
+        // Check if recovery time lock has passed (#431 ├óΓé¼ΓÇ¥ TTL-friendly read)
         let recovery_time = Self::get_persistent_u64(&env, &DataKey::AdminRecoveryTime);
 
         let current_time = env.ledger().timestamp();
@@ -3874,7 +3871,7 @@ impl CraftNexusContract {
         config.admin = recovered_admin.clone();
         config.pending_admin = None;
         env.storage().persistent().remove(&DataKey::PendingAdmin);
-        // Write config to instance storage (primary location) â€” TTL already extended
+        // Write config to instance storage (primary location) ├óΓé¼ΓÇ¥ TTL already extended
         // by get_platform_config_internal. No redundant extend_persistent needed.
         env.storage()
             .instance()
@@ -4488,8 +4485,8 @@ impl CraftNexusContract {
     /// of escrows that were actually cancelled.
     ///
     /// # Arguments
-    /// * `admin` â€“ Must be the platform admin address; auth is required.
-    /// * `order_ids` â€“ List of escrow order IDs to check and cancel.
+    /// * `admin` ├óΓé¼ΓÇ£ Must be the platform admin address; auth is required.
+    /// * `order_ids` ├óΓé¼ΓÇ£ List of escrow order IDs to check and cancel.
     pub fn auto_cancel_unfunded(
         env: Env,
         admin: Address,
@@ -5053,9 +5050,9 @@ impl CraftNexusContract {
     /// settlement path.
     ///
     /// This is the **single source of truth** for all fee math in the
-    /// contract.  Every settlement function — `release_funds`, `auto_release`,
+    /// contract.  Every settlement function ΓÇö `release_funds`, `auto_release`,
     /// `release_batch_funds`, `refund`, `resolve_dispute`,
-    /// `resolve_expired_dispute`, and `accept_partial_refund` — **must** obtain
+    /// `resolve_expired_dispute`, and `accept_partial_refund` ΓÇö **must** obtain
     /// its transfer amounts exclusively from this function and must not perform
     /// fee arithmetic inline.
     ///
@@ -5084,7 +5081,7 @@ impl CraftNexusContract {
         kind: SettlementKind,
     ) -> FeeAllocation {
         let allocation = match kind {
-            // ── Normal release: platform fee from seller's share ──────────────
+            // ΓöÇΓöÇ Normal release: platform fee from seller's share ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             SettlementKind::ReleaseFunds => {
                 let platform_fee = Self::calculate_fee(env, escrow_amount, fee_bps);
                 let seller_amount = escrow_amount - platform_fee;
@@ -5095,14 +5092,14 @@ impl CraftNexusContract {
                 }
             }
 
-            // ── Full refund, no fee: entire pot returned to buyer ─────────────
+            // ΓöÇΓöÇ Full refund, no fee: entire pot returned to buyer ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             SettlementKind::FullRefundNoFee => FeeAllocation {
                 platform_fee: 0,
                 seller_amount: 0,
                 buyer_amount: escrow_amount,
             },
 
-            // ── Expired dispute – fee conceptually from seller ────────────────
+            // ΓöÇΓöÇ Expired dispute ΓÇô fee conceptually from seller ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             // Buyer receives the full amount; the platform does NOT collect
             // the fee.  The seller's loss is the opportunity cost of the
             // stalled arbitration.  Balances because platform_fee=0.
@@ -5112,7 +5109,7 @@ impl CraftNexusContract {
                 buyer_amount: escrow_amount,
             },
 
-            // ── Expired dispute – fee deducted from buyer's refund ────────────
+            // ΓöÇΓöÇ Expired dispute ΓÇô fee deducted from buyer's refund ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             SettlementKind::ExpiredDisputeDeductFromBuyer => {
                 let platform_fee = Self::calculate_fee(env, escrow_amount, fee_bps);
                 let buyer_amount = escrow_amount - platform_fee;
@@ -5123,7 +5120,7 @@ impl CraftNexusContract {
                 }
             }
 
-            // ── Expired dispute – fee split equally between both sides ─────────
+            // ΓöÇΓöÇ Expired dispute ΓÇô fee split equally between both sides ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             SettlementKind::ExpiredDisputeSplitFee => {
                 let full_fee = Self::calculate_fee(env, escrow_amount, fee_bps);
                 // Integer division: any remainder (odd-bps rounding) stays with buyer.
@@ -5136,7 +5133,7 @@ impl CraftNexusContract {
                 }
             }
 
-            // ── Partial refund: seller-side fee only ──────────────────────────
+            // ΓöÇΓöÇ Partial refund: seller-side fee only ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
             // Gross refund + seller remainder must equal the escrow pot. The
             // platform fee is taken exclusively from the seller remainder so the
             // buyer receives the full proposed refund.
@@ -5282,7 +5279,7 @@ impl CraftNexusContract {
         Ok(())
     }
 
-    // ── Evidence challenge window helpers (#942) ──────────────────────────────
+    // ΓöÇΓöÇ Evidence challenge window helpers (#942) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     fn challenge_key(order_id: u32) -> DataKey {
         DataKey::EvidenceChallenge(order_id)
@@ -5290,7 +5287,7 @@ impl CraftNexusContract {
 
     fn create_evidence_challenge(env: &Env, order_id: u32, deadline: u64) {
         let key = Self::challenge_key(order_id);
-        // Guard against duplicate creation — dispute can only open once.
+        // Guard against duplicate creation ΓÇö dispute can only open once.
         if env.storage().persistent().has(&key) {
             return;
         }
@@ -5391,7 +5388,7 @@ impl CraftNexusContract {
         config: &PlatformConfig,
     ) -> Result<(), Error> {
         let order_id = escrow.id as u32;
-        // Use stored challenge deadline if available — immutable after dispute creation
+        // Use stored challenge deadline if available ΓÇö immutable after dispute creation
         let deadline = Self::challenge_deadline(env, order_id, escrow, config);
         let now = env.ledger().timestamp();
         // Challenge window is active while now < deadline (pending)
@@ -5414,7 +5411,7 @@ impl CraftNexusContract {
         Ok(())
     }
 
-    // ── Dispute escalation ladder (#1080) ──────────────────────
+    // ΓöÇΓöÇ Dispute escalation ladder (#1080) ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
     /// Read the configured escalation checkpoints, falling back to the platform
     /// defaults when the admin has never set an explicit schedule.
@@ -5462,7 +5459,7 @@ impl CraftNexusContract {
         })
     }
 
-    /// Tier implied by the ledger clock alone — pure, and identical for every
+    /// Tier implied by the ledger clock alone ΓÇö pure, and identical for every
     /// observer at a given timestamp.
     ///
     /// Checkpoints use the crate-wide inclusive-end convention: a tier unlocks
@@ -5495,11 +5492,11 @@ impl CraftNexusContract {
     ///
     /// | Tier              | Eligible escalators                                    |
     /// |-------------------|--------------------------------------------------------|
-    /// | `Assigned`        | nobody — the arbitrator is still inside its window     |
+    /// | `Assigned`        | nobody ΓÇö the arbitrator is still inside its window     |
     /// | `PartyFlagged`    | buyer, seller                                          |
     /// | `ModeratorReview` | buyer, seller, moderator, arbitrator, admin            |
     /// | `AdminReview`     | buyer, seller, moderator, arbitrator, admin            |
-    /// | `TimedOut`        | anyone — permissionless safety net                    |
+    /// | `TimedOut`        | anyone ΓÇö permissionless safety net                    |
     ///
     /// Each tier is a superset of the one below it: escalation rights are only
     /// ever widened as a dispute ages, never revoked.
@@ -5621,8 +5618,8 @@ impl CraftNexusContract {
         path: SettlementPath,
         proposal_nonce: u64,
     ) -> Escrow {
-        // Close challenge window exactly once — guard against re-entry.
-        // This is the sole transition Open → Closed for this order_id.
+        // Close challenge window exactly once ΓÇö guard against re-entry.
+        // This is the sole transition Open ΓåÆ Closed for this order_id.
         if Self::is_challenge_closed(env, order_id) {
             env.panic_with_error(crate::Error::SettlementAlreadyFinalized);
         }
@@ -5690,7 +5687,7 @@ impl CraftNexusContract {
     /// reconciliation) impossible without a contract upgrade. We now also
     /// write a per-token `FeeTokenConfig(token)` slot, which is the storage
     /// shape new code should read going forward. The legacy Vec is kept as
-    /// the canonical enumeration source for backward compatibility â€” a
+    /// the canonical enumeration source for backward compatibility ├óΓé¼ΓÇ¥ a
     /// `migrate_fee_token_configs` admin call backfills `FeeTokenConfig` for
     /// pre-existing tokens.
     fn add_fee_token_to_index(env: &Env, token: &Address) {
@@ -5719,7 +5716,7 @@ impl CraftNexusContract {
     }
 
     /// Seed a default `FeeTokenInfo` slot the first time a token is seen.
-    /// Idempotent â€” once a slot exists, subsequent calls leave it untouched
+    /// Idempotent ├óΓé¼ΓÇ¥ once a slot exists, subsequent calls leave it untouched
     /// so admin overrides survive future fee deposits (#239).
     fn ensure_fee_token_config(env: &Env, token: &Address) {
         let cfg_key = DataKey::FeeTokenConfig(token.clone());
@@ -5777,7 +5774,7 @@ impl CraftNexusContract {
     /// Update mutable fields of a `FeeTokenInfo` slot (admin only, #239).
     ///
     /// `active` and `custom_fee_bps` are admin-controlled. `accumulated` is
-    /// IGNORED if passed in â€” the running total is owned by the contract and
+    /// IGNORED if passed in ├óΓé¼ΓÇ¥ the running total is owned by the contract and
     /// only `record_total_fees` may move it. This split prevents an admin
     /// from rewriting historical fee accounting via the config setter.
     ///
@@ -5823,7 +5820,7 @@ impl CraftNexusContract {
     /// Backfill `FeeTokenConfig(token)` slots for every token currently
     /// present in the legacy `FeeTokenIndex` Vec (admin only, #239).
     ///
-    /// Idempotent â€” already-migrated tokens are skipped, so it is safe to
+    /// Idempotent ├óΓé¼ΓÇ¥ already-migrated tokens are skipped, so it is safe to
     /// call from a deploy script or an automated migration job. Returns the
     /// number of new config slots written so callers can verify progress.
     /// Pairs with `set_fee_token_config` for downstream tuning.
@@ -6141,7 +6138,7 @@ impl CraftNexusContract {
             },
         );
 
-        // Emit reputation update events — decoupled from onboarding contract (#211)
+        // Emit reputation update events ΓÇö decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
         Self::emit_reputation_update(
             env,
@@ -6274,7 +6271,7 @@ impl CraftNexusContract {
             },
         );
 
-        // Emit reputation update events â€” decoupled from onboarding contract (#211)
+        // Emit reputation update events ├óΓé¼ΓÇ¥ decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
         Self::emit_reputation_update(
             &env,
@@ -7027,7 +7024,7 @@ impl CraftNexusContract {
     }
 
     /// Returns the currently pending WASM upgrade proposal, if any (#230).
-    /// Read-only â€” useful for off-chain monitors and admin dashboards that
+    /// Read-only ├óΓé¼ΓÇ¥ useful for off-chain monitors and admin dashboards that
     /// need to confirm what `execute_upgrade` will apply.
     pub fn get_upgrade_proposal(env: Env) -> Option<WasmUpgradeProposal> {
         env.storage()
@@ -7090,7 +7087,7 @@ impl CraftNexusContract {
     /// Returns the bounded log of past contract upgrades (#241).
     ///
     /// Newer entries are at the back. The log is capped at
-    /// `MAX_UPGRADE_HISTORY` records â€” older entries are dropped FIFO so
+    /// `MAX_UPGRADE_HISTORY` records ├óΓé¼ΓÇ¥ older entries are dropped FIFO so
     /// storage cannot grow unbounded. For long-term audit trails operators
     /// should mirror the `wasm_upgrade` events to off-chain storage.
     pub fn get_upgrade_history(env: Env) -> Vec<UpgradeRecord> {
@@ -7238,7 +7235,7 @@ impl CraftNexusContract {
             },
         );
 
-        // Emit reputation update events — decoupled from onboarding contract (#211)
+        // Emit reputation update events ΓÇö decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
         Self::emit_reputation_update(
             env,
@@ -7467,29 +7464,29 @@ impl CraftNexusContract {
     ///
     /// ```text
     ///  Active
-    ///    │
-    ///    ▼  dispute_escrow()
-    ///  DisputePending  ──►  Disputed
-    ///                          │
-    ///               ┌──────────┼────────────────────┐
-    ///               │          │                    │
-    ///               ▼          ▼                    ▼
+    ///    Γöé
+    ///    Γû╝  dispute_escrow()
+    ///  DisputePending  ΓöÇΓöÇΓû║  Disputed
+    ///                          Γöé
+    ///               ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
+    ///               Γöé          Γöé                    Γöé
+    ///               Γû╝          Γû╝                    Γû╝
     ///     submit_evidence   escalate_dispute   propose_partial_refund
     ///      (any time while   (one tier per        (buyer-initiated
     ///       Disputed)         checkpoint reached)   negotiation)
-    ///               │          │                    │
-    ///               └──────────┼────────────────────┘
-    ///                          │
-    ///               ┌──────────┴──────────┐
-    ///               │                     │
-    ///               ▼                     ▼
+    ///               Γöé          Γöé                    Γöé
+    ///               ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
+    ///                          Γöé
+    ///               ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö┤ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
+    ///               Γöé                     Γöé
+    ///               Γû╝                     Γû╝
     ///       resolve_dispute()    resolve_expired_dispute()
     ///       (arbitrator/admin/   (anyone, after max_dispute_duration
     ///        moderator, after     has elapsed without resolution)
     ///        evidence window)
-    ///               │                     │
-    ///               └──────────┬──────────┘
-    ///                          ▼
+    ///               Γöé                     Γöé
+    ///               ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
+    ///                          Γû╝
     ///                       Resolved
     /// ```
     ///
@@ -7526,7 +7523,7 @@ impl CraftNexusContract {
     ///
     /// ## Events emitted
     ///
-    /// - `EscrowEvent { action: EscrowAction::Disputed, … }` — consumed by
+    /// - `EscrowEvent { action: EscrowAction::Disputed, ΓÇª }` ΓÇö consumed by
     ///   off-chain indexers and arbitration dashboards.
     ///
     /// # Arguments
@@ -7598,7 +7595,7 @@ impl CraftNexusContract {
         escrow.dispute_initiated_at = Some(env.ledger().timestamp());
         env.storage().persistent().set(&(ESCROW, order_id), &escrow);
         // Create bounded challenge window for this dispute (#942).
-        // Deadline is immutable — computed once at dispute time so later
+        // Deadline is immutable ΓÇö computed once at dispute time so later
         // config changes cannot shorten or extend it.
         let config_for_challenge = Self::get_platform_config_internal(&env);
         let challenge_deadline =
@@ -7633,7 +7630,7 @@ impl CraftNexusContract {
         );
     }
 
-    /// Finalize a disputed escrow and disburse funds — the normal arbitrated resolution path.
+    /// Finalize a disputed escrow and disburse funds ΓÇö the normal arbitrated resolution path.
     ///
     /// ## Role in the dispute lifecycle
     ///
@@ -7651,18 +7648,18 @@ impl CraftNexusContract {
     ///
     /// Callable by the platform `admin`, the designated `arbitrator`, or any
     /// configured `moderator`. Parties to the escrow (buyer/seller) cannot call
-    /// this function directly — they can only influence the outcome through
+    /// this function directly ΓÇö they can only influence the outcome through
     /// evidence submission or `propose_partial_refund`.
     ///
-    /// ## CEI pattern (Checks → Effects → Interactions)
+    /// ## CEI pattern (Checks ΓåÆ Effects ΓåÆ Interactions)
     ///
     /// To prevent reentrancy attacks this function follows the CEI pattern strictly:
     ///
-    /// 1. **Checks** — verify status, authorization, and the evidence window.
-    /// 2. **Effects** — update `escrow.status` to `Resolved` and persist all
+    /// 1. **Checks** ΓÇö verify status, authorization, and the evidence window.
+    /// 2. **Effects** ΓÇö update `escrow.status` to `Resolved` and persist all
     ///    storage writes (dispute counter, obligation counters, contract counters,
     ///    orphaned refund-proposal cleanup) **before** any token transfer.
-    /// 3. **Interactions** — execute the token transfer as the very last step.
+    /// 3. **Interactions** ΓÇö execute the token transfer as the very last step.
     ///
     /// If the token transfer reverts (e.g. the recipient's trustline was revoked),
     /// Soroban's atomic execution rolls back all storage writes and the escrow
@@ -7672,16 +7669,16 @@ impl CraftNexusContract {
     ///
     /// | `resolution`        | Funds flow                                          | Reputation delta                        |
     /// |---------------------|-----------------------------------------------------|-----------------------------------------|
-    /// | `ReleaseToSeller`   | `amount − platform_fee` → seller; fee → platform   | seller: +1 success; buyer: +1 disputed  |
-    /// | `RefundToBuyer`     | full `amount` → buyer; no fee deducted              | buyer: +1 success; seller: +1 disputed  |
+    /// | `ReleaseToSeller`   | `amount ΓêÆ platform_fee` ΓåÆ seller; fee ΓåÆ platform   | seller: +1 success; buyer: +1 disputed  |
+    /// | `RefundToBuyer`     | full `amount` ΓåÆ buyer; no fee deducted              | buyer: +1 success; seller: +1 disputed  |
     ///
     /// Reputation deltas are emitted as `ReputationUpdateEvent` for the off-chain
     /// reputation service (decoupled from the onboarding contract, #211).
     ///
     /// ## Events emitted
     ///
-    /// - `EscrowEvent { action: EscrowAction::Resolved, … }`
-    /// - `EscrowResolvedEvent { arbitrator, … }` — includes the arbitrator address
+    /// - `EscrowEvent { action: EscrowAction::Resolved, ΓÇª }`
+    /// - `EscrowResolvedEvent { arbitrator, ΓÇª }` ΓÇö includes the arbitrator address
     ///   for audit trails.
     /// - Two `ReputationUpdateEvent` entries (one per party).
     ///
@@ -7806,7 +7803,7 @@ impl CraftNexusContract {
             },
         );
 
-        // Emit reputation update events — decoupled from onboarding contract (#211).
+        // Emit reputation update events ΓÇö decoupled from onboarding contract (#211).
         let ts = env.ledger().timestamp();
         match resolution {
             Resolution::ReleaseToSeller => {
@@ -7908,7 +7905,7 @@ impl CraftNexusContract {
     /// Mirrors the read-time invalidation in [`Self::get_evidence`] but is called
     /// from state-changing finalization paths (dispute resolution) so a finalized
     /// dispute never carries evidence that was already past its retention deadline
-    /// (#1078 AC1 — expired evidence cannot be finalized). Refreshes the
+    /// (#1078 AC1 ΓÇö expired evidence cannot be finalized). Refreshes the
     /// evidence-log TTL for the still-active dispute record (#1078 AC2). No-op
     /// when the order has no evidence log.
     fn expire_stale_evidence(env: &Env, order_id: u32) {
@@ -7968,7 +7965,7 @@ impl CraftNexusContract {
         let content_digest: BytesN<32> = env.crypto().sha256(&bytes).into();
         let hash_key = DataKey::UsedEvidenceHash(content_digest.clone());
         if env.storage().persistent().has(&hash_key) {
-            // Duplicate digest → defined, deterministic rejection (#1077 AC2).
+            // Duplicate digest ΓåÆ defined, deterministic rejection (#1077 AC2).
             env.panic_with_error(crate::Error::EvidenceAlreadyUsed);
         }
         env.storage().persistent().set(&hash_key, &true);
@@ -8024,7 +8021,7 @@ impl CraftNexusContract {
             expires_at,
             None,
         );
-        // Track challenge evidence count — bounded window state
+        // Track challenge evidence count ΓÇö bounded window state
         Self::bump_challenge_evidence_count(&env, order_id);
         id
     }
@@ -8122,7 +8119,7 @@ impl CraftNexusContract {
         let content_digest: BytesN<32> = env.crypto().sha256(&bytes).into();
         let hash_key = DataKey::UsedEvidenceHash(content_digest.clone());
         if env.storage().persistent().has(&hash_key) {
-            // Duplicate digest → defined, deterministic rejection (#1077 AC2).
+            // Duplicate digest ΓåÆ defined, deterministic rejection (#1077 AC2).
             env.panic_with_error(crate::Error::EvidenceAlreadyUsed);
         }
         env.storage().persistent().set(&hash_key, &true);
@@ -8194,7 +8191,7 @@ impl CraftNexusContract {
 
         if modified {
             env.storage().persistent().set(&key, &updated_log);
-            // #1078: the sweep is a write to active dispute data — refresh its TTL.
+            // #1078: the sweep is a write to active dispute data ΓÇö refresh its TTL.
             Self::extend_persistent(&env, &key);
         }
 
@@ -8660,7 +8657,7 @@ impl CraftNexusContract {
 
     /// Explicitly close the challenge window after its deadline has elapsed.
     ///
-    /// The window closes exactly once — a second call fails with
+    /// The window closes exactly once ΓÇö a second call fails with
     /// `SettlementAlreadyFinalized`. This is a permissionless finalization
     /// guard: any account may close the window once the bounded challenge
     /// period has elapsed, mirroring `resolve_expired_dispute`. Normal
@@ -9680,8 +9677,8 @@ impl CraftNexusContract {
 
     /// Return the current continuation cursor for a scheduled batch (#1075).
     ///
-    /// The cursor reflects the persisted checkpoint — `revision` and `next_index`
-    /// after the last committed chunk — so recovery can resume deterministically
+    /// The cursor reflects the persisted checkpoint ΓÇö `revision` and `next_index`
+    /// after the last committed chunk ΓÇö so recovery can resume deterministically
     /// from exactly where the job left off (#1076 AC3). Returns `None` when the
     /// job does not exist.
     pub fn get_batch_cursor(env: Env, job_id: u64) -> Option<BatchCursor> {
@@ -9741,10 +9738,10 @@ impl CraftNexusContract {
         }
         job.owner.require_auth();
 
-        // Revision gate — idempotent, bounded continuation:
-        //   behind → the referenced chunk was already committed; harmless no-op.
-        //   ahead  → fabricated / future cursor; reject.
-        //   equal  → the live checkpoint; process the next chunk below.
+        // Revision gate ΓÇö idempotent, bounded continuation:
+        //   behind ΓåÆ the referenced chunk was already committed; harmless no-op.
+        //   ahead  ΓåÆ fabricated / future cursor; reject.
+        //   equal  ΓåÆ the live checkpoint; process the next chunk below.
         if cursor.revision < job.revision {
             return Ok(Self::batch_progress(cursor.job_id, &job));
         }
@@ -10036,7 +10033,7 @@ impl CraftNexusContract {
             .unwrap_or(false)
     }
 
-    // â”€â”€ Tiered Artisan Fees (#98) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Tiered Artisan Fees (#98) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
 
     /// Admin assigns a custom fee tier (in basis points) for an artisan.
     pub fn set_artisan_fee_tier(env: Env, artisan: Address, fee_bps: u32) {
@@ -10223,7 +10220,7 @@ impl CraftNexusContract {
         Ok(())
     }
 
-    // â”€â”€ Partial Refund Negotiation (#101) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Partial Refund Negotiation (#101) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
 
     /// Propose a partial refund for a disputed escrow.
     ///
@@ -10282,11 +10279,11 @@ impl CraftNexusContract {
         Ok(())
     }
 
-    // â”€â”€ Storage Explorer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Storage Explorer ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
 
     /// Returns the total number of escrows ever created on this platform.
     ///
-    /// This is an O(1) read â€” safe to call at any scale. Pair with
+    /// This is an O(1) read ├óΓé¼ΓÇ¥ safe to call at any scale. Pair with
     /// `get_all_escrow_ids_iterative` to paginate the full ID set without
     /// hitting Soroban CPU/memory resource limits.
     pub fn get_escrow_count(env: Env) -> u32 {
@@ -10332,20 +10329,20 @@ impl CraftNexusContract {
     /// To enumerate storage keys directly via the RPC without calling this function,
     /// use the `getLedgerEntries` method or the experimental `getContractData` cursor
     /// endpoint.  Relevant key patterns:
-    /// - `DataKey::GlobalEscrowIdIndexed(index)` â€“ indexed global escrow ID (#515)
-    /// - `DataKey::EscrowCount`            â€“ u32 total count
-    /// - `DataKey::AllEscrowIds`           â€“ DEPRECATED legacy Vec index
-    /// - `(ESCROW, order_id: u32)`         â€“ individual escrow struct
-    /// - `DataKey::BuyerEscrows(address)`  â€“ DEPRECATED: Legacy Vec<u64> of IDs for a buyer
-    /// - `DataKey::SellerEscrows(address)` â€“ DEPRECATED: Legacy Vec<u64> of IDs for a seller
-    /// - `DataKey::BuyerEscrowIndexed(address, index)` â€“ Indexed storage: u64 escrow ID at position
-    /// - `DataKey::BuyerEscrowCount(address)` â€“ u32 total count of buyer's escrows
-    /// - `DataKey::SellerEscrowIndexed(address, index)` â€“ Indexed storage: u64 escrow ID at position
-    /// - `DataKey::SellerEscrowCount(address)` â€“ u32 total count of seller's escrows
+    /// - `DataKey::GlobalEscrowIdIndexed(index)` ├óΓé¼ΓÇ£ indexed global escrow ID (#515)
+    /// - `DataKey::EscrowCount`            ├óΓé¼ΓÇ£ u32 total count
+    /// - `DataKey::AllEscrowIds`           ├óΓé¼ΓÇ£ DEPRECATED legacy Vec index
+    /// - `(ESCROW, order_id: u32)`         ├óΓé¼ΓÇ£ individual escrow struct
+    /// - `DataKey::BuyerEscrows(address)`  ├óΓé¼ΓÇ£ DEPRECATED: Legacy Vec<u64> of IDs for a buyer
+    /// - `DataKey::SellerEscrows(address)` ├óΓé¼ΓÇ£ DEPRECATED: Legacy Vec<u64> of IDs for a seller
+    /// - `DataKey::BuyerEscrowIndexed(address, index)` ├óΓé¼ΓÇ£ Indexed storage: u64 escrow ID at position
+    /// - `DataKey::BuyerEscrowCount(address)` ├óΓé¼ΓÇ£ u32 total count of buyer's escrows
+    /// - `DataKey::SellerEscrowIndexed(address, index)` ├óΓé¼ΓÇ£ Indexed storage: u64 escrow ID at position
+    /// - `DataKey::SellerEscrowCount(address)` ├óΓé¼ΓÇ£ u32 total count of seller's escrows
     ///
     /// # Arguments
-    /// * `page`  â€“ Zero-indexed page number
-    /// * `limit` â€“ Page size; values above `MAX_BATCH_SIZE` are silently capped
+    /// * `page`  ├óΓé¼ΓÇ£ Zero-indexed page number
+    /// * `limit` ├óΓé¼ΓÇ£ Page size; values above `MAX_BATCH_SIZE` are silently capped
     ///
     /// # Returns
     /// A `Result<Vec<u32>, Error>` containing escrow IDs for the requested page;
@@ -10791,7 +10788,7 @@ impl CraftNexusContract {
             },
         );
 
-        // Emit reputation update events â€” decoupled from onboarding contract (#211)
+        // Emit reputation update events ├óΓé¼ΓÇ¥ decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
         Self::emit_reputation_update(
             &env,
@@ -12420,17 +12417,17 @@ pub struct RecurringEscrowEvent {
 /// Lifecycle status of an escrow order.
 ///
 /// # Live variants
-/// - `Active` — funded (or created) and open for release / refund / dispute
-/// - `Released` — funds sent to the seller
-/// - `Refunded` — funds returned to the buyer
-/// - `Disputed` — dispute opened; awaiting arbitrator resolution
-/// - `Resolved` — dispute resolved (release or refund completed)
-/// - `ReleasePending` / `RefundPending` / `DisputePending` — in-flight
+/// - `Active` ΓÇö funded (or created) and open for release / refund / dispute
+/// - `Released` ΓÇö funds sent to the seller
+/// - `Refunded` ΓÇö funds returned to the buyer
+/// - `Disputed` ΓÇö dispute opened; awaiting arbitrator resolution
+/// - `Resolved` ΓÇö dispute resolved (release or refund completed)
+/// - `ReleasePending` / `RefundPending` / `DisputePending` ΓÇö in-flight
 ///  CEI transitions claimed while an external call is outstanding
 ///
 /// # Removed legacy variants (issue #706)
 /// `Draft` and `UnderReview` were deprecated in contract version 1.2 and are
-/// **not** part of this enum. Do not reintroduce them — they caused confusion
+/// **not** part of this enum. Do not reintroduce them ΓÇö they caused confusion
 /// with the live lifecycle and are unused by every transition path.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
@@ -12490,7 +12487,7 @@ pub struct EscrowStateDiagnostic {
 pub struct DiagnosticFinding {
     /// Canonical order ID of the affected record.
     pub order_id: u32,
-    /// Accounting category the finding is filed under — the token whose
+    /// Accounting category the finding is filed under ΓÇö the token whose
     /// locked-fund ledger this record's balance is tracked against.
     /// `EscrowNotFound` findings have no live record to read a token from,
     /// so they are filed under the contract's own address as a sentinel.
@@ -12511,12 +12508,12 @@ pub struct DiagnosticFinding {
 ///
 /// `report_digest` binds the finished report to this contract instance and
 /// the ledger it completed on, using the same sha256-over-payload pattern
-/// as `OnboardingAttestation::state_digest` — tamper-evident content
+/// as `OnboardingAttestation::state_digest` ΓÇö tamper-evident content
 /// commitment, not a delegated authorization.
 ///
 /// # This report grants no authority
 ///
-/// A diagnostic report — complete or in-progress — is evidence only. No
+/// A diagnostic report ΓÇö complete or in-progress ΓÇö is evidence only. No
 /// contract function accepts a `ContractDiagnosticReport` or its digest as
 /// an argument, and nothing here bypasses the existing
 /// `propose_reconciliation_repair` / `apply_reconciliation_repair`
@@ -12593,7 +12590,7 @@ pub enum SettlementKind {
 /// platform_fee + seller_amount + buyer_amount == escrow_amount
 /// ```
 ///
-/// Callers **must** use these three values — and only these three values —
+/// Callers **must** use these three values ΓÇö and only these three values ΓÇö
 /// when performing token transfers in any settlement path.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
@@ -12671,7 +12668,7 @@ struct EscrowWithoutBatch {
 }
 
 /// Escrow format before service_agreement_hash was added (#708).
-/// Used for backward-compatible deserialization during v4→v5 migration.
+/// Used for backward-compatible deserialization during v4ΓåÆv5 migration.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -12775,7 +12772,7 @@ pub struct EscrowEvent {
     pub buyer: Address,
     pub seller: Address,
     /// Monetary fields are emitted as raw integer types (i128/u64). Avoid
-    /// converting integers to strings inside the contract — emit numeric
+    /// converting integers to strings inside the contract ΓÇö emit numeric
     /// values and perform human-friendly formatting off-chain (UI/indexer).
     pub amount: i128,
     pub token: Address,
@@ -12818,7 +12815,7 @@ pub struct ReputationUpdateEvent {
 /// Soroban events must be self-describing for off-chain indexers, but
 /// `PlatformConfig` fields are heterogeneous (counts, monetary amounts,
 /// addresses, and free-form strings). Rather than emit a separate event type
-/// per field — which would bloat the contract's event ABI — every admin
+/// per field ΓÇö which would bloat the contract's event ABI ΓÇö every admin
 /// configuration change is normalized into one of these four variants. Indexers
 /// match on the variant tag to recover the underlying Rust type without any
 /// loss of precision (in particular, `I128` monetary values are never
@@ -12826,10 +12823,10 @@ pub struct ReputationUpdateEvent {
 ///
 /// # Variant mapping
 ///
-/// * `U32`     — bounded counters and basis-point fees (e.g. `platform_fee_bps`).
-/// * `I128`    — monetary thresholds such as `min_escrow_amount`.
-/// * `Address` — role and token addresses (e.g. `fee_collector`).
-/// * `String`  — human-readable identifiers that have no compact encoding.
+/// * `U32`     ΓÇö bounded counters and basis-point fees (e.g. `platform_fee_bps`).
+/// * `I128`    ΓÇö monetary thresholds such as `min_escrow_amount`.
+/// * `Address` ΓÇö role and token addresses (e.g. `fee_collector`).
+/// * `String`  ΓÇö human-readable identifiers that have no compact encoding.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -12864,9 +12861,9 @@ pub enum ConfigValue {
 ///
 /// # Payload
 ///
-/// * `field_name` — symbolic name of the mutated field.
-/// * `old_value`  — value held immediately before the write.
-/// * `new_value`  — value persisted by this update.
+/// * `field_name` ΓÇö symbolic name of the mutated field.
+/// * `old_value`  ΓÇö value held immediately before the write.
+/// * `new_value`  ΓÇö value persisted by this update.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -12900,8 +12897,8 @@ pub struct ConfigUpdatedEvent {
 ///
 /// # Payload
 ///
-/// * `artisan` — address whose fee tier was updated.
-/// * `fee_bps` — the new fee in basis points applied to future escrows.
+/// * `artisan` ΓÇö address whose fee tier was updated.
+/// * `fee_bps` ΓÇö the new fee in basis points applied to future escrows.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -12924,7 +12921,7 @@ pub struct ArtisanFeeTierUpdatedEvent {
 ///
 /// # Preconditions
 ///
-/// * `artisan.require_auth()` — only the staker may stake on their own behalf.
+/// * `artisan.require_auth()` ΓÇö only the staker may stake on their own behalf.
 /// * `amount` must be positive and `token` whitelisted.
 ///
 /// # Storage side-effects
@@ -12933,9 +12930,9 @@ pub struct ArtisanFeeTierUpdatedEvent {
 ///
 /// # Payload
 ///
-/// * `artisan` — the staking address.
-/// * `token`   — the staked token's contract address.
-/// * `amount`  — raw token amount staked (never stringified on-chain).
+/// * `artisan` ΓÇö the staking address.
+/// * `token`   ΓÇö the staked token's contract address.
+/// * `amount`  ΓÇö raw token amount staked (never stringified on-chain).
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -12967,9 +12964,9 @@ pub struct TokensStakedEvent {
 ///
 /// # Payload
 ///
-/// * `artisan` — the withdrawing address.
-/// * `token`   — the unstaked token's contract address.
-/// * `amount`  — raw token amount returned to the artisan.
+/// * `artisan` ΓÇö the withdrawing address.
+/// * `token`   ΓÇö the unstaked token's contract address.
+/// * `amount`  ΓÇö raw token amount returned to the artisan.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -13004,9 +13001,9 @@ pub struct TokensUnstakedEvent {
 ///
 /// # Payload
 ///
-/// * `order_id`  — the escrow/order whose metadata was verified.
-/// * `verifier`  — address that submitted the reveal proof.
-/// * `timestamp` — ledger timestamp at verification time.
+/// * `order_id`  ΓÇö the escrow/order whose metadata was verified.
+/// * `verifier`  ΓÇö address that submitted the reveal proof.
+/// * `timestamp` ΓÇö ledger timestamp at verification time.
 #[contracttype]
 #[derive(Clone, Eq, PartialEq)]
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
@@ -13065,7 +13062,7 @@ pub struct Metadata {
 ///
 /// `upgrade_at` is the earliest ledger timestamp at which `execute_upgrade` may
 /// run; it equals `proposed_at + wasm_upgrade_cooldown` from `PlatformConfig`.
-/// `proposed_by` records the admin that submitted the proposal — note that the
+/// `proposed_by` records the admin that submitted the proposal ΓÇö note that the
 /// admin role can rotate via the two-step transfer (`update_admin` /
 /// `claim_admin`), so the value reflects the admin at proposal time, not at
 /// execution time. `execute_upgrade` re-checks the *current* admin's auth, so
@@ -13166,15 +13163,15 @@ pub struct UpgradeStateSnapshot {
 ///
 /// # Security properties
 ///
-/// * `signers`   — snapshotted from `UpgradeSigners` (or admin fallback) at
+/// * `signers`   ΓÇö snapshotted from `UpgradeSigners` (or admin fallback) at
 ///   round open.  Subsequent `set_upgrade_signers` calls cannot alter which
 ///   addresses are eligible for this round, closing the signer-rotation race.
 ///
-/// * `threshold` — snapshotted from `UpgradeThreshold` at round open.
+/// * `threshold` ΓÇö snapshotted from `UpgradeThreshold` at round open.
 ///   Mid-round `set_upgrade_threshold` calls therefore cannot lower the bar
 ///   for the current round.
 ///
-/// * `approvals` — grows monotonically as valid signers call
+/// * `approvals` ΓÇö grows monotonically as valid signers call
 ///   `propose_upgrade_wasm`.  Only addresses present in `signers` may appear
 ///   here; duplicates are rejected with `AlreadyApproved`.
 #[contracttype]
@@ -13200,7 +13197,7 @@ pub struct UpgradeApprovalState {
 /// contract upgrade. This struct gives us a per-token slot keyed by
 /// `DataKey::FeeTokenConfig(token)` that can carry forward additional fields
 /// (e.g. custom_bps overrides, token-specific receivers) without touching the
-/// global storage shape — new fields can be appended as `Option<T>` and read
+/// global storage shape ΓÇö new fields can be appended as `Option<T>` and read
 /// with safe fallbacks.
 ///
 /// # Fields
@@ -14251,7 +14248,7 @@ pub struct BatchJobProgress {
 ///
 /// A dispute "expires" when the configured `max_dispute_duration` elapses
 /// without the arbitrator delivering a verdict (see [`PlatformConfig`]).
-/// At that point the escrow must still be unwound — but the platform fee
+/// At that point the escrow must still be unwound ΓÇö but the platform fee
 /// is suddenly ambiguous: nobody won the dispute, so the usual "loser
 /// pays the fee" rule doesn't apply. This enum is the on-chain knob the
 /// admin uses to pick a policy at configuration time.
@@ -14268,7 +14265,7 @@ pub struct BatchJobProgress {
 #[cfg_attr(any(test, feature = "testutils"), derive(Debug))]
 pub enum ExpiredDisputeFeePolicy {
     /// Refund buyer in full, platform collects no fee. The default,
-    /// buyer-friendly policy — the platform absorbs the cost of the
+    /// buyer-friendly policy ΓÇö the platform absorbs the cost of the
     /// arbitrator timing out. Use when buyer goodwill matters more than
     /// covering operational cost on stalled disputes.
     RefundFullNoPlatformFee = 0,
@@ -14279,13 +14276,13 @@ pub enum ExpiredDisputeFeePolicy {
     RefundMinusPlatformFee = 1,
     /// Refund buyer in full, deduct platform fee from the seller's
     /// locked amount. The seller forfeits the fee even though they
-    /// never received payment — use when seller responsibility for
+    /// never received payment ΓÇö use when seller responsibility for
     /// presenting evidence outweighs the cost of forfeiting on a
     /// stalled arbitration.
     DeductFeeFromSeller = 2,
     /// Split the platform fee: half deducted from the buyer's refund,
     /// half from the seller's locked amount. The most "neutral" policy
-    /// — both sides share the cost of the arbitrator timing out.
+    /// ΓÇö both sides share the cost of the arbitrator timing out.
     SplitFee = 3,
 }
 
@@ -14660,7 +14657,7 @@ impl CraftNexusContract {
     /// Panics with `Error::InvalidIpfsHash` if the CID is present but fails `validate_ipfs_cid`.
     ///
     /// # Storage side-effects
-    /// None — this is a pure validation helper with no storage reads or writes.
+    /// None ΓÇö this is a pure validation helper with no storage reads or writes.
     #[inline(always)]
     fn validate_optional_ipfs_hash(env: &Env, ipfs_hash: &Option<String>) {
         if let Some(cid) = ipfs_hash {
@@ -14680,7 +14677,7 @@ impl CraftNexusContract {
     /// Panics with `Error::InvalidMetadataHash` if the hash is present but its length is not exactly 32 bytes.
     ///
     /// # Storage side-effects
-    /// None — this is a pure validation helper with no storage reads or writes.
+    /// None ΓÇö this is a pure validation helper with no storage reads or writes.
     #[inline(always)]
     fn validate_optional_metadata_hash(env: &Env, metadata_hash: &Option<Bytes>) {
         if let Some(hash) = metadata_hash {
@@ -14715,10 +14712,10 @@ impl CraftNexusContract {
     /// admin-gated mutation. Checks are ordered cheapest-first so the
     /// common case (a structurally valid candidate that differs from
     /// the current contract address) returns without touching persistent
-    /// storage at all — a small but consistent gas saving across every
+    /// storage at all ΓÇö a small but consistent gas saving across every
     /// transfer / propose / accept_admin call.
     fn validate_admin_address(env: &Env, admin: &Address) -> Result<(), Error> {
-        // Ensure the address is not the contract's own address — a common
+        // Ensure the address is not the contract's own address ΓÇö a common
         // misconfiguration that would lock the contract out of admin
         // operations forever.
         let contract = env.current_contract_address();
@@ -14733,7 +14730,7 @@ impl CraftNexusContract {
     /// Validates a proposed platform wallet address (#707).
     ///
     /// Rejects addresses that would cause `transfer_platform_fee` to panic at
-    /// the host level — specifically the contract's own address, which is
+    /// the host level ΓÇö specifically the contract's own address, which is
     /// structurally valid but semantically meaningless as a fee destination and
     /// would lock collected fees inside the escrow contract forever.
     ///
@@ -14908,7 +14905,7 @@ impl CraftNexusContract {
     /// Atomically appends one escrow ID to the indexed global registry and
     /// increments `EscrowCount` (#515 / Issue #226).
     fn update_escrow_indices_atomic(env: &Env, order_id: u32) {
-        // Issue #515 — O(1) indexed append replaces monolithic AllEscrowIds Vec
+        // Issue #515 ΓÇö O(1) indexed append replaces monolithic AllEscrowIds Vec
         // rewrites. Legacy Vec entries are migrated lazily on first touch.
         Self::migrate_legacy_all_escrow_ids(env);
 
@@ -15238,7 +15235,7 @@ impl CraftNexusContract {
 
     /// Build a client for the configured onboarding contract, if one is set.
     ///
-    /// This helper is used by the escrow contract’s safe cross-contract
+    /// This helper is used by the escrow contractΓÇÖs safe cross-contract
     /// integration so onboarding updates remain behind a single, explicit
     /// entry point instead of being spread across ad-hoc address lookups.
     fn get_onboarding_client(env: &Env) -> Option<(Address, OnboardingClient<'_>)> {
@@ -15353,7 +15350,7 @@ impl CraftNexusContract {
     /// Returns `Ok(true)` on a successful cross-contract call, `Ok(false)` if
     /// the call failed (so the caller can decide whether to fall back to
     /// emitting events) or no contract is configured. Never panics, never
-    /// propagates the host trap — the escrow flow MUST keep moving even if
+    /// propagates the host trap ΓÇö the escrow flow MUST keep moving even if
     /// the onboarding contract is broken or pointing at a malicious
     /// implementation (#243).
     #[allow(dead_code)]
@@ -15363,7 +15360,7 @@ impl CraftNexusContract {
         successful_delta: u32,
         disputed_delta: u32,
     ) -> bool {
-        // Issue #527 — short-circuit on the no-op call before paying
+        // Issue #527 ΓÇö short-circuit on the no-op call before paying
         // for the persistent storage read of the onboarding contract
         // address. If both reputation deltas are 0 the cross-contract
         // call has no effect; returning `true` here saves a storage
@@ -15454,7 +15451,7 @@ impl CraftNexusContract {
     ///
     /// Returns `Ok((is_active, role, is_verified, state_version))` on success,
     /// `Err(())` when no onboarding contract is configured or the cross-contract
-    /// call fails. Never panics — callers decide how to handle a missing or
+    /// call fails. Never panics ΓÇö callers decide how to handle a missing or
     /// unreachable onboarding contract.
     ///
     /// All four cross-contract reads are issued as separate `try_invoke_contract`
@@ -15553,13 +15550,13 @@ impl CraftNexusContract {
     ///
     /// # Behaviour
     ///
-    /// When no onboarding contract is configured the check is a no-op — the
+    /// When no onboarding contract is configured the check is a no-op ΓÇö the
     /// platform operates in open mode and all accounts are permitted.
     ///
     /// When an onboarding contract is configured each user must satisfy all of:
     /// - Profile exists (state_version > 0; a zero version means no profile).
     /// - Profile is currently active (not deactivated, flagged, or under review).
-    /// - Role is not `UserRole::None` — the user must have completed onboarding
+    /// - Role is not `UserRole::None` ΓÇö the user must have completed onboarding
     ///   with a recognized role.
     /// - Profile is verified (`is_verified == true`) when the platform requires
     ///   verification for privileged operations.
@@ -15574,9 +15571,9 @@ impl CraftNexusContract {
     /// # Errors
     ///
     /// Panics with the appropriate [`Error`] variant on any validation failure:
-    /// - [`Error::OnboardingProfileNotFound`] — no profile (state_version == 0).
-    /// - [`Error::OnboardingProfileInactive`] — profile is not active.
-    /// - [`Error::OnboardingRoleMismatch`] — role is `None` (not properly onboarded).
+    /// - [`Error::OnboardingProfileNotFound`] ΓÇö no profile (state_version == 0).
+    /// - [`Error::OnboardingProfileInactive`] ΓÇö profile is not active.
+    /// - [`Error::OnboardingRoleMismatch`] ΓÇö role is `None` (not properly onboarded).
     fn validate_onboarding_state(env: &Env, buyer: &Address, seller: &Address) {
         // No-op when no onboarding contract is configured.
         if Self::get_onboarding_address(env).is_none() {
@@ -15588,7 +15585,7 @@ impl CraftNexusContract {
                 match Self::safe_check_onboarding_state(env, user) {
                     Ok(state) => state,
                     Err(()) => {
-                        // Cross-contract call failed — emit warning but allow the
+                        // Cross-contract call failed ΓÇö emit warning but allow the
                         // operation to proceed so a temporarily unreachable onboarding
                         // contract cannot permanently brick escrow creation.
                         Self::emit_onboarding_call_failed(
@@ -15716,7 +15713,7 @@ impl CraftNexusContract {
     /// Register the deployed OnboardingContract address so the escrow contract
     /// can make cross-contract reputation / metrics updates (admin only).
     ///
-    /// (#243) Rejects pointing the onboarding contract at the escrow itself —
+    /// (#243) Rejects pointing the onboarding contract at the escrow itself ΓÇö
     /// a self-call would create a re-entrancy hazard if the trait surface ever
     /// expands. Cross-contract calls into the configured address remain
     /// indirect via `safe_update_reputation` / `safe_update_user_metrics`,
@@ -15733,7 +15730,7 @@ impl CraftNexusContract {
 
         let previous = Self::get_onboarding_address(&env);
 
-        // Issue #527 — short-circuit on the no-op call before paying
+        // Issue #527 ΓÇö short-circuit on the no-op call before paying
         // for the persistent storage write and TTL extension.
         if let Some(ref current) = previous {
             if *current == contract_address {
@@ -15761,7 +15758,7 @@ impl CraftNexusContract {
     /// Clear the registered onboarding contract address (admin only) (#243).
     /// After calling this, `get_onboarding_contract` returns
     /// `OnboardingContractNotSet` and the safe cross-contract helpers become
-    /// no-ops — escrow flows continue to emit `ReputationUpdateEvent`s for
+    /// no-ops ΓÇö escrow flows continue to emit `ReputationUpdateEvent`s for
     /// off-chain reconstruction (#211).
     pub fn clear_onboarding_contract(env: Env) -> Result<(), Error> {
         let config = Self::get_platform_config_internal(&env);
@@ -15792,7 +15789,7 @@ impl CraftNexusContract {
     ///
     /// # Decimal validation
     ///
-    /// The token's `decimals()` value must be in the range 0–18 (inclusive).
+    /// The token's `decimals()` value must be in the range 0ΓÇô18 (inclusive).
     /// Tokens with more than 18 decimal places would overflow the volume
     /// normalization arithmetic in the onboarding contract and are rejected
     /// with [`Error::InvalidTokenDecimals`].
@@ -16304,7 +16301,7 @@ impl CraftNexusContract {
     /// reconciliation) impossible without a contract upgrade. We now also
     /// write a per-token `FeeTokenConfig(token)` slot, which is the storage
     /// shape new code should read going forward. The legacy Vec is kept as
-    /// the canonical enumeration source for backward compatibility â€” a
+    /// the canonical enumeration source for backward compatibility ├óΓé¼ΓÇ¥ a
     /// `migrate_fee_token_configs` admin call backfills `FeeTokenConfig` for
     /// pre-existing tokens.
     fn add_fee_token_to_index(env: &Env, token: &Address) {
@@ -16333,7 +16330,7 @@ impl CraftNexusContract {
     }
 
     /// Seed a default `FeeTokenInfo` slot the first time a token is seen.
-    /// Idempotent â€” once a slot exists, subsequent calls leave it untouched
+    /// Idempotent ├óΓé¼ΓÇ¥ once a slot exists, subsequent calls leave it untouched
     /// so admin overrides survive future fee deposits (#239).
     fn ensure_fee_token_config(env: &Env, token: &Address) {
         let cfg_key = DataKey::FeeTokenConfig(token.clone());
@@ -16391,7 +16388,7 @@ impl CraftNexusContract {
     /// Update mutable fields of a `FeeTokenInfo` slot (admin only, #239).
     ///
     /// `active` and `custom_fee_bps` are admin-controlled. `accumulated` is
-    /// IGNORED if passed in â€” the running total is owned by the contract and
+    /// IGNORED if passed in ├óΓé¼ΓÇ¥ the running total is owned by the contract and
     /// only `record_total_fees` may move it. This split prevents an admin
     /// from rewriting historical fee accounting via the config setter.
     ///
@@ -16437,7 +16434,7 @@ impl CraftNexusContract {
     /// Backfill `FeeTokenConfig(token)` slots for every token currently
     /// present in the legacy `FeeTokenIndex` Vec (admin only, #239).
     ///
-    /// Idempotent â€” already-migrated tokens are skipped, so it is safe to
+    /// Idempotent ├óΓé¼ΓÇ¥ already-migrated tokens are skipped, so it is safe to
     /// call from a deploy script or an automated migration job. Returns the
     /// number of new config slots written so callers can verify progress.
     /// Pairs with `set_fee_token_config` for downstream tuning.
@@ -16697,7 +16694,7 @@ impl CraftNexusContract {
             },
         );
 
-        // Emit reputation update events â€” decoupled from onboarding contract (#211)
+        // Emit reputation update events ├óΓé¼ΓÇ¥ decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
         Self::emit_reputation_update(
             &env,
@@ -16812,7 +16809,7 @@ impl CraftNexusContract {
             },
         );
 
-        // Emit reputation update events â€” decoupled from onboarding contract (#211)
+        // Emit reputation update events ├óΓé¼ΓÇ¥ decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
         Self::emit_reputation_update(
             &env,
@@ -17439,7 +17436,7 @@ impl CraftNexusContract {
     }
 
     /// Returns the currently pending WASM upgrade proposal, if any (#230).
-    /// Read-only â€” useful for off-chain monitors and admin dashboards that
+    /// Read-only ├óΓé¼ΓÇ¥ useful for off-chain monitors and admin dashboards that
     /// need to confirm what `execute_upgrade` will apply.
     pub fn get_upgrade_proposal(env: Env) -> Option<WasmUpgradeProposal> {
         env.storage()
@@ -17502,7 +17499,7 @@ impl CraftNexusContract {
     /// Returns the bounded log of past contract upgrades (#241).
     ///
     /// Newer entries are at the back. The log is capped at
-    /// `MAX_UPGRADE_HISTORY` records â€” older entries are dropped FIFO so
+    /// `MAX_UPGRADE_HISTORY` records ├óΓé¼ΓÇ¥ older entries are dropped FIFO so
     /// storage cannot grow unbounded. For long-term audit trails operators
     /// should mirror the `wasm_upgrade` events to off-chain storage.
     pub fn get_upgrade_history(env: Env) -> Vec<UpgradeRecord> {
@@ -17593,7 +17590,7 @@ impl CraftNexusContract {
             },
         );
 
-        // Emit reputation update events â€” decoupled from onboarding contract (#211)
+        // Emit reputation update events ├óΓé¼ΓÇ¥ decoupled from onboarding contract (#211)
         let ts = env.ledger().timestamp();
         Self::emit_reputation_update(
             &env,
@@ -17643,7 +17640,7 @@ impl CraftNexusContract {
     /// the canonical escrow index, flagging malformed, stale, or otherwise
     /// inconsistent active records (Issue #1135).
     ///
-    /// Call with `cursor: 0` to start a new scan — this discards any
+    /// Call with `cursor: 0` to start a new scan ΓÇö this discards any
     /// findings left over from a previous scan so results are never mixed
     /// across runs. Pass the returned `next_cursor` back in on subsequent
     /// calls until `complete` is `true`. Each record is evaluated with the
@@ -17654,7 +17651,7 @@ impl CraftNexusContract {
     /// `reconcile_token` for this kind of storage-heavy sweep.
     ///
     /// Read-only: this only ever writes scan bookkeeping (progress,
-    /// findings, and — once complete — the report itself). It never touches
+    /// findings, and ΓÇö once complete ΓÇö the report itself). It never touches
     /// escrow or accounting state, and by itself authorizes no repair; see
     /// [`ContractDiagnosticReport`] for how findings map to the existing
     /// repair-proposal flow.
@@ -17781,7 +17778,7 @@ impl CraftNexusContract {
     /// `OnboardingAttestation`'s `attestation_digest`: it binds the report to
     /// this exact contract instance and ledger so a report cannot be replayed
     /// against a different deployment or silently edited off-chain. It is a
-    /// tamper-evidence commitment, not a delegated authorization — see
+    /// tamper-evidence commitment, not a delegated authorization ΓÇö see
     /// [`ContractDiagnosticReport`] docs.
     fn diagnostic_report_digest(
         env: &Env,
@@ -18026,29 +18023,29 @@ impl CraftNexusContract {
     ///
     /// ```text
     ///  Active
-    ///    │
-    ///    ▼  dispute_escrow()
-    ///  DisputePending  ──►  Disputed
-    ///                          │
-    ///               ┌──────────┼────────────────────┐
-    ///               │          │                    │
-    ///               ▼          ▼                    ▼
+    ///    Γöé
+    ///    Γû╝  dispute_escrow()
+    ///  DisputePending  ΓöÇΓöÇΓû║  Disputed
+    ///                          Γöé
+    ///               ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
+    ///               Γöé          Γöé                    Γöé
+    ///               Γû╝          Γû╝                    Γû╝
     ///     submit_evidence   escalate_dispute   propose_partial_refund
     ///      (any time while   (after escalation    (buyer-initiated
     ///       Disputed)         window elapses)       negotiation)
-    ///               │          │                    │
-    ///               └──────────┼────────────────────┘
-    ///                          │
-    ///               ┌──────────┴──────────┐
-    ///               │                     │
-    ///               ▼                     ▼
+    ///               Γöé          Γöé                    Γöé
+    ///               ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö╝ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
+    ///                          Γöé
+    ///               ΓöîΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö┤ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÉ
+    ///               Γöé                     Γöé
+    ///               Γû╝                     Γû╝
     ///       resolve_dispute()    resolve_expired_dispute()
     ///       (arbitrator/admin/   (anyone, after max_dispute_duration
     ///        moderator, after     has elapsed without resolution)
     ///        evidence window)
-    ///               │                     │
-    ///               └──────────┬──────────┘
-    ///                          ▼
+    ///               Γöé                     Γöé
+    ///               ΓööΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓö¼ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÿ
+    ///                          Γû╝
     ///                       Resolved
     /// ```
     ///
@@ -18082,7 +18079,7 @@ impl CraftNexusContract {
     ///
     /// ## Events emitted
     ///
-    /// - `EscrowEvent { action: EscrowAction::Disputed, … }` — consumed by
+    /// - `EscrowEvent { action: EscrowAction::Disputed, ΓÇª }` ΓÇö consumed by
     ///   off-chain indexers and arbitration dashboards.
     ///
     /// # Arguments
@@ -18174,7 +18171,7 @@ impl CraftNexusContract {
         );
     }
 
-    /// Finalize a disputed escrow and disburse funds — the normal arbitrated resolution path.
+    /// Finalize a disputed escrow and disburse funds ΓÇö the normal arbitrated resolution path.
     ///
     /// ## Role in the dispute lifecycle
     ///
@@ -18192,18 +18189,18 @@ impl CraftNexusContract {
     ///
     /// Callable by the platform `admin`, the designated `arbitrator`, or any
     /// configured `moderator`. Parties to the escrow (buyer/seller) cannot call
-    /// this function directly — they can only influence the outcome through
+    /// this function directly ΓÇö they can only influence the outcome through
     /// evidence submission or `propose_partial_refund`.
     ///
-    /// ## CEI pattern (Checks → Effects → Interactions)
+    /// ## CEI pattern (Checks ΓåÆ Effects ΓåÆ Interactions)
     ///
     /// To prevent reentrancy attacks this function follows the CEI pattern strictly:
     ///
-    /// 1. **Checks** — verify status, authorization, and the evidence window.
-    /// 2. **Effects** — update `escrow.status` to `Resolved` and persist all
+    /// 1. **Checks** ΓÇö verify status, authorization, and the evidence window.
+    /// 2. **Effects** ΓÇö update `escrow.status` to `Resolved` and persist all
     ///    storage writes (dispute counter, obligation counters, contract counters,
     ///    orphaned refund-proposal cleanup) **before** any token transfer.
-    /// 3. **Interactions** — execute the token transfer as the very last step.
+    /// 3. **Interactions** ΓÇö execute the token transfer as the very last step.
     ///
     /// If the token transfer reverts (e.g. the recipient's trustline was revoked),
     /// Soroban's atomic execution rolls back all storage writes and the escrow
@@ -18213,16 +18210,16 @@ impl CraftNexusContract {
     ///
     /// | `resolution`        | Funds flow                                          | Reputation delta                        |
     /// |---------------------|-----------------------------------------------------|-----------------------------------------|
-    /// | `ReleaseToSeller`   | `amount − platform_fee` → seller; fee → platform   | seller: +1 success; buyer: +1 disputed  |
-    /// | `RefundToBuyer`     | full `amount` → buyer; no fee deducted              | buyer: +1 success; seller: +1 disputed  |
+    /// | `ReleaseToSeller`   | `amount ΓêÆ platform_fee` ΓåÆ seller; fee ΓåÆ platform   | seller: +1 success; buyer: +1 disputed  |
+    /// | `RefundToBuyer`     | full `amount` ΓåÆ buyer; no fee deducted              | buyer: +1 success; seller: +1 disputed  |
     ///
     /// Reputation deltas are emitted as `ReputationUpdateEvent` for the off-chain
     /// reputation service (decoupled from the onboarding contract, #211).
     ///
     /// ## Events emitted
     ///
-    /// - `EscrowEvent { action: EscrowAction::Resolved, … }`
-    /// - `EscrowResolvedEvent { arbitrator, … }` — includes the arbitrator address
+    /// - `EscrowEvent { action: EscrowAction::Resolved, ΓÇª }`
+    /// - `EscrowResolvedEvent { arbitrator, ΓÇª }` ΓÇö includes the arbitrator address
     ///   for audit trails.
     /// - Two `ReputationUpdateEvent` entries (one per party).
     ///
@@ -18337,7 +18334,7 @@ impl CraftNexusContract {
             },
         );
 
-        // Emit reputation update events — decoupled from onboarding contract (#211).
+        // Emit reputation update events ΓÇö decoupled from onboarding contract (#211).
         let ts = env.ledger().timestamp();
         match resolution {
             Resolution::ReleaseToSeller => {
@@ -19629,7 +19626,7 @@ impl CraftNexusContract {
     }
 
 
-    // â”€â”€ Staking Requirement for Artisans (#99) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ├óΓÇ¥Γé¼├óΓÇ¥Γé¼ Staking Requirement for Artisans (#99) ├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼├óΓÇ¥Γé¼
 
     /// Stake tokens to satisfy the platform's minimum stake requirement.
     ///
@@ -19779,7 +19776,7 @@ impl CraftNexusContract {
 
     /// Compact matured stake deposits in the queue to prevent storage bloat.
     ///
-    /// A deposit reaching its cooldown makes it *withdrawable*, not withdrawn —
+    /// A deposit reaching its cooldown makes it *withdrawable*, not withdrawn ΓÇö
     /// the principal is still owed to the artisan until `unstake_tokens` actually
     /// pays it out and removes the entry. Earlier revisions of this function
     /// deleted matured entries outright during compaction, silently destroying
