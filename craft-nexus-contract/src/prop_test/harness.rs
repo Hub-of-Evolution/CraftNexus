@@ -2,7 +2,7 @@
 extern crate alloc;
 use alloc::string::String;
 
-use super::Lcg64, DEFAULT_CASE_COUNT};
+use super::{Lcg64, DEFAULT_CASE_COUNT};
 
 // ── Invariant reporting ───────────────────────────────────────────────────────
 
@@ -155,22 +155,7 @@ impl PropHarness {
             let case_seed = rng.next_u64();
             let mut case_rng = Lcg64::new(case_seed);
             if let Err(msg) = f(&mut case_rng) {
-                panic!(
-                    "\n[prop] FAILED after {} case(s)\n\
-                     root seed : 0x:{016X}\n\
-                     case seed : 0x:{016X}  (case index {})\n\
-                     Failure   : {}\n\
-                     \n\
-                     Reproduce with: PROP_SEED=0x:{016X} cargo test --features testutils prop_",
-                    i + 1, self.seed, case_seed, i, msg, case_seed
-                     Reproduce with: PROP_SEED=0x{:016X} cargo test --features testutils prop_",
-                    i + 1,
-                    self.seed,
-                    case_seed,
-                    i,
-                    msg,
-                    case_seed
-                );
+                panic!("FAILED: {}", msg);
             }
         }
     }
@@ -192,24 +177,9 @@ impl PropHarness {
                 let steps: String = minimized
                     .iter()
                     .enumerate()
-                    .map((j, op)< alloc::format!("  {}: {:\n", j, op))
+                    .map(|(j, op)| alloc::format!("  {}: {:?}\n", j, op))
                     .collect();
-                panic!(
-                    "\n[prop] FAILED after {} case(s)\n\
-                     root seed  : 0x:{016X}\n\
-                     case seed : 0x:{016X}  index {})\n\
-                     Original   : {} steps → Minimized: {} steps\n\
-                     {}\n\
-                     Failure    : {}\n",
-                    i + 1,
-                    self.seed,
-                    case_seed,
-                    i,
-                    ops.len(),
-                    minimized.len(),
-                    steps,
-                    msg
-                );
+                panic!("FAILED: {}", msg);
             }
         }
     }
@@ -283,35 +253,12 @@ impl PropHarness {
                             )
                         })
                         .collect();
-                    panic!(
-                        "\n[prop] INVARIANT VIOLATION after {} case(s)\n\
-                         root seed     : 0x{:016X}\n\
-                         case seed     : 0x{:016X}  (index {})\n\
-                         Original      : {} steps → Minimized: {} steps\n\
-                         First violation at step {}: {}\n\
-                         State transition: {:?}\n\
-                         Shrunk sequence:\n\
-                         {}\
-                         \n\
-                         Reproduce with: PROP_SEED=0x{:016X} cargo test --features testutils prop_",
-                        i + 1,
-                        self.seed,
-                        case_seed,
-                        i,
-                        ops.len(),
-                        minimized.len(),
-                        report.violation_step,
-                        report.violation_msg,
-                        report.state_transition,
-                        steps,
-                        case_seed
-                    );
+                    panic!("FAILED: violation msg: {}, violation step: {}, state transition: {:?}", report.violation_msg, report.violation_step, report.state_transition);
                 }
                 Ok(_) => {}
             }
         }
     }
-}
 
     pub fn run_contract_sequence<Op, Gen, Exec, Check>(&self,mut generate: Gen, mut execute: Exec, mut check_invariants: Check)
     where
@@ -333,7 +280,7 @@ impl PropHarness {
             for (step, (op, expected)) in ops.iter().enumerate() {
                 let exec_res = execute(op);
                 let actual = match exec_res {
-                    Ok(v) => v,\
+                    Ok(v) => v,
                     Err(msg) => {
                         failure = Some(alloc::format!(
                             "step {} execute error (op {:?}): {}",
@@ -364,27 +311,13 @@ impl PropHarness {
                 let steps: String = ops
                     .iter()
                     .enumerate()
-                    .map((j, (op, flag))| alloc::format!(
-                        "  {}: ({:0?}, expected={})\n",
+                    .map(|(j, (op, flag))| alloc::format!(
+                        "  {}: ({:?}, expected={})\n",
                         j, op,
                         if *flag { "succeed" } else { "revert" }
                     ))
                     .collect();
-                panic!(
-                    "\n[prop] FAILED after {} case(s)\n\
-                     root seed  : 0x:{016X}\n\
-                     case seed  : 0x:{016X}  index {})\n\
-                     Sequence   : {} steps\n\
-                     {}\n\
-                     Failure    : {}\n",
-                    i + 1,
-                    self.seed,
-                    case_seed,
-                    i,
-                    ops.len(),
-                    steps,
-                    msg
-                );
+                panic!("FAILED: {}", msg);
             }
         }
     }
@@ -397,9 +330,9 @@ macro_rules! prop_assert {
             return Err(alloc::format!("prop_assert: {}", $msg));
         }
     };
-    ($cond: expr, $fmt:literal, $($arg):*) => {
+    ($cond: expr, $fmt:literal, $($arg:tt)*) => {
         if !($cond) {
-            return Err(alloc::format!(concat!("prop_assert: ", $fmt), $($arg)));
+            return Err(alloc::format!(concat!("prop_assert: ", $fmt), $($arg)*));
         }
     };
 }

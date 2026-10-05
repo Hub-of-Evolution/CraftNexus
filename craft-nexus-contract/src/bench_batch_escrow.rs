@@ -17,6 +17,9 @@
 //!
 //! ## Notes on interpretation
 //!
+//! * These benchmarks exercise `create_batch_escrow`; the auth/pause hardening
+//!   tests for `schedule_batch_escrow` live in `test_batch_escrow.rs`.
+//!
 //! * These numbers are measured against the Rust host, **not** the WASM runtime.
 //!   Actual on-chain CPU/memory will be higher because the WASM VM adds its own
 //!   instruction overhead on top of host-side costs.  The ratios between batch
@@ -187,6 +190,70 @@ fn bench_create_batch_escrow_15() {
 #[test]
 fn bench_create_batch_escrow_20() {
     bench_batch_size(20);
+}
+
+// ─── schedule_batch_escrow hardening tests ───────────────────────────────────
+
+/// An unauthorized caller must not be able to mutate storage through
+/// `schedule_batch_escrow`.  The call must be rejected with the specific
+/// `Error::Unauthorized` variant and the buyer balance must be unchanged.
+#[test]
+fn schedule_batch_escrow_rejects_unauthorized_caller() {
+    let (env, client, buyer, seller, token, token_client) = setup_bench();
+
+    let params = build_params(&env, &buyer, &seller, &token, 1, 9_000);
+    let balance_before = token_client.balance(&buyer);
+
+    // Drop the blanket auth mock so the missing `require_auth` is observable.
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let result = client.try_schedule_batch_escrow(&1_u64, &params);
+
+    match result {
+        Ok(Err(e)) => assert_eq!(
+            e,
+            Error::Unauthorized,
+            "expected Unauthorized, got {:?}",
+            e
+        ),
+        other => panic!("expected Unauthorized rejection, got {:?}", other),
+    }
+
+    assert_eq!(
+        token_client.balance(&buyer),
+        balance_before,
+        "buyer balance must be unchanged after rejected schedule"
+    );
+}
+
+/// `schedule_batch_escrow` must be rejected while the platform is paused and
+/// must leave balances untouched.
+#[test]
+fn schedule_batch_escrow_rejected_while_paused() {
+    let (env, client, buyer, seller, token, token_client) = setup_bench();
+
+    client.pause();
+
+    let params = build_params(&env, &buyer, &seller, &token, 1, 9_100);
+    let balance_before = token_client.balance(&buyer);
+
+    let result = client.try_schedule_batch_escrow(&1_u64, &params);
+
+    match result {
+        Ok(Err(e)) => assert_eq!(
+            e,
+            Error::ContractPaused,
+            "expected ContractPaused, got {:?}",
+            e
+        ),
+        other => panic!("expected ContractPaused rejection, got {:?}", other),
+    }
+
+    assert_eq!(
+        token_client.balance(&buyer),
+        balance_before,
+        "buyer balance must be unchanged after paused rejection"
+    );
 }
 
 // ─── comparative summary ──────────────────────────────────────────────────────

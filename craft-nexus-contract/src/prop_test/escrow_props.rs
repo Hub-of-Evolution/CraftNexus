@@ -17,6 +17,7 @@
 //! 11. **Dispute blocked on terminal escrow**.
 
 #![cfg(test)]
+extern crate std;
 extern crate alloc;
 
 use soroban_sdk::{
@@ -680,14 +681,6 @@ fn run_op(
         } => {
             let s = if *same_party { buyer } else { seller };
             matches!(client.try_create_escrow(buyer, s, token_id, amount, order_id, &Some(*release_window)), Ok(Ok(_)))
-            let _ = client.try_create_escrow(
-                buyer,
-                s,
-                token_id,
-                amount,
-                order_id,
-                &Some(*release_window),
-            );
         }
         EscrowOp::FundEscrow { .. } => {
             // Escrows are funded at creation in the test environment.
@@ -710,7 +703,6 @@ fn run_op(
                 _ => admin,
             };
             matches!(client.try_dispute_escrow(order_id, &Symbol::new(env, "Reason"), caller), Ok(Ok(())))
-            let _ = client.try_dispute_escrow(order_id, &Symbol::new(env, "Reason"), caller);
         }
         EscrowOp::ResolveDispute {
             order_id,
@@ -900,7 +892,7 @@ fn prop_model_shrinking_minimal_reproducers() {
                     |seq| matches!(execute_sequence(seq), Ok(r) if r.has_violation()),
                 );
 
-                println!(
+                std::println!(
                     "[prop_model_shrinking_minimal_reproducers] Test iteration {}:\n  \
                      Original: {} operations → Shrunk: {} operations\n  \
                      Violation: {}\n  \
@@ -931,5 +923,5 @@ fn prop_model_shrinking_minimal_reproducers() {
 
     // If no violations found after several attempts, that's fine - this test
     // demonstrates the shrinking mechanism works when violations occur
-    println!("[prop_model_shrinking_minimal_reproducers] No violations found in test sequences");
+    std::println!("[prop_model_shrinking_minimal_reproducers] No violations found in test sequences");
 }

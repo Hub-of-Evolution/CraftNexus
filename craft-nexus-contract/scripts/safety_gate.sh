@@ -60,7 +60,7 @@ write_report() {
   "failed_suite": "${FAILED_SUITE}",
   "failed_invariant": "${FAILED_INVARIANT}",
   "reproducible_seed": "${PROP_SEED}",
-  "suites": ["native_unit", "property_invariants", "settlement_disputes", "recurring_escrow", "staking", "onboarding", "recovery_admin", "upgrades", "reconciliation", "wasm_validation"]
+    "suites": ["native_unit", "property_invariants", "settlement_disputes", "recurring_escrow", "staking", "onboarding", "recovery_admin", "upgrades", "reconciliation", "wasm_validation", "native_wasm_differential", "cross_lifecycle_differential"]
 }
 EOF
     echo "Safety-gate report written to ${REPORT_PATH}"
@@ -125,6 +125,22 @@ if [ "${SKIP_WASM_BUILD}" != "1" ]; then
     if [ "${WASM_SIZE_BYTES}" -gt "${MAX_WASM_SIZE_BYTES}" ]; then
         fail_suite "wasm_validation" "wasm_size_limit"
     fi
+
+    case "${WASM_ARTIFACT}" in
+        /*) ;;
+        *) WASM_ARTIFACT="${ROOT}/${WASM_ARTIFACT}" ;;
+    esac
+    export WASM_ARTIFACT
+    export DIFFERENTIAL_REPORT="${ROOT}/target/native-wasm-differential.json"
+    log "Running native/WASM differential scenarios with seed ${PROP_SEED}..."
+    run_suite "native_wasm_differential" "state_events_errors_resources" \
+        cargo test --lib --features wasm-differential-tests native_and_wasm_match_generated_scenarios -- --nocapture
+
+    export CROSS_LIFECYCLE_WASM_ARTIFACT="${WASM_ARTIFACT}"
+    export CROSS_LIFECYCLE_FAILURE_REPORT="${ROOT}/target/cross-lifecycle-failure.txt"
+    log "Running native/WASM cross-lifecycle scenarios with seed ${PROP_SEED}..."
+    run_suite "cross_lifecycle_differential" "authorization,conservation,uniqueness,monotonicity,terminal_state" \
+        cargo test --lib prop_cross_lifecycle_invariants -- --nocapture
 fi
 
 write_report
