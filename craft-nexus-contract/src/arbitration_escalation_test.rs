@@ -3,7 +3,7 @@ extern crate alloc;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Events, Ledger},
+    testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
     token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
 };
 
@@ -335,6 +335,59 @@ fn test_arbitrator_rotation_invalidates_active_assignment() {
         &buyer,
         &String::from_str(&env, "ipfs://reassigned-evidence"),
     );
+}
+
+#[test]
+fn test_update_arbitrator_rejects_unauthorized_caller_without_mutation() {
+    let env = Env::default();
+    let (client, _buyer, _seller, _token, _token_admin, _admin) = setup(&env);
+    let unauthorized = Address::generate(&env);
+    let replacement = Address::generate(&env);
+    let contract_id = client.address();
+    let before = client.get_platform_config();
+    let before_revision = client.get_arbitrator_assign_revision();
+
+    let result = client
+        .mock_auths(&[MockAuth {
+            address: &unauthorized,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "update_arbitrator",
+                args: vec![&env, replacement.clone().into_val(&env)],
+                sub_invokes: &[],
+            },
+        }])
+        .try_update_arbitrator(&replacement);
+
+    assert!(result.is_err());
+    assert_eq!(client.get_platform_config(), before);
+    assert_eq!(client.get_arbitrator_assign_revision(), before_revision);
+}
+
+#[test]
+fn test_update_arbitrator_rejects_when_paused_without_changing_balances() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
+    create_and_dispute(&env, &client, &buyer, &seller, &token, &token_admin, 1);
+    let token_client = token::Client::new(&env, &token);
+    let buyer_balance = token_client.balance(&buyer);
+    let contract_balance = token_client.balance(&client.address());
+    let before_config = client.get_platform_config();
+    let before_revision = client.get_arbitrator_assign_revision();
+    let replacement = Address::generate(&env);
+
+    client.set_paused(&true);
+    let result = client.try_update_arbitrator(&replacement);
+
+    assert_eq!(result.unwrap_err(), Ok(Error::ContractPaused));
+    assert_eq!(token_client.balance(&buyer), buyer_balance);
+    assert_eq!(token_client.balance(&client.address()), contract_balance);
+    assert_eq!(
+        client.get_platform_config().arbitrator,
+        before_config.arbitrator
+    );
+    assert!(client.get_platform_config().is_paused);
+    assert_eq!(client.get_arbitrator_assign_revision(), before_revision);
 }
 
 // ── Dispute Evidence Challenge Period (#942) ───────────────────────────
