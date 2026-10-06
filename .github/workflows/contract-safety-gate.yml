@@ -1,4 +1,4 @@
-name: Contract Safety Gate
+﻿name: Contract Safety Gate
 
 on:
   push:
