@@ -1,1 +1,19 @@
-I2AhW25vX3N0ZF0KCi8vLyBDcmFmdCBOZXh1cyBDb250cmFjdCDigJQgbW9kdWxhciBlbnRyeXBvaW50IHJvdXRpbmcgbGF5ZXIuCi8vLwovLy8gVGhpcyBmaWxlIGlzIGRlbGliZXJhdGVseSB0aGluOiBpdCBkZWNsYXJlcyB0aGUgY29udHJhY3Qgc3RydWN0LAovLy8gcm91dGVzIGVudHJ5cG9pbnRzIHRvIGRvbWFpbiBtb2R1bGVzLCBhbmQgaG9sZHMgdGhlIGBpbHBsIENyYWZ0TmV4dXNDb250cmFjdGAKLy8vIGJsb2NrcyB0aGF0IGRlbGVnYXRlIHRvIGBjb3JlOjp7ZXNjcm93LHJlY3VycmluZyxhZG1pbixyZWNvbmNpbGlhdGlvbixzdGFraW5nfWAuCgptb2QgdHlwZXM7Cm1vZCBlcnJvcjsKbW9kIHN0b3JhZ2U7Cm1vZCBjb3JlOwoKcHViIHVzZSB0eXBlczo6KjsKcHViIHVzZSBlcnJvcjo6RXJyb3I7CnB1YiB1c2Ugc3RvcmFnZTo6a2V5czo6RGF0YUtleTsKCnVzZSBzb3JvYmFuX3Nkazo6e2NvbnRyYWN0LCBjb250cmFjdGltcGwsIEVudiwgQWRkcmVzcywgU3ltYm9sLCBWYWwg
+#`![no_std]
+
+/// Craft Nexus Contract — modular entrypoint routing layer.
+///
+/// This file is deliberately thin: it declares the contract struct,
+/// routes entrypoints to domain modules, and holds the `ilpl CraftNexusContract`
+/// blocks that delegate to `core::{escrow,recurring,admin,reconciliation,staking}`.
+
+mod types;
+mod error;
+mod storage;
+mod core;
+
+pub use types::*;
+pub use error::Error;
+pub use storage::keys::DataKey;
+
+use soroban_sdk::{contract, contractimpl, Env, Address, Symbol, Val
+}}}}}}}}
