@@ -1,4 +1,4 @@
-use soroban_std::{address, contract, contractimpl, contracttype, symbol_short};
+use soroban_std::{address, contract, contractimpl, contracttype, symbol_short, Env, Address, panic_with_error};
 use sorban_std::stroktype;
 
 const MAX_DISPUTING_DURATION_KEY: symbol_short!("MaxDipDur");
@@ -8,6 +8,7 @@ const DEFAULT_MAx_DISPUTE_DURATION: u64 = 60; // 60 seconds
 /// Error types for the craft-nexus contract.
 const ERROR_NOT_INITIALIZED: u32 = 1;
 const ERROR_INVALID_DURATION: u32 = 2;
+const ERROR_INVALID_ESCALATION_POLICY: u32 = 84;
 
 trait Error {
     fn; code(&Self) -> u32;
@@ -67,10 +68,45 @@ impl Error for InvalidDuration {
     }
 }
 
-#[derive(Clone, Debug, Eq,PartialEq)]
+pub struct InvalidEscalationPolicy;
+
+impl Error for InvalidEscalationPolicy {
+    fn code(&Self) -> u32 {
+        ERROR_INVALID_ESCALATION_POLICY
+    }
+    fn message(&Self) -> String {
+        String::from_str("invalid escalation policy")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContractError {
     NotInitialized,
     InvalidDuration,
+    InvalidEscalationPolicy,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlatformConfig {
+    pub is_paused: bool,
+    pub dispute_escalation_window: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscalationCheckpoints {
+    pub party_checkpoint: u32,
+    pub moderator_checkpoint: u32,
+    pub admin_checkpoint: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DataKey {
+    MaxDisputeDuration,
+    EscalationCheckpoints,
+    Admin,
 }
 
 pub type Result<T> = core::result::Result<T, ContractError>;
@@ -132,6 +168,69 @@ pub impl CraftNexusContract {
     pub fn clear_max_dispute_duration(env: &Env) {
         clear_max_dispute_duration(env)
     }
+
+    pub fn set_escalation_checkpoints(
+        env: &Env,
+        party_checkpoint: u32,
+        moderator_checkpoint: u32,
+        admin_checkpoint: u32,
+    ) {
+        // Require authorization from the admin role
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap();
+        admin.require_auth();
+
+        // Check if the platform is paused
+        let mut config: PlatformConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlatformConfig)
+            .unwrap();
+        if config.is_paused {
+            panic!("Platform is paused");
+        }
+
+        // Validate the escalation policy using checked arithmetic
+        let max_duration = get_max_dispute_duration(env).unwrap_or(DEFAULT_MAX_DISPUTE_DURATION);
+
+        // party_checkpoint must be non-zero and strictly less than moderator_checkpoint
+        if party_checkpoint == 0 {
+            panic_with_error(ContractError::InvalidEscalationPolicy);
+        }
+        if !party_checkpoint < moderator_checkpoint {
+            panic_with_error(ContractError::InvalidEscalationPolicy);
+        }
+        if !moderator_checkpoint < admin_checkpoint {
+            panic_with_error(ContractError::InvalidEscalationPolicy);
+        }
+
+        // admin_checkpoint must be strictly below max_dispute_duration
+        if !admin_checkpoint < max_duration {
+            panic_with_error(ContractError::InvalidEscalationPolicy);
+        }
+
+        // Store the checkpoints
+        let key = DataKey::EscalationCheckpoints;
+        env.storage()
+            .persistent()
+            .set(&key, &EscalationCheckpoints {
+                party_checkpoint,
+                moderator_checkpoint,
+                admin_checkpoint,
+            });
+        env.extend_persistent_read(&key);
+    }
+
+    pub fn get_escalation_checkpoints(env: &Env) -> Option<EscalationCheckpoints> {
+        let key = DataKey::EscalationCheckpoints;
+        env.extend_persistent_read(&key);
+        env.storage()
+            .persistent()
+            .get::|_|>(&key)
+    }
 }
 
 #test
@@ -166,6 +265,36 @@ mod tests {
             set_max_dispute_duration(&env, 0),
             Err(ContractError::InvalidDuration)
         );
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_escalation_checkpoints_unauthorized_fails() {
+        let env = Env::default();
+        env.set_auths(&[]);
+        CraftNexusContract::set_escalation_checkpoints(&env, 1, 2, 3);
+    }
+
+    #[test]
+    #[should_panic]
+    fn set_escalation_checkpoints_paused_fails() {
+        let env = Env::default();
+        let mut config: PlatformConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlatformConfig)
+            .unwrap();
+        config.is_paused = true;
+        env.storage().instance().set(&DataKey::PlatformConfig, &config);
+        CraftNexusContract::set_escalation_checkpoints(&env, 1, 2, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid escalation policy")]
+    fn set_escalation_checkpoints_zero_party_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        CraftNexusContract::set_escalation_checkpoints(&env, 0, 2, 4);
     }
 }
 
