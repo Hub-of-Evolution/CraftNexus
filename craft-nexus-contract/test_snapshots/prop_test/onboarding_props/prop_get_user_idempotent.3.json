@@ -404,7 +404,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "MaxOnboardingAttemptsPerWindow"
+                  "symbol": "MaxOnboardAttempts"
                 }
               ]
             },
@@ -421,7 +421,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "MaxOnboardingAttemptsPerWindow"
+                      "symbol": "MaxOnboardAttempts"
                     }
                   ]
                 },
@@ -907,7 +907,52 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "UserStateVersion"
+                  "symbol": "UserStateRevision"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "UserStateRevision"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "UserStateRevision"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -927,7 +972,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "UserStateVersion"
+                      "symbol": "UserStateRevision"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1331,6 +1376,14 @@
                 {
                   "key": {
                     "symbol": "role"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
                   },
                   "val": {
                     "u32": 1

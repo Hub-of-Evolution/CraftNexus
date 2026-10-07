@@ -1,4 +1,25 @@
+//! Test harness engine: runs deterministic sequences and shrinks failures.
 #![allow(dead_code)]
+//!
+//! # Usage
+//!
+//! ```rust
+//! use crate::prop_test::harness::PropHarness;
+//!
+//! let harness = PropHarness::new(seed_from_env(), 64);
+//! harness.run(|rng| {
+//!     // generate + execute one case; return Ok(()) or Err(description)
+//! });
+//! ```
+//!
+//! When a case fails, `PropHarness::run` panics with:
+//!
+//! ```text
+//! [prop] FAILED after N cases
+//! seed: 0xCAFEF00DDEADBEEF  case: 0x…
+//! Failure: "fund_conservation violation …"
+//! ```
+
 extern crate alloc;
 use alloc::string::String;
 
@@ -146,6 +167,8 @@ impl PropHarness {
         Self::new(super::seed_from_env(), DEFAULT_CASE_COUNT)
     }
 
+    /// Run `case_count` iterations of `f`. Each call receives a forked `Lcg64`.
+    /// Returns `Ok(())` or Err(message)` per case; panics on first failure.
     pub fn run<F>(&self, mut f: F)
     where
         F: FnMut(&mut Lcg64) -> Result<(), String>,
@@ -160,6 +183,7 @@ impl PropHarness {
         }
     }
 
+    /// Run `case_count` cases with a generated sequence, shrinking on failure.
     pub fn run_sequence<Op, Gen, Exec>(&self, mut generate: Gen, mut execute: Exec)
     where
         Op: Clone + core::fmt::Debug,
@@ -186,8 +210,11 @@ impl PropHarness {
 
     /// Run `case_count` cases with model-based shrinking that reports the first
     /// violated invariant and state transition details.
-    pub fn run_model_sequence<Op, Gen, Exec>(&self, mut generate: Gen, mut execute: Exec)
-    where
+    pub fn run_model_sequence<Op, Gen, Exec>(
+        &self,
+        mut generate: Gen,
+        mut execute: Exec,
+    ) where
         Op: Clone + core::fmt::Debug,
         Gen: FnMut(&mut Lcg64) -> alloc::vec::Vec<super::generators::ShrinkableOp<Op>>,
         Exec: FnMut(&[super::generators::ShrinkableOp<Op>]) -> Result<InvariantReport, String>,
@@ -199,18 +226,16 @@ impl PropHarness {
             let ops = generate(&mut case_rng);
             match execute(&ops) {
                 Err(msg) => {
-                    let minimized =
-                        super::generators::shrink_model_based(ops.clone(), |c| execute(c).is_err());
+                    let minimized = super::generators::shrink_model_based(ops.clone(), |c| {
+                        execute(c).is_err()
+                    });
                     let steps: String = minimized
                         .iter()
                         .enumerate()
                         .map(|(j, sop)| {
                             alloc::format!(
                                 "  {}: actor={}, time={}, op={:?}\n",
-                                j,
-                                sop.actor_id,
-                                sop.timestamp,
-                                sop.op
+                                j, sop.actor_id, sop.timestamp, sop.op
                             )
                         })
                         .collect();
@@ -236,20 +261,16 @@ impl PropHarness {
                     );
                 }
                 Ok(report) if report.has_violation() => {
-                    let minimized = super::generators::shrink_model_based(
-                        ops.clone(),
-                        |c| matches!(execute(c), Ok(r) if r.has_violation()),
-                    );
+                    let minimized = super::generators::shrink_model_based(ops.clone(), |c| {
+                        matches!(execute(c), Ok(r) if r.has_violation())
+                    });
                     let steps: String = minimized
                         .iter()
                         .enumerate()
                         .map(|(j, sop)| {
                             alloc::format!(
                                 "  {}: actor={}, time={}, op={:?}\n",
-                                j,
-                                sop.actor_id,
-                                sop.timestamp,
-                                sop.op
+                                j, sop.actor_id, sop.timestamp, sop.op
                             )
                         })
                         .collect();
@@ -323,9 +344,10 @@ impl PropHarness {
     }
 }
 
+/// Assert condition inside a property test closure, returning `Err` on failure.
 #[macro_export]
 macro_rules! prop_assert {
-    ($cond: expr, $msg:literal) => {
+    ($cond:expr, $msg:literal) => {
         if !($cond) {
             return Err(alloc::format!("prop_assert: {}", $msg));
         }
@@ -337,6 +359,7 @@ macro_rules! prop_assert {
     };
 }
 
+/// Assert equality inside a property test closure, returning `Err` on failure.
 #[macro_export]
 macro_rules! prop_assert_eq {
     ($left:expr, $right:expr) => {
@@ -350,6 +373,9 @@ macro_rules! prop_assert_eq {
     };
 }
 
+// ── Ledger time helpers ───────────────────────────────────────────────────────
+
+/// Advance the Soroban test environment ledger timestamp by `delta_secs`.
 pub fn advance_ledger_time(env: &soroban_sdk::Env, delta_secs: u64) {
     use soroban_sdk::testutils::Ledger;
     env.ledger().with_mut(|li| {
@@ -357,6 +383,7 @@ pub fn advance_ledger_time(env: &soroban_sdk::Env, delta_secs: u64) {
     });
 }
 
+/// Set the Soroban test environment ledger timestamp to an absolute value.
 pub fn set_ledger_time(env: &soroban_sdk::Env, ts: u64) {
     use soroban_sdk::testutils::Ledger;
     env.ledger().with_mut(|li| {

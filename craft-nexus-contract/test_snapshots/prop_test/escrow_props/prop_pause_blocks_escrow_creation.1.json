@@ -794,6 +794,45 @@
             "key": {
               "vec": [
                 {
+                  "symbol": "ArbitratorAssignmentRevision"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ArbitratorAssignmentRevision"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u64": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
+            "key": {
+              "vec": [
+                {
                   "symbol": "BuyerEscrowCount"
                 },
                 {
@@ -1617,6 +1656,42 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "AdminMutationFingerprint"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bytes": "34cf4c6ea9a7a3569d49edf9d169aeb2a59577ebae6487b826ab50299d26d3ad"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "AdminRevision"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 2
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "LastAppliedAdminRevision"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 1
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "PlatformConfig"
                             }
                           ]
@@ -2324,6 +2399,22 @@
                       }
                     ]
                   }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
                 }
               ]
             }
@@ -2385,6 +2476,22 @@
                         "string": "unset"
                       }
                     ]
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 }
               ]
@@ -2511,6 +2618,22 @@
                       }
                     ]
                   }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
                 }
               ]
             }
@@ -2619,6 +2742,22 @@
                         "u32": 86400
                       }
                     ]
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 }
               ]
@@ -2927,6 +3066,22 @@
                 },
                 {
                   "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "timestamp"
                   },
                   "val": {
@@ -3193,6 +3348,22 @@
                   },
                   "val": {
                     "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 },
                 {

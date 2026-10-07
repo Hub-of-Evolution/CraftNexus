@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 10,
+    "address": 9,
     "nonce": 0
   },
   "auth": [
@@ -44,9 +44,7 @@
                 {
                   "u32": 500
                 },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
-                }
+                "void"
               ]
             }
           },
@@ -118,7 +116,25 @@
       ]
     ],
     [],
-    [],
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "function_name": "recover_admin_access",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
     []
   ],
   "ledger": {
@@ -197,6 +213,157 @@
           "contract_data": {
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
             "key": {
+              "symbol": "PLAT_FEE"
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "symbol": "PLAT_FEE"
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "admin"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "arbitrator"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "dispute_escalation_window"
+                      },
+                      "val": {
+                        "u32": 259200
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "evidence_challenge_window"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "expired_dispute_fee_policy"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "is_paused"
+                      },
+                      "val": {
+                        "bool": false
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "max_dispute_duration"
+                      },
+                      "val": {
+                        "u32": 2592000
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "min_release_window"
+                      },
+                      "val": {
+                        "u32": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "min_stake_required"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "moderator"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
+                        "symbol": "pending_admin"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
+                        "symbol": "platform_fee_bps"
+                      },
+                      "val": {
+                        "u32": 500
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "platform_wallet"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "stake_cooldown"
+                      },
+                      "val": {
+                        "u32": 604800
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "wasm_upgrade_cooldown"
+                      },
+                      "val": {
+                        "u32": 604800
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
               "symbol": "PLAT_WAL"
             },
             "durability": "persistent"
@@ -255,6 +422,45 @@
             "ext": "v0"
           },
           518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "ArbitratorAssignmentRevision"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ArbitratorAssignmentRevision"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u64": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
         ]
       ],
       [
@@ -390,45 +596,6 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "OnboardingContractAddress"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "OnboardingContractAddress"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          518400
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
                   "symbol": "StorageLayoutVersion"
                 }
               ]
@@ -488,6 +655,42 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "AdminMutationFingerprint"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bytes": "cb2284d29e8eda4a2ca0b6eb9a0cc8fb3db0d69884335b34996aa822fdacc67a"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "AdminRevision"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 1
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "LastAppliedAdminRevision"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "PlatformConfig"
                             }
                           ]
@@ -499,7 +702,7 @@
                                 "symbol": "admin"
                               },
                               "val": {
-                                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
                               }
                             },
                             {
@@ -681,6 +884,39 @@
                 "key": {
                   "ledger_key_nonce": {
                     "nonce": 2032731177588607455
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": 4270020994084947596
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": 4270020994084947596
                   }
                 },
                 "durability": "temporary",
@@ -1046,9 +1282,7 @@
                 {
                   "u32": 500
                 },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
-                }
+                "void"
               ]
             }
           }
@@ -1109,6 +1343,22 @@
                         "string": "unset"
                       }
                     ]
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 }
               ]
@@ -1172,67 +1422,21 @@
                       }
                     ]
                   }
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "admin_config_updated"
-              },
-              {
-                "symbol": "onboarding_contract"
-              }
-            ],
-            "data": {
-              "map": [
+                },
                 {
                   "key": {
-                    "symbol": "field_name"
+                    "symbol": "revision"
                   },
                   "val": {
-                    "symbol": "onboarding_contract"
+                    "u32": 0
                   }
                 },
                 {
                   "key": {
-                    "symbol": "new_value"
+                    "symbol": "schema_version"
                   },
                   "val": {
-                    "vec": [
-                      {
-                        "symbol": "Address"
-                      },
-                      {
-                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "old_value"
-                  },
-                  "val": {
-                    "vec": [
-                      {
-                        "symbol": "String"
-                      },
-                      {
-                        "string": "unset"
-                      }
-                    ]
+                    "u32": 1
                   }
                 }
               ]
@@ -1359,6 +1563,22 @@
                       }
                     ]
                   }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
                 }
               ]
             }
@@ -1468,6 +1688,22 @@
                       }
                     ]
                   }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
                 }
               ]
             }
@@ -1563,7 +1799,7 @@
               }
             ],
             "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVAX5"
+              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
             }
           }
         }
@@ -1579,19 +1815,26 @@
           "v0": {
             "topics": [
               {
-                "symbol": "admin_recovery_initiated"
+                "symbol": "admin_changed"
               },
               {
-                "bool": true
+                "bytes": "61646d696e5f7265636f7665726564"
               }
             ],
             "data": {
-              "string": "7-day time lock initiated for admin recovery"
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
+                }
+              ]
             }
           }
         }
       },
-      "failed_call": true
+      "failed_call": false
     },
     {
       "event": {
@@ -1608,75 +1851,7 @@
                 "symbol": "recover_admin_access"
               }
             ],
-            "data": {
-              "error": {
-                "contract": 28
-              }
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 28
-                }
-              }
-            ],
-            "data": {
-              "string": "escalating Ok(ScErrorType::Contract) frame-exit to Err"
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 28
-                }
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "string": "contract try_call failed"
-                },
-                {
-                  "symbol": "recover_admin_access"
-                },
-                {
-                  "vec": [
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVAX5"
-                    }
-                  ]
-                }
-              ]
-            }
+            "data": "void"
           }
         }
       },
@@ -1697,39 +1872,14 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "recover_admin_access"
+                "symbol": "get_platform_config"
               }
             ],
-            "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVAX5"
-            }
+            "data": "void"
           }
         }
       },
       "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "admin_recovery_initiated"
-              },
-              {
-                "bool": true
-              }
-            ],
-            "data": {
-              "string": "7-day time lock initiated for admin recovery"
-            }
-          }
-        }
-      },
-      "failed_call": true
     },
     {
       "event": {
@@ -1743,75 +1893,129 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "recover_admin_access"
+                "symbol": "get_platform_config"
               }
             ],
             "data": {
-              "error": {
-                "contract": 28
-              }
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 28
-                }
-              }
-            ],
-            "data": {
-              "string": "escalating Ok(ScErrorType::Contract) frame-exit to Err"
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 28
-                }
-              }
-            ],
-            "data": {
-              "vec": [
+              "map": [
                 {
-                  "string": "contract try_call failed"
+                  "key": {
+                    "symbol": "admin"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
+                  }
                 },
                 {
-                  "symbol": "recover_admin_access"
+                  "key": {
+                    "symbol": "arbitrator"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
+                  }
                 },
                 {
-                  "vec": [
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVAX5"
+                  "key": {
+                    "symbol": "dispute_escalation_window"
+                  },
+                  "val": {
+                    "u32": 259200
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "evidence_challenge_window"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "expired_dispute_fee_policy"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "is_paused"
+                  },
+                  "val": {
+                    "bool": false
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "max_dispute_duration"
+                  },
+                  "val": {
+                    "u32": 2592000
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "min_release_window"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "min_stake_required"
+                  },
+                  "val": {
+                    "i128": {
+                      "hi": 0,
+                      "lo": 0
                     }
-                  ]
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "moderator"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
+                    "symbol": "pending_admin"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
+                    "symbol": "platform_fee_bps"
+                  },
+                  "val": {
+                    "u32": 500
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "platform_wallet"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "stake_cooldown"
+                  },
+                  "val": {
+                    "u32": 604800
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "wasm_upgrade_cooldown"
+                  },
+                  "val": {
+                    "u32": 604800
+                  }
                 }
               ]
             }

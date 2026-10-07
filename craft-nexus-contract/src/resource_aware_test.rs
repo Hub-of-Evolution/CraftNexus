@@ -17,6 +17,8 @@
 //!    hashes stays within the default Soroban ledger budget.
 
 use super::*;
+extern crate alloc;
+use alloc::format;
 use resource_model::{self, BatchResourceEstimate};
 use soroban_sdk::{
     testutils::Address as _,
@@ -52,7 +54,7 @@ fn setup_test() -> (
     let token_asset = token::StellarAssetClient::new(&env, &token_addr);
     token_asset.mint(&buyer, &1_000_000_000);
 
-    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &Some(onboarding));
+    client.initialize(&platform_wallet, &admin, &arbitrator, &500, &None);
     client.set_min_escrow_amount(&token_addr, &0);
     client.set_min_release_window(&1);
 
@@ -114,7 +116,8 @@ fn over_budget_continuation_is_rejected_before_mutation() {
     client.set_continuation_resource_budget(&2_000_000);
     assert_eq!(client.get_continuation_resource_budget(), 2_000_000);
 
-    let result = client.try_continue_batch_escrow(&job_id, &buyer, &5);
+    let cursor = client.get_batch_cursor(&job_id).unwrap();
+    let result = client.try_continue_batch_escrow(&cursor, &5);
     assert!(
         matches!(result, Err(Ok(Error::ResourceLimitExceeded))),
         "expected ResourceLimitExceeded, got {:?}",
@@ -141,7 +144,8 @@ fn over_budget_rejection_leaves_balances_untouched() {
     let job_id = client.schedule_batch_escrow(&buyer, &params);
 
     client.set_continuation_resource_budget(&1_000_000);
-    let result = client.try_continue_batch_escrow(&job_id, &buyer, &5);
+    let cursor = client.get_batch_cursor(&job_id).unwrap();
+    let result = client.try_continue_batch_escrow(&cursor, &5);
     assert!(matches!(result, Err(Ok(Error::ResourceLimitExceeded))));
 
     let balance_after = token_client.balance(&buyer);
@@ -166,11 +170,14 @@ fn resumed_execution_matches_one_shot_semantics() {
     let job_id = client_two.schedule_batch_escrow(&buyer_two, &scheduled_params);
 
     // Resume in 5,5,2 chunks (MAX_BATCH_WORK_LIMIT = 5).
-    let p1 = client_two.continue_batch_escrow(&job_id, &buyer_two, &5);
+    let cursor = client_two.get_batch_cursor(&job_id).unwrap();
+    let p1 = client_two.continue_batch_escrow(&cursor, &5);
     assert_eq!(p1.next_index, 5);
-    let p2 = client_two.continue_batch_escrow(&job_id, &buyer_two, &5);
+    let cursor = client_two.get_batch_cursor(&job_id).unwrap();
+    let p2 = client_two.continue_batch_escrow(&cursor, &5);
     assert_eq!(p2.next_index, 10);
-    let p3 = client_two.continue_batch_escrow(&job_id, &buyer_two, &2);
+    let cursor = client_two.get_batch_cursor(&job_id).unwrap();
+    let p3 = client_two.continue_batch_escrow(&cursor, &2);
     assert_eq!(p3.next_index, 12);
     assert_eq!(p3.status, BatchJobStatus::Completed);
 
@@ -207,7 +214,8 @@ fn worst_case_records_stay_within_default_budget() {
 
     // Reset to the *default* ledger budget so a breach aborts the test loudly.
     env.budget().reset_default();
-    let result = client.try_continue_batch_escrow(&job_id, &buyer, &pagination_validation::MAX_BATCH_WORK_LIMIT);
+    let cursor = client.get_batch_cursor(&job_id).unwrap();
+    let result = client.try_continue_batch_escrow(&cursor, &pagination_validation::MAX_BATCH_WORK_LIMIT);
     match result {
         Ok(Ok(progress)) => assert_eq!(progress.next_index, pagination_validation::MAX_BATCH_WORK_LIMIT),
         Ok(Err(e)) => panic!("worst-case continuation returned error: {:?}", e),

@@ -53,7 +53,7 @@ fn setup(
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
     client.set_min_escrow_amount(&token_contract.address(), &0);
     client.set_min_release_window(&1);

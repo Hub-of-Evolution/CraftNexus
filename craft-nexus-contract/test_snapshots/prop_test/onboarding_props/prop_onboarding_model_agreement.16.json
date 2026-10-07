@@ -36,7 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "frank"
+                  "string": "user_0"
                 },
                 {
                   "u32": 2
@@ -59,7 +59,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "frank"
+                  "string": "user_0"
                 },
                 {
                   "u32": 2
@@ -84,7 +84,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "string": "alice"
+                  "string": "user_1"
                 },
                 {
                   "u32": 1
@@ -107,7 +107,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "string": "alice"
+                  "string": "user_1"
                 },
                 {
                   "u32": 1
@@ -119,6 +119,7 @@
         }
       ]
     ],
+    [],
     [],
     [
       [
@@ -133,7 +134,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
-                  "string": "bob"
+                  "string": "user_2"
                 },
                 {
                   "u32": 2
@@ -156,7 +157,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
-                  "string": "bob"
+                  "string": "user_2"
                 },
                 {
                   "u32": 2
@@ -200,7 +201,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
                 },
                 {
-                  "string": "carol"
+                  "string": "user_3"
                 },
                 {
                   "u32": 1
@@ -223,7 +224,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
                 },
                 {
-                  "string": "carol"
+                  "string": "user_3"
                 },
                 {
                   "u32": 1
@@ -237,6 +238,54 @@
     ],
     [],
     [],
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+              "function_name": "onboard_user",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                },
+                {
+                  "string": "user_4"
+                },
+                {
+                  "u32": 2
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ],
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+              "function_name": "onboard_user",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                },
+                {
+                  "string": "user_4"
+                },
+                {
+                  "u32": 2
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
@@ -267,6 +316,39 @@
     "min_temp_entry_ttl": 16,
     "max_entry_ttl": 6312000,
     "ledger_entries": [
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": 115220454072064130
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": 115220454072064130
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
+        ]
+      ],
       [
         {
           "contract_data": {
@@ -339,39 +421,6 @@
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
             "key": {
               "ledger_key_nonce": {
-                "nonce": 1194852393571756375
-              }
-            },
-            "durability": "temporary"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "ledger_key_nonce": {
-                    "nonce": 1194852393571756375
-                  }
-                },
-                "durability": "temporary",
-                "val": "void"
-              }
-            },
-            "ext": "v0"
-          },
-          6311999
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "ledger_key_nonce": {
                 "nonce": 2032731177588607455
               }
             },
@@ -405,7 +454,7 @@
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
             "key": {
               "ledger_key_nonce": {
-                "nonce": 2307661404550649928
+                "nonce": 2140788761963629343
               }
             },
             "durability": "temporary"
@@ -420,7 +469,40 @@
                 "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
                 "key": {
                   "ledger_key_nonce": {
-                    "nonce": 2307661404550649928
+                    "nonce": 2140788761963629343
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": 2578412842719982537
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": 2578412842719982537
                   }
                 },
                 "durability": "temporary",
@@ -471,7 +553,7 @@
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
             "key": {
               "ledger_key_nonce": {
-                "nonce": 5806905060045992000
+                "nonce": 6517132746326325848
               }
             },
             "durability": "temporary"
@@ -486,7 +568,7 @@
                 "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
                 "key": {
                   "ledger_key_nonce": {
-                    "nonce": 5806905060045992000
+                    "nonce": 6517132746326325848
                   }
                 },
                 "durability": "temporary",
@@ -528,7 +610,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u32": 4
+                  "u32": 5
                 }
               }
             },
@@ -672,7 +754,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u32": 4
+                  "u32": 5
                 }
               }
             },
@@ -717,7 +799,7 @@
                         "symbol": "count"
                       },
                       "val": {
-                        "u32": 4
+                        "u32": 5
                       }
                     },
                     {
@@ -752,7 +834,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "MaxOnboardingAttemptsPerWindow"
+                  "symbol": "MaxOnboardAttempts"
                 }
               ]
             },
@@ -769,7 +851,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "MaxOnboardingAttemptsPerWindow"
+                      "symbol": "MaxOnboardAttempts"
                     }
                   ]
                 },
@@ -1149,6 +1231,76 @@
             "key": {
               "vec": [
                 {
+                  "symbol": "RateLimitTracker"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "RateLimitTracker"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "count"
+                      },
+                      "val": {
+                        "u32": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "last_attempt"
+                      },
+                      "val": {
+                        "u64": 1711368000
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "window_start"
+                      },
+                      "val": {
+                        "u64": 1711368000
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "vec": [
+                {
                   "symbol": "ReputationPolicy"
                 }
               ]
@@ -1438,7 +1590,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "symbol": "frank"
+                        "symbol": "user_0"
                       }
                     },
                     {
@@ -1556,7 +1708,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "symbol": "alice"
+                        "symbol": "user_1"
                       }
                     },
                     {
@@ -1674,7 +1826,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "symbol": "bob"
+                        "symbol": "user_2"
                       }
                     },
                     {
@@ -1792,7 +1944,7 @@
                         "symbol": "username"
                       },
                       "val": {
-                        "symbol": "carol"
+                        "symbol": "user_3"
                       }
                     },
                     {
@@ -1819,7 +1971,170 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "UserStateVersion"
+                  "symbol": "UserProfile"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "UserProfile"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "address"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "disputed_trades"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "is_verified"
+                      },
+                      "val": {
+                        "bool": false
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "registered_at"
+                      },
+                      "val": {
+                        "u64": 1711368000
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "role"
+                      },
+                      "val": {
+                        "u32": 2
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "status"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "successful_trades"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "username"
+                      },
+                      "val": {
+                        "symbol": "user_4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "version"
+                      },
+                      "val": {
+                        "u32": 5
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "UserStateRevision"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "UserStateRevision"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "UserStateRevision"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1839,7 +2154,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "UserStateVersion"
+                      "symbol": "UserStateRevision"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1848,7 +2163,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u32": 3
+                  "u32": 5
                 }
               }
             },
@@ -1864,7 +2179,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "UserStateVersion"
+                  "symbol": "UserStateRevision"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
@@ -1884,7 +2199,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "UserStateVersion"
+                      "symbol": "UserStateRevision"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
@@ -1909,7 +2224,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "UserStateVersion"
+                  "symbol": "UserStateRevision"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
@@ -1929,7 +2244,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "UserStateVersion"
+                      "symbol": "UserStateRevision"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
@@ -1954,7 +2269,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "UserStateVersion"
+                  "symbol": "UserStateRevision"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
@@ -1974,10 +2289,55 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "UserStateVersion"
+                      "symbol": "UserStateRevision"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "UserStateRevision"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "UserStateRevision"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
                     }
                   ]
                 },
@@ -2047,7 +2407,7 @@
                   "symbol": "Username"
                 },
                 {
-                  "string": "alice"
+                  "string": "user_0"
                 }
               ]
             },
@@ -2067,7 +2427,52 @@
                       "symbol": "Username"
                     },
                     {
-                      "string": "alice"
+                      "string": "user_0"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "Username"
+                },
+                {
+                  "string": "user_1"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "Username"
+                    },
+                    {
+                      "string": "user_1"
                     }
                   ]
                 },
@@ -2092,7 +2497,7 @@
                   "symbol": "Username"
                 },
                 {
-                  "string": "bob"
+                  "string": "user_2"
                 }
               ]
             },
@@ -2112,7 +2517,7 @@
                       "symbol": "Username"
                     },
                     {
-                      "string": "bob"
+                      "string": "user_2"
                     }
                   ]
                 },
@@ -2137,7 +2542,7 @@
                   "symbol": "Username"
                 },
                 {
-                  "string": "carol"
+                  "string": "user_3"
                 }
               ]
             },
@@ -2157,7 +2562,7 @@
                       "symbol": "Username"
                     },
                     {
-                      "string": "carol"
+                      "string": "user_3"
                     }
                   ]
                 },
@@ -2182,7 +2587,7 @@
                   "symbol": "Username"
                 },
                 {
-                  "string": "frank"
+                  "string": "user_4"
                 }
               ]
             },
@@ -2202,13 +2607,13 @@
                       "symbol": "Username"
                     },
                     {
-                      "string": "frank"
+                      "string": "user_4"
                     }
                   ]
                 },
                 "durability": "persistent",
                 "val": {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
                 }
               }
             },
@@ -2360,7 +2765,7 @@
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM",
             "key": {
               "ledger_key_nonce": {
-                "nonce": 6277191135259896685
+                "nonce": 1194852393571756375
               }
             },
             "durability": "temporary"
@@ -2375,7 +2780,7 @@
                 "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM",
                 "key": {
                   "ledger_key_nonce": {
-                    "nonce": 6277191135259896685
+                    "nonce": 1194852393571756375
                   }
                 },
                 "durability": "temporary",
@@ -2393,7 +2798,7 @@
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
             "key": {
               "ledger_key_nonce": {
-                "nonce": 115220454072064130
+                "nonce": 1301173170172112462
               }
             },
             "durability": "temporary"
@@ -2408,7 +2813,40 @@
                 "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
                 "key": {
                   "ledger_key_nonce": {
-                    "nonce": 115220454072064130
+                    "nonce": 1301173170172112462
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": 4571470874178140630
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": 4571470874178140630
                   }
                 },
                 "durability": "temporary",
@@ -2583,7 +3021,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "string": "frank"
+                  "string": "user_0"
                 },
                 {
                   "u32": 2
@@ -2619,6 +3057,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "user"
                   },
                   "val": {
@@ -2630,7 +3076,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "frank"
+                    "string": "user_0"
                   }
                 }
               ]
@@ -2732,7 +3178,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "symbol": "frank"
+                    "symbol": "user_0"
                   }
                 },
                 {
@@ -2774,7 +3220,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "string": "alice"
+                  "string": "user_1"
                 },
                 {
                   "u32": 1
@@ -2810,6 +3256,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "user"
                   },
                   "val": {
@@ -2821,7 +3275,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "alice"
+                    "string": "user_1"
                   }
                 }
               ]
@@ -2923,7 +3377,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "symbol": "alice"
+                    "symbol": "user_1"
                   }
                 },
                 {
@@ -2933,6 +3387,222 @@
                   "val": {
                     "u32": 5
                   }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_call"
+              },
+              {
+                "bytes": "0000000000000000000000000000000000000000000000000000000000000002"
+              },
+              {
+                "symbol": "onboard_user"
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "string": "dup_name_0"
+                },
+                {
+                  "u32": 1
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000002",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "OnboardCallFailed"
+              }
+            ],
+            "data": {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "reason"
+                  },
+                  "val": {
+                    "u32": 7
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "timestamp"
+                  },
+                  "val": {
+                    "u64": 1711368000
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "user"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000002",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 7
+                }
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "string": "failing with contract error"
+                },
+                {
+                  "u32": 7
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000002",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 7
+                }
+              }
+            ],
+            "data": {
+              "string": "escalating error to panic"
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000002",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 7
+                }
+              }
+            ],
+            "data": {
+              "string": "caught error from function"
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 7
+                }
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "string": "contract try_call failed"
+                },
+                {
+                  "symbol": "onboard_user"
+                },
+                {
+                  "vec": [
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                    },
+                    {
+                      "string": "dup_name_0"
+                    },
+                    {
+                      "u32": 1
+                    }
+                  ]
                 }
               ]
             }
@@ -2997,6 +3667,14 @@
                   },
                   "val": {
                     "u32": 7
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 },
                 {
@@ -3173,7 +3851,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
-                  "string": "bob"
+                  "string": "user_2"
                 },
                 {
                   "u32": 2
@@ -3209,6 +3887,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "user"
                   },
                   "val": {
@@ -3220,7 +3906,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "bob"
+                    "string": "user_2"
                   }
                 }
               ]
@@ -3322,7 +4008,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "symbol": "bob"
+                    "symbol": "user_2"
                   }
                 },
                 {
@@ -3478,7 +4164,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "symbol": "frank"
+                    "symbol": "user_0"
                   }
                 },
                 {
@@ -3520,7 +4206,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
                 },
                 {
-                  "string": "carol"
+                  "string": "user_3"
                 },
                 {
                   "u32": 1
@@ -3556,6 +4242,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "user"
                   },
                   "val": {
@@ -3567,7 +4261,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "string": "carol"
+                    "string": "user_3"
                   }
                 }
               ]
@@ -3669,7 +4363,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "symbol": "carol"
+                    "symbol": "user_3"
                   }
                 },
                 {
@@ -3679,6 +4373,222 @@
                   "val": {
                     "u32": 5
                   }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_call"
+              },
+              {
+                "bytes": "0000000000000000000000000000000000000000000000000000000000000002"
+              },
+              {
+                "symbol": "onboard_user"
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "string": "dup_name_0"
+                },
+                {
+                  "u32": 1
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000002",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "OnboardCallFailed"
+              }
+            ],
+            "data": {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "reason"
+                  },
+                  "val": {
+                    "u32": 7
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "timestamp"
+                  },
+                  "val": {
+                    "u64": 1711368000
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "user"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000002",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 7
+                }
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "string": "failing with contract error"
+                },
+                {
+                  "u32": 7
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000002",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 7
+                }
+              }
+            ],
+            "data": {
+              "string": "escalating error to panic"
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000002",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 7
+                }
+              }
+            ],
+            "data": {
+              "string": "caught error from function"
+            }
+          }
+        }
+      },
+      "failed_call": true
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "error"
+              },
+              {
+                "error": {
+                  "contract": 7
+                }
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "string": "contract try_call failed"
+                },
+                {
+                  "symbol": "onboard_user"
+                },
+                {
+                  "vec": [
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                    },
+                    {
+                      "string": "dup_name_0"
+                    },
+                    {
+                      "u32": 1
+                    }
+                  ]
                 }
               ]
             }
@@ -3743,6 +4653,14 @@
                   },
                   "val": {
                     "u32": 7
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 },
                 {
@@ -3919,7 +4837,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
                 },
                 {
-                  "string": "bob"
+                  "string": "user_4"
                 },
                 {
                   "u32": 2
@@ -3940,25 +4858,25 @@
           "v0": {
             "topics": [
               {
-                "symbol": "OnboardCallFailed"
+                "symbol": "UserOnboarded"
               }
             ],
             "data": {
               "map": [
                 {
                   "key": {
-                    "symbol": "reason"
+                    "symbol": "role"
                   },
                   "val": {
-                    "u32": 3
+                    "u32": 2
                   }
                 },
                 {
                   "key": {
-                    "symbol": "timestamp"
+                    "symbol": "schema_version"
                   },
                   "val": {
-                    "u64": 1711368000
+                    "u32": 1
                   }
                 },
                 {
@@ -3968,13 +4886,21 @@
                   "val": {
                     "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
                   }
+                },
+                {
+                  "key": {
+                    "symbol": "username"
+                  },
+                  "val": {
+                    "string": "user_4"
+                  }
                 }
               ]
             }
           }
         }
       },
-      "failed_call": true
+      "failed_call": false
     },
     {
       "event": {
@@ -3985,116 +4911,99 @@
           "v0": {
             "topics": [
               {
-                "symbol": "error"
+                "symbol": "fn_return"
               },
               {
-                "error": {
-                  "contract": 3
-                }
+                "symbol": "onboard_user"
               }
             ],
             "data": {
-              "vec": [
+              "map": [
                 {
-                  "string": "failing with contract error"
+                  "key": {
+                    "symbol": "address"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
+                  }
                 },
                 {
-                  "u32": 3
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000002",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 3
-                }
-              }
-            ],
-            "data": {
-              "string": "escalating error to panic"
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000002",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 3
-                }
-              }
-            ],
-            "data": {
-              "string": "caught error from function"
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 3
-                }
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "string": "contract try_call failed"
+                  "key": {
+                    "symbol": "disputed_trades"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
                 },
                 {
-                  "symbol": "onboard_user"
+                  "key": {
+                    "symbol": "is_verified"
+                  },
+                  "val": {
+                    "bool": false
+                  }
                 },
                 {
-                  "vec": [
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
-                    },
-                    {
-                      "string": "bob"
-                    },
-                    {
-                      "u32": 2
-                    }
-                  ]
+                  "key": {
+                    "symbol": "portfolio_cid"
+                  },
+                  "val": "void"
+                },
+                {
+                  "key": {
+                    "symbol": "registered_at"
+                  },
+                  "val": {
+                    "u64": 1711368000
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "role"
+                  },
+                  "val": {
+                    "u32": 2
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "state_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "status"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "successful_trades"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "username"
+                  },
+                  "val": {
+                    "symbol": "user_4"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "version"
+                  },
+                  "val": {
+                    "u32": 5
+                  }
                 }
               ]
             }
@@ -4217,7 +5126,7 @@
                     "symbol": "state_version"
                   },
                   "val": {
-                    "u32": 2
+                    "u32": 3
                   }
                 },
                 {
@@ -4241,7 +5150,7 @@
                     "symbol": "username"
                   },
                   "val": {
-                    "symbol": "frank"
+                    "symbol": "user_0"
                   }
                 },
                 {

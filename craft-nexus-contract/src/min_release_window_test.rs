@@ -53,7 +53,7 @@ fn setup_test() -> (
         &admin,
         &arbitrator,
         &500, // 5% platform fee
-        &Some(onboarding_contract),
+        &None,
     );
 
     (

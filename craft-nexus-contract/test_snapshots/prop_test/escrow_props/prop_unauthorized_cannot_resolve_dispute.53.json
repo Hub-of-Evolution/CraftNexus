@@ -789,6 +789,45 @@
             "key": {
               "vec": [
                 {
+                  "symbol": "ArbitratorAssignmentRevision"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ArbitratorAssignmentRevision"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u64": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
+            "key": {
+              "vec": [
+                {
                   "symbol": "BuyerEscrowCount"
                 },
                 {
@@ -915,6 +954,84 @@
             "ext": "v0"
           },
           518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "DisputeAssignment"
+                },
+                {
+                  "u32": 42
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "DisputeAssignment"
+                    },
+                    {
+                      "u32": 42
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "arbitrator"
+                      },
+                      "val": {
+                        "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "assigned_at"
+                      },
+                      "val": {
+                        "u64": 1711368000
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "order_id"
+                      },
+                      "val": {
+                        "u32": 42
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "revision"
+                      },
+                      "val": {
+                        "u64": 1
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          4095
         ]
       ],
       [
@@ -1123,6 +1240,84 @@
                 "durability": "persistent",
                 "val": {
                   "u32": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "EvidenceChallenge"
+                },
+                {
+                  "u32": 42
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "EvidenceChallenge"
+                    },
+                    {
+                      "u32": 42
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "map": [
+                    {
+                      "key": {
+                        "symbol": "deadline"
+                      },
+                      "val": {
+                        "u64": 1711368000
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "evidence_count"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "order_id"
+                      },
+                      "val": {
+                        "u32": 42
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "state"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    }
+                  ]
                 }
               }
             },
@@ -1663,6 +1858,18 @@
                       "wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                     },
                     "storage": [
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "AdminRevision"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 0
+                        }
+                      },
                       {
                         "key": {
                           "vec": [
@@ -2374,6 +2581,22 @@
                       }
                     ]
                   }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
                 }
               ]
             }
@@ -2435,6 +2658,22 @@
                         "string": "unset"
                       }
                     ]
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 }
               ]
@@ -2561,6 +2800,22 @@
                       }
                     ]
                   }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
                 }
               ]
             }
@@ -2669,6 +2924,22 @@
                         "u32": 86400
                       }
                     ]
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "revision"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 }
               ]

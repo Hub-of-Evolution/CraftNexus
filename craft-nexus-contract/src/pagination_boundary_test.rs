@@ -47,7 +47,7 @@ fn setup_pagination_test(
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     let token_admin = Address::generate(env);

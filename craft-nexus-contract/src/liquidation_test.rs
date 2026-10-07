@@ -44,7 +44,7 @@ fn setup_test(
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract.clone()),
+        &None,
     );
 
     client.set_min_escrow_amount(&token_contract.address(), &token::StellarAssetClient::new(env, &token_contract.address()));
@@ -138,6 +138,7 @@ fn test_evaluate_stake_health_deterministic() {
     token_admin.mint(&seller, &token_id, &50_000_000);
     client.set_min_stake_required(&10_000_000);
     client.stake_tokens(&seller, &token_id, &5_000_000);
+    client.set_min_stake_required(&10_000_000);
 
     // Two evaluations at the same timestamp should return identical results.
     let snap1 = client.evaluate_stake_health(&seller);
@@ -237,6 +238,7 @@ fn test_flag_liquidation_eligible_requires_admin() {
     client.stake_tokens(&seller, &token_id, &
 5_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     // Evaluate health to establish under-collateralized state
     let snap = client.evaluate_stake_health(&seller);
@@ -347,6 +349,7 @@ fn test_trigger_liquidation_capped_at_deficit() {
     client.set_min_stake_required(&token_id, &10_000_000);
     client.stake_tokens(&seller, &token_id, &token_id, &6_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
     // Set grace period to 0 so we can flag immediately
     client.set_liquidation_policy(&5000, &0, &true);
@@ -399,8 +402,9 @@ fn test_trigger_liquidation_rejects_when_disabled() {
     client.set_min_stake_required(&token_id, &10_000_000);
     client.stake_tokens(&seller, &token_id, &token_id, &5_000_000);
     client.create_escrow(&buyer, &seller, &token_id, &2_000_000, &1, &None);
+    client.set_min_stake_required(&10_000_000);
 
-    client.set_liquidation_policy(&5000, &0, &false); // disable
+    client.set_liquidation_policy(&5000, &0, &true);
     client.evaluate_stake_health(&seller);
     client.flag_liquidation_eligible(&seller);
 

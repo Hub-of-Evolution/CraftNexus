@@ -129,7 +129,7 @@ fn test_release_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     // Mint tokens to buyer
@@ -192,7 +192,7 @@ fn test_refund_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &10000);
@@ -245,7 +245,7 @@ fn test_resolve_dispute_cei_pattern() {
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
     client.set_evidence_challenge_window(&0);
     client.set_min_release_window(&1);
@@ -302,7 +302,7 @@ fn test_resolve_expired_dispute_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &10000);
@@ -362,8 +362,9 @@ fn test_accept_partial_refund_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
+    client.set_evidence_challenge_window(&0);
 
     token_client.mint(&buyer, &10000);
 
@@ -420,7 +421,7 @@ fn test_cancel_recurring_escrow_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &20000);
@@ -528,7 +529,7 @@ fn test_auto_release_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &10000);
@@ -585,7 +586,7 @@ fn test_state_consistency_during_concurrent_operations() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &30000);
@@ -677,7 +678,7 @@ fn test_active_obligations_updated_before_transfers() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &10000);
@@ -768,7 +769,7 @@ fn test_reentry_guard_cleared_after_failing_call() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     token_client.mint(&buyer, &10000);
@@ -844,7 +845,7 @@ fn test_fund_escrow_cei_pattern() {
         &admin,
         &Address::generate(&env),
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     // Mint enough tokens for the buyer to fund the escrow

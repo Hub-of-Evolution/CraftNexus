@@ -137,7 +137,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "u32": 2
+                  "u32": 3
                 },
                 {
                   "bool": true
@@ -438,7 +438,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "MaxOnboardingAttemptsPerWindow"
+                  "symbol": "MaxOnboardAttempts"
                 }
               ]
             },
@@ -455,7 +455,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "MaxOnboardingAttemptsPerWindow"
+                      "symbol": "MaxOnboardAttempts"
                     }
                   ]
                 },
@@ -858,7 +858,7 @@
                         "symbol": "profile_revision"
                       },
                       "val": {
-                        "u32": 2
+                        "u32": 3
                       }
                     },
                     {
@@ -1174,7 +1174,52 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "UserStateVersion"
+                  "symbol": "UserStateRevision"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "UserStateRevision"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "UserStateRevision"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1194,7 +1239,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "UserStateVersion"
+                      "symbol": "UserStateRevision"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -1203,7 +1248,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u32": 4
+                  "u32": 7
                 }
               }
             },
@@ -1803,6 +1848,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "user"
                   },
                   "val": {
@@ -2048,6 +2101,14 @@
                 },
                 {
                   "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "timestamp"
                   },
                   "val": {
@@ -2089,6 +2150,14 @@
                   },
                   "val": {
                     "symbol": "FlaggedByAdmin"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 },
                 {
@@ -2221,7 +2290,7 @@
                     "symbol": "profile_revision"
                   },
                   "val": {
-                    "u32": 2
+                    "u32": 3
                   }
                 },
                 {
@@ -2341,7 +2410,7 @@
                     "symbol": "state_version"
                   },
                   "val": {
-                    "u32": 2
+                    "u32": 3
                   }
                 },
                 {
@@ -2567,7 +2636,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "u32": 2
+                  "u32": 3
                 },
                 {
                   "bool": true
@@ -2606,7 +2675,7 @@
                     "symbol": "profile_revision"
                   },
                   "val": {
-                    "u32": 2
+                    "u32": 3
                   }
                 },
                 {
@@ -2615,6 +2684,14 @@
                   },
                   "val": {
                     "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 },
                 {
@@ -2660,6 +2737,14 @@
                   },
                   "val": {
                     "symbol": "approved"
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "schema_version"
+                  },
+                  "val": {
+                    "u32": 1
                   }
                 },
                 {
@@ -2800,7 +2885,7 @@
                     "symbol": "state_version"
                   },
                   "val": {
-                    "u32": 3
+                    "u32": 5
                   }
                 },
                 {
@@ -2930,7 +3015,7 @@
                     "symbol": "profile_revision"
                   },
                   "val": {
-                    "u32": 2
+                    "u32": 3
                   }
                 },
                 {
@@ -3087,7 +3172,7 @@
                     "symbol": "state_version"
                   },
                   "val": {
-                    "u32": 3
+                    "u32": 5
                   }
                 },
                 {

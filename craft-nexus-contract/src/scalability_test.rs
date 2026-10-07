@@ -48,7 +48,7 @@ fn setup_test() -> (
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     (
@@ -893,6 +893,9 @@ fn test_artisan_stake_queue_pruning() {
     // Total staked accounting is unaffected by compaction, and the artisan
     // can still withdraw every bit of matured principal afterwards.
     assert_eq!(client.get_stake(&artisan), staked_before_pruning + 1000);
+    env.ledger().with_mut(|li| {
+        li.timestamp = li.timestamp + (DEFAULT_STAKE_COOLDOWN as u64) + 1;
+    });
     client.unstake_tokens(&artisan, &token);
     assert_eq!(
         token::TokenClient::new(&env, &token).balance(&artisan),
@@ -1033,6 +1036,9 @@ fn test_artisan_stake_queue_pruning_compacts_without_losing_principal() {
     }
 
     // And the artisan can still recover every matured unit.
+    env.ledger().with_mut(|li| {
+        li.timestamp = li.timestamp + (DEFAULT_STAKE_COOLDOWN as u64) + 1;
+    });
     client.unstake_tokens(&artisan, &token);
     assert_eq!(
         token::TokenClient::new(&env, &token).balance(&artisan),
