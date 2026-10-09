@@ -60,6 +60,8 @@ fn setup_enhanced_test(
         &String::from_str(env, "artisan"),
         &UserRole::Artisan,
     );
+    onboarding_client.verify_user(&buyer);
+    onboarding_client.verify_user(&artisan);
 
     (
         escrow_client,
@@ -112,7 +114,7 @@ fn test_recurring_escrow_lifecycle() {
     assert_eq!(token_client.balance(&platform_wallet), 50);
 
     let final_escrow = escrow.get_recurring_escrow(&rec_escrow.id);
-    assert!(final_escrow.is_active);
+    assert!(!final_escrow.is_active);
     assert!(!escrow.has_active_escrows(&buyer));
     assert!(!escrow.has_active_escrows(&artisan));
 }
@@ -312,3 +314,70 @@ fn test_reactivate_profile_after_username_claimed_by_another() {
 
 // ===== Issue: Token Identity Checks =====
 
+#[test]
+fn test_escrow_release_uses_its_recorded_token() {
+    let env = Env::default();
+    let (escrow, _, buyer, artisan, token_id, token_admin, _, _) = setup_enhanced_test(&env);
+    token_admin.mint(&buyer, &1000);
+
+    let other_token_admin = Address::generate(&env);
+    let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
+    let escrow_token = token::Client::new(&env, &token_id);
+    let other_token_client = token::Client::new(&env, &other_token.address());
+
+    let escrow_record = escrow.create_escrow(&buyer, &artisan, &token_id, &500, &1, &None);
+    escrow.release_funds(&1);
+
+    assert_eq!(escrow_token.balance(&artisan), 475);
+    assert_eq!(other_token_client.balance(&artisan), 0);
+}
+
+#[test]
+fn test_escrow_refund_uses_its_recorded_token() {
+    let env = Env::default();
+    let (escrow, _, buyer, artisan, token_id, token_admin, _, _admin) =
+        setup_enhanced_test(&env);
+    token_admin.mint(&buyer, &1000);
+
+    let other_token_admin = Address::generate(&env);
+    let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
+    let escrow_token = token::Client::new(&env, &token_id);
+    let other_token_client = token::Client::new(&env, &other_token.address());
+
+    let escrow_record = escrow.create_escrow(&buyer, &artisan, &token_id, &500, &1, &None);
+    escrow.refund(&(escrow_record.id as u64));
+
+    assert_eq!(escrow_token.balance(&buyer), 1000);
+    assert_eq!(other_token_client.balance(&buyer), 0);
+}
+
+#[test]
+fn test_platform_fees_remain_scoped_to_the_escrow_token() {
+    let env = Env::default();
+    let (escrow, _, buyer, artisan, token_id, token_admin, _, _) = setup_enhanced_test(&env);
+    token_admin.mint(&buyer, &1000);
+
+    let other_token_admin = Address::generate(&env);
+    let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
+    let other_token_id = other_token.address();
+
+    escrow.create_escrow(&buyer, &artisan, &token_id, &500, &1, &None);
+    escrow.release_funds(&1);
+
+    assert_eq!(escrow.get_total_fees_for_token(&token_id), 25);
+    assert_eq!(escrow.get_total_fees_for_token(&other_token_id), 0);
+}
+
+#[test]
+#[should_panic]
+fn test_stake_withdrawal_rejects_a_different_token() {
+    let env = Env::default();
+    let (escrow, _, _, artisan, token_id, token_admin, _, _) = setup_enhanced_test(&env);
+    token_admin.mint(&artisan, &1000);
+
+    let other_token_admin = Address::generate(&env);
+    let other_token = env.register_stellar_asset_contract_v2(other_token_admin.clone());
+
+    escrow.stake_tokens(&artisan, &token_id, &500);
+    escrow.unstake_tokens(&artisan, &other_token.address());
+}

@@ -155,7 +155,20 @@ impl PropHarness {
             let case_seed = rng.next_u64();
             let mut case_rng = Lcg64::new(case_seed);
             if let Err(msg) = f(&mut case_rng) {
-                panic!("FAILED: {}", msg);
+                panic!(
+                    "\n[prop] FAILED after {} case(s)\n\
+                     root seed : 0x{:016X}\n\
+                     case seed : 0x{:016X}  (case index {})\n\
+                     Failure   : {}\n\
+                     \n\
+                     Reproduce with: PROP_SEED=0x{:016X} cargo test --features testutils prop_",
+                    i + 1,
+                    self.seed,
+                    case_seed,
+                    i,
+                    msg,
+                    case_seed
+                );
             }
         }
     }
@@ -179,7 +192,22 @@ impl PropHarness {
                     .enumerate()
                     .map(|(j, op)| alloc::format!("  {}: {:?}\n", j, op))
                     .collect();
-                panic!("FAILED: {}", msg);
+                panic!(
+                    "\n[prop] FAILED after {} case(s)\n\
+                     root seed  : 0x{:016X}\n\
+                     case seed  : 0x{:016X}  (index {})\n\
+                     Original   : {} steps → Minimized: {} steps\n\
+                     {}\n\
+                     Failure    : {}\n",
+                    i + 1,
+                    self.seed,
+                    case_seed,
+                    i,
+                    ops.len(),
+                    minimized.len(),
+                    steps,
+                    msg
+                );
             }
         }
     }
@@ -253,14 +281,40 @@ impl PropHarness {
                             )
                         })
                         .collect();
-                    panic!("FAILED: violation msg: {}, violation step: {}, state transition: {:?}", report.violation_msg, report.violation_step, report.state_transition);
+                    panic!(
+                        "\n[prop] INVARIANT VIOLATION after {} case(s)\n\
+                         root seed     : 0x{:016X}\n\
+                         case seed     : 0x{:016X}  (index {})\n\
+                         Original      : {} steps → Minimized: {} steps\n\
+                         First violation at step {}: {}\n\
+                         State transition: {:?}\n\
+                         Shrunk sequence:\n\
+                         {}\
+                         \n\
+                         Reproduce with: PROP_SEED=0x{:016X} cargo test --features testutils prop_",
+                        i + 1,
+                        self.seed,
+                        case_seed,
+                        i,
+                        ops.len(),
+                        minimized.len(),
+                        report.violation_step,
+                        report.violation_msg,
+                        report.state_transition,
+                        steps,
+                        case_seed
+                    );
                 }
                 Ok(_) => {}
             }
         }
     }
-
-    pub fn run_contract_sequence<Op, Gen, Exec, Check>(&self,mut generate: Gen, mut execute: Exec, mut check_invariants: Check)
+    pub fn run_contract_sequence<Op, Gen, Exec, Check>(
+        &self,
+        mut generate: Gen,
+        mut execute: Exec,
+        mut check_invariants: Check,
+    )
     where
         Op: Clone + core::fmt::Debug,
         Gen: FnMut(&mut Lcg64) -> (Op, bool),
@@ -311,13 +365,30 @@ impl PropHarness {
                 let steps: String = ops
                     .iter()
                     .enumerate()
-                    .map(|(j, (op, flag))| alloc::format!(
-                        "  {}: ({:?}, expected={})\n",
-                        j, op,
-                        if *flag { "succeed" } else { "revert" }
-                    ))
+                    .map(|(j, (op, flag))| {
+                        alloc::format!(
+                            "  {}: ({:?}, expected={})\n",
+                            j,
+                            op,
+                            if *flag { "succeed" } else { "revert" }
+                        )
+                    })
                     .collect();
-                panic!("FAILED: {}", msg);
+                panic!(
+                    "\n[prop] FAILED after {} case(s)\n\
+                     root seed  : 0x{:016X}\n\
+                     case seed  : 0x{:016X}  (index {})\n\
+                     Sequence   : {} steps\n\
+                     {}\n\
+                     Failure    : {}\n",
+                    i + 1,
+                    self.seed,
+                    case_seed,
+                    i,
+                    ops.len(),
+                    steps,
+                    msg
+                );
             }
         }
     }
@@ -330,9 +401,9 @@ macro_rules! prop_assert {
             return Err(alloc::format!("prop_assert: {}", $msg));
         }
     };
-    ($cond: expr, $fmt:literal, $($arg:tt)*) => {
+    ($cond:expr, $fmt:literal, $($arg:expr),*) => {
         if !($cond) {
-            return Err(alloc::format!(concat!("prop_assert: ", $fmt), $($arg)*));
+            return Err(alloc::format!(concat!("prop_assert: ", $fmt), $($arg),*));
         }
     };
 }

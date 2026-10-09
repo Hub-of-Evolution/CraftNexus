@@ -1,26 +1,12 @@
-#![no_std]
-use soroban_sdk::{
-    contract, contractimpl, contracttype,
-
-    vec, Address, Env, Vec,
-};
-
-// ============================================================================
-// 0. ERROR TYPES
-// ============================================================================
-
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Error {
-    StakeNotFound = 1,
-}
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Vec};
+#[cfg(test)]
+use soroban_sdk::testutils::{Address as _, Ledger};
 
 // ============================================================================
 // 1. DATA STRUCTURES & KEYS
 // ============================================================================
 
 const COOLDOWN_PERIOD: u64 = 86400 * 7; // 7 days in seconds
-const MIN_STAKE_REQUIRED: i128 = 100;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,15 +16,8 @@ pub struct StakeEntry {
 }
 
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Error {
-    StakeHealthSnapshotNotFound = 1,
-}
-
-#[contracttype]
 pub enum DataKey {
     UserStakes(Address),
-    MinStakeRequired,
 }
 
 // ============================================================================
@@ -50,29 +29,6 @@ pub struct StakeContract;
 
 #[contractimpl]
 impl StakeContract {
-    /// Sets the minimum stake required. Only the admin can call this.
-    pub fn set_min_stake_required(env: Env, admin: Address, amount: i128) {
-        admin.require_auth();
-
-        if amount < 0 {
-            panic_with_error!(&env, Error::InvalidAmount);
-        }
-
-        let current: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MinStakeRequired)
-            .unwrap_or(MIN_STAKE_REQUIRED);
-
-        let new_amount = current
-            .checked_add(amount)
-            .unwrap_or_else(|| panic_with_error!(&env, Error::Overflow));
-
-        env.storage()
-            .instance()
-            .set(&DataKey::MinStakeRequired, &new_amount);
-    }
-
     /// Adds a new stake, appending it as an independent entry with its own maturity.
     pub fn stake(env: Env, user: Address, amount: i128) {
         user.require_auth();
@@ -136,14 +92,6 @@ impl StakeContract {
             .get(&DataKey::UserStakes(user))
             .unwrap_or_else(|| Vec::new(&env))
     }
-
-    /// Read-only function to inspect a user's persisted stake health snapshot.
-    /// Returns `None` if `evaluate_stake_health` has never been called for the user.
-    pub fn get_stake_health_snapshot(env: Env, user: Address) -> Option<StakeEntry> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::UserStakes(user))
-    }
 }
 
 // ============================================================================
@@ -153,7 +101,6 @@ impl StakeContract {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger};
 
     fn setup() -> (Env, Address, StakeContractClient<'static>) {
         let env = Env::default();
@@ -264,23 +211,5 @@ mod tests {
             0,
             "Queue should be empty after all stakes mature"
         );
-    }
-
-    #[test]
-    fn test_get_stake_health_snapshot_missing_key_returns_none() {
-        let (env, user, client) = setup();
-
-        // No record exists yet: must not trap, must return None.
-        let snapshot = client.get_stake_health_snapshot(&user);
-        assert_eq!(snapshot, None, "Missing snapshot should return None");
-
-        // After a terminal state (all stakes withdrawn), still safe.
-        client.stake(&user, &1000);
-        env.ledger()
-            .set_timestamp(env.ledger().timestamp() + COOLDOWN_PERIOD + 1);
-        client.withdraw_matured(&user);
-
-        let snapshot_after = client.get_stake_health_snapshot(&user);
-        assert_eq!(snapshot_after, None, "Snapshot should remain None");
     }
 }

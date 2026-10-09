@@ -25,9 +25,9 @@
 //! ```
 
 #![cfg(test)]
-extern crate std;
 extern crate alloc;
 use alloc::string::{String, ToString};
+use std::println;
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -176,7 +176,7 @@ fn shrink_removes_irrelevant_operations() {
     assert!(matches!(shrunk[1].op, TestOp::RaiseDispute));
     assert!(matches!(shrunk[2].op, TestOp::ResolveDispute { .. }));
 
-    std::println!(
+    println!(
         "[shrink_test] Original: {} steps → Shrunk: {} steps",
         long_sequence.len(),
         shrunk.len()
@@ -218,7 +218,7 @@ fn shrink_reduces_actor_diversity() {
     assert!(shrunk[1].actor_id < sequence[1].actor_id);
     assert!(shrunk[2].actor_id < sequence[2].actor_id);
 
-    std::println!(
+    println!(
         "[shrink_test] Actor IDs normalized: {:?} → {:?}",
         sequence
             .iter()
@@ -267,7 +267,7 @@ fn shrink_minimizes_timestamp_jumps() {
 
     assert!(shrunk_delta < original_delta);
 
-    std::println!(
+    println!(
         "[shrink_test] Time delta reduced: {} → {}",
         original_delta, shrunk_delta
     );
@@ -300,7 +300,7 @@ fn shrink_reduces_amounts() {
     assert!(shrunk[0].amount.unwrap() < sequence[0].amount.unwrap());
     assert!(shrunk[1].amount.unwrap() < sequence[1].amount.unwrap());
 
-    std::println!(
+    println!(
         "[shrink_test] Amounts reduced: {:?} → {:?}",
         sequence
             .iter()
@@ -340,7 +340,7 @@ fn shrink_normalizes_token_ids() {
     assert!(shrunk[0].token_id.unwrap() < sequence[0].token_id.unwrap());
     assert!(shrunk[1].token_id.unwrap() < sequence[1].token_id.unwrap());
 
-    std::println!(
+    println!(
         "[shrink_test] Token IDs normalized: {:?} → {:?}",
         sequence
             .iter()
@@ -397,11 +397,15 @@ fn model_harness_reports_first_violation() {
             TestOp::CreateEscrow => {
                 let amount = sop.amount.unwrap_or(10_000_000);
                 let _ =
-                    client.try_create_escrow(buyer, seller, &token_id, &amount, &604_800, &None);
+                    client.try_create_escrow(buyer, seller, &token_id, &amount, &order_counter, &None);
                 order_counter += 1;
             }
             TestOp::RaiseDispute => {
-                let _ = client.try_dispute_escrow(&(order_counter - 1), &soroban_sdk::Symbol::new(&env, "Reason"), buyer);
+                let _ = client.try_dispute_escrow(
+                    &(order_counter - 1),
+                    &soroban_sdk::Symbol::new(&env, "Reason"),
+                    buyer,
+                );
             }
             TestOp::ResolveDispute { to_seller } => {
                 let resolution = if *to_seller {
@@ -417,7 +421,7 @@ fn model_harness_reports_first_violation() {
                     let escrow = client.get_escrow(&(order_counter - 1));
                     if !matches!(escrow.status, crate::EscrowStatus::Resolved) {
                         violation_found = true;
-                        std::println!("[invariant] Violation at step {}: resolve succeeded but status is {:?}",
+                        println!("[invariant] Violation at step {}: resolve succeeded but status is {:?}",
                             step, escrow.status);
                     }
                 }
@@ -471,7 +475,7 @@ fn shrunk_sequences_are_deterministic() {
     // Verify expected outcome
     assert!(result.is_ok(), "Minimal sequence should execute cleanly");
 
-    std::println!("[shrink_test] Minimal sequence executed deterministically");
+    println!("[shrink_test] Minimal sequence executed deterministically");
 }
 
 // ── Demonstration of full shrinking workflow ──────────────────────────────────
@@ -550,19 +554,19 @@ fn full_shrinking_workflow_demonstration() {
 
     let shrunk = shrink_model_based(original.clone(), is_failure);
 
-    std::println!("\n=== Full Shrinking Workflow ===");
-    std::println!("Original sequence: {} steps", original.len());
-    std::println!("Shrunk sequence: {} steps", shrunk.len());
-    std::println!("\nOriginal:");
+    println!("\n=== Full Shrinking Workflow ===");
+    println!("Original sequence: {} steps", original.len());
+    println!("Shrunk sequence: {} steps", shrunk.len());
+    println!("\nOriginal:");
     for (i, sop) in original.iter().enumerate() {
-        std::println!(
+        println!(
             "  {}: actor={}, time={}, amount={:?}, op={:?}",
             i, sop.actor_id, sop.timestamp, sop.amount, sop.op
         );
     }
-    std::println!("\nShrunk (minimal reproducer):");
+    println!("\nShrunk (minimal reproducer):");
     for (i, sop) in shrunk.iter().enumerate() {
-        std::println!(
+        println!(
             "  {}: actor={}, time={}, amount={:?}, op={:?}",
             i, sop.actor_id, sop.timestamp, sop.amount, sop.op
         );

@@ -49,7 +49,7 @@ use alloc::string::{String, ToString};
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, Address, Env,
+    token, Address, Env, Symbol,
 };
 
 use super::{harness::advance_ledger_time, seed_from_env, Lcg64, DEFAULT_CASE_COUNT};
@@ -290,7 +290,7 @@ fn conservation_create_and_fund_escrow() {
     let before =
         FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &order_id, &None);
 
     let after =
         FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
@@ -317,7 +317,7 @@ fn conservation_release_to_seller() {
     let amount = 10_000_000i128;
     let order_id = 101u32;
 
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &order_id, &None);
 
     let before =
         FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
@@ -355,7 +355,7 @@ fn conservation_refund_to_buyer() {
     let amount = 10_000_000i128;
     let order_id = 102u32;
 
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &order_id, &None);
 
     let before =
         FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
@@ -388,8 +388,8 @@ fn conservation_dispute_resolve_to_seller() {
     let amount = 10_000_000i128;
     let order_id = 103u32;
 
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
-    client.dispute_escrow(&order_id, &soroban_sdk::Symbol::new(&env, "Reason"), &buyer);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &order_id, &None);
+    client.dispute_escrow(&order_id, &Symbol::new(&env, "Reason"), &buyer);
 
     let before =
         FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
@@ -428,8 +428,8 @@ fn conservation_dispute_resolve_to_buyer() {
     let amount = 10_000_000i128;
     let order_id = 104u32;
 
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
-    client.dispute_escrow(&order_id, &soroban_sdk::Symbol::new(&env, "Reason"), &buyer);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &order_id, &None);
+    client.dispute_escrow(&order_id, &Symbol::new(&env, "Reason"), &buyer);
 
     let before =
         FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
@@ -587,6 +587,55 @@ fn conservation_unstake_after_cooldown() {
 
 // ── Tests: Recurring escrow ───────────────────────────────────────────────────
 
+#[test]
+fn conservation_recurring_escrow_release_cycle() {
+    let (env, contract_id, _, _, buyer, seller, _, token_id, _) = setup_test_env();
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+    let platform_wallet = client.get_platform_wallet();
+
+    let amount_per_cycle = 1_000_000i128;
+    let total_cycles = 5u32;
+    let total_amount = amount_per_cycle * (total_cycles as i128);
+    let interval = 30 * 86_400u64; // 30 days
+
+    let escrow_id = client.create_recurring_escrow(
+        &buyer,
+        &seller,
+        &token_id,
+        &total_amount,
+        &interval,
+        &total_cycles,
+    );
+
+    // The first cycle is released after one configured interval.
+    advance_ledger_time(&env, interval);
+    let before =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+
+    client.release_next_cycle(&escrow_id.id);
+
+    let after =
+        FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
+
+    let fee = amount_per_cycle * 500 / 10_000;
+    let seller_amount = amount_per_cycle - fee;
+
+    let proof = ConservationProof {
+        before,
+        after,
+        expected: ExpectedDeltas {
+            locked_delta: -amount_per_cycle,
+            fees_delta: fee,
+            seller_delta: seller_amount,
+            platform_delta: fee,
+            ..Default::default()
+        },
+    };
+
+    proof
+        .verify()
+        .expect("Recurring escrow release cycle conservation");
+}
 
 // ── Property-based conservation test ──────────────────────────────────────────
 
@@ -628,7 +677,7 @@ fn prop_financial_conservation_all_paths() {
                     // Create escrow
                     let amount = crng.next_i128_range(10_000, 100_000_000);
                     let _ = client
-                        .try_create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
+                        .try_create_escrow(&buyer, &seller, &token_id, &amount, &order_id, &None);
                     order_id += 1;
                 }
                 1 => {
@@ -643,7 +692,11 @@ fn prop_financial_conservation_all_paths() {
                 3 => {
                     // Dispute and resolve
                     let oid = order_id - 1;
-                    let _ = client.try_dispute_escrow(&oid, &soroban_sdk::Symbol::new(&env, "Reason"), &buyer);
+                    let _ = client.try_dispute_escrow(
+                        &oid,
+                        &Symbol::new(&env, "Reason"),
+                        &buyer,
+                    );
                     let _ =
                         client.try_resolve_dispute(&oid, &Resolution::ReleaseToSeller, &arbitrator);
                 }

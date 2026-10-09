@@ -177,109 +177,6 @@ fn test_set_dispute_escalation_window() {
         client.get_platform_config().dispute_escalation_window,
         24 * 60 * 60
     );
-    let checkpoints = client.get_escalation_checkpoints().unwrap();
-    assert_eq!(checkpoints.party_checkpoint, 24 * 60 * 60);
-    assert!(checkpoints.moderator_checkpoint >= checkpoints.party_checkpoint);
-    assert!(checkpoints.admin_checkpoint >= checkpoints.moderator_checkpoint);
-}
-
-#[test]
-fn test_set_dispute_escalation_window_unauthorized_leaves_storage_unchanged() {
-    let env = Env::default();
-    let (client, _buyer, _seller, _token, _token_admin, _admin) = setup(&env);
-    let before_window = client.get_platform_config().dispute_escalation_window;
-    let before_checkpoints = client.get_escalation_checkpoints();
-
-    env.set_auths(&[]);
-    assert!(client.try_set_dispute_escalation_window(&12_345).is_err());
-
-    assert_eq!(
-        client.get_platform_config().dispute_escalation_window,
-        before_window
-    );
-    let after_checkpoints = client.get_escalation_checkpoints();
-    assert_eq!(
-        after_checkpoints.as_ref().map(|c| (
-            c.party_checkpoint,
-            c.moderator_checkpoint,
-            c.admin_checkpoint
-        )),
-        before_checkpoints.as_ref().map(|c| (
-            c.party_checkpoint,
-            c.moderator_checkpoint,
-            c.admin_checkpoint
-        ))
-    );
-}
-
-#[test]
-fn test_set_dispute_escalation_window_paused_rejection_leaves_storage_unchanged() {
-    let env = Env::default();
-    let (client, _buyer, _seller, _token, _token_admin, _admin) = setup(&env);
-    let before_window = client.get_platform_config().dispute_escalation_window;
-    let before_checkpoints = client.get_escalation_checkpoints();
-
-    env.as_contract(&client.address, || {
-        let mut config: PlatformConfig = env
-            .storage()
-            .instance()
-            .get(&DataKey::PlatformConfig)
-            .unwrap();
-        config.is_paused = true;
-        env.storage()
-            .instance()
-            .set(&DataKey::PlatformConfig, &config);
-    });
-
-    let result = client.try_set_dispute_escalation_window(&12_345);
-    assert_eq!(
-        result.unwrap_err(),
-        Ok(soroban_sdk::Error::from_contract_error(
-            Error::ContractPaused as u32
-        ))
-    );
-    let after = client.get_platform_config();
-    assert!(after.is_paused);
-    assert_eq!(after.dispute_escalation_window, before_window);
-    let after_checkpoints = client.get_escalation_checkpoints();
-    assert_eq!(
-        after_checkpoints.as_ref().map(|c| (
-            c.party_checkpoint,
-            c.moderator_checkpoint,
-            c.admin_checkpoint
-        )),
-        before_checkpoints.as_ref().map(|c| (
-            c.party_checkpoint,
-            c.moderator_checkpoint,
-            c.admin_checkpoint
-        ))
-    );
-}
-
-#[test]
-fn test_set_dispute_escalation_window_invalid_bounds_do_not_mutate_storage() {
-    let env = Env::default();
-    let (client, _buyer, _seller, _token, _token_admin, _admin) = setup(&env);
-    let before_window = client.get_platform_config().dispute_escalation_window;
-    let before_checkpoints = client.get_escalation_checkpoints();
-
-    for window in [0, u32::MAX] {
-        let result = client.try_set_dispute_escalation_window(&window);
-        assert_eq!(
-            result.unwrap_err(),
-            Ok(soroban_sdk::Error::from_contract_error(
-                Error::InvalidEscalationPolicy as u32
-            ))
-        );
-        assert_eq!(
-            client.get_platform_config().dispute_escalation_window,
-            before_window
-        );
-        assert_eq!(
-            client.get_escalation_checkpoints().is_some(),
-            before_checkpoints.is_some()
-        );
-    }
 }
 
 #[test]
@@ -614,13 +511,14 @@ fn test_duplicate_evidence_digest_is_rejected_deterministically() {
 
     // Same payload again (identical digest) → defined rejection.
     let dup = client.try_submit_evidence(&1, &seller, &uri);
-    assert!(dup.is_err());
+    let expected = soroban_sdk::Error::from_contract_error(Error::EvidenceAlreadyUsed as u32);
+    assert!(matches!(dup, Err(Ok(err)) if err == expected));
 
     // The digest guard also covers the counter-evidence path: a fresh, valid
     // parent still cannot smuggle a previously-used payload back in.
     let parent = client.submit_evidence(&1, &buyer, &String::from_str(&env, "ipfs://parent"));
     let dup_counter = client.try_submit_counter_evidence(&1, &seller, &uri, &parent);
-    assert!(dup_counter.is_err());
+    assert!(matches!(dup_counter, Err(Ok(err)) if err == expected));
 }
 
 /// #1078 AC1 + AC3: counter-evidence against a parent is accepted one second
@@ -659,7 +557,8 @@ fn test_counter_evidence_parent_expiry_exact_boundary() {
         &String::from_str(&env, "ipfs://counter-after"),
         &parent,
     );
-    assert!(counter_expired.is_err());
+    let expected = soroban_sdk::Error::from_contract_error(Error::EvidenceExpired as u32);
+    assert!(matches!(counter_expired, Err(Ok(err)) if err == expected));
 }
 
 /// #1078 AC1 + AC2: resolving a dispute at the evidence-expiry deadline

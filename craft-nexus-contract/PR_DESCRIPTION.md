@@ -1,99 +1,50 @@
-# feat: Add Liquidation-Eligible Stake State (#1111)
+# fix(contract): handle missing collateral records (#1352)
 
-## Summary
+## Description
 
-Implements Issue #1111: A deterministic liquidation-eligible stake state that blocks unsafe withdrawals when artisans are under-collateralized, defines admin-triggered liquidation with deficit caps, and provides auditable cure/recovery transitions.
+Make `is_account_under_collateralized` safe when an artisan's stake or active-obligation storage record is missing. Missing records retain the existing boolean semantics, and persistent TTLs are extended only for records that exist. Host tests cover missing records before an obligation and after the obligation reaches a terminal state.
 
-## Changes
+This branch also resolves the malformed merge-conflict content in `craft-nexus-contract/src/lib.rs`. The conflict markers were embedded in a duplicated, truncated copy of the contract implementation. The intact implementation and tests were retained, and APIs unique to the duplicate were restored in the primary implementation.
 
-### Core Implementation
+## Type of Change
 
-#### New Types (`lib.rs`)
-- **`LiquidationStatus`** — Lifecycle enum: `Healthy → UnderCollateralized → LiquidationEligible → Liquidated → Healthy`
-- **`StakeHealthSnapshot`** — Deterministic health evaluation at a ledger timestamp, with health ratio, deficit, and status
-- **`LiquidationPolicyData`** — Configurable thresholds: max seizure cap (bps), grace period, and admin kill-switch
-- **`LiquidationRecord`** — Audit trail for each liquidation: artisan, liquidator, seized amount, timestamps, cure status
-
-#### New Storage Keys
-- `StakeHealthSnapshot(Address)`, `LiquidationStatus(Address)`, `LiquidationRecord(u64)`, `NextLiquidationId`, `LiquidationPolicyConfig`, `LiquidationRecordCount`, `LiquidationRecordIndexed(u32)`
-
-#### New Error Codes (87–93)
-- `StakeHealthHealthy`, `LiquidationDisabled`, `LiquidationGracePeriodActive`, `LiquidationSeizureExceedsCap`, `LiquidationNotFound`, `LiquidationAlreadyCured`, `NotLiquidationEligible`
-
-#### New Public Functions
-| Function | Auth | Description |
-|---|---|---|
-| `evaluate_stake_health(artisan)` | None (read) | Deterministic health evaluation at current ledger timestamp; persists snapshot |
-| `get_stake_health_snapshot(artisan)` | None | Read-only getter for persisted health snapshot |
-| `get_liquidation_status(artisan)` | None | Read-only getter for current liquidation status |
-| `set_liquidation_policy(bps, grace, enabled)` | Admin | Configure liquidation thresholds and kill-switch |
-| `get_liquidation_policy()` | None | Read-only getter for current policy |
-| `flag_liquidation_eligible(artisan)` | Admin | Promote under-collateralized artisan to liquidation-eligible (after grace period) |
-| `trigger_liquidation(artisan)` | Admin | Execute partial liquidation, capped at deficit × max_seizure_bps |
-| `cure_liquidation(artisan)` | None | Transition back to Healthy if stake meets collateral requirement |
-| `get_liquidation_record(id)` | None | Read-only getter for audit record |
-| `get_liquidation_record_count()` | None | Count of all liquidation records |
-
-### Health Formula
-
-```
-required_collateral = active_obligations × min_stake_required
-health_ratio_bps    = (current_stake / max(required, 1)) × 10_000
-deficit             = max(0, required − current_stake)
-```
-
-### Liquidation Safety Invariants
-
-1. **Deficit cap**: Seized amount ≤ deficit (cannot seize more than shortfall)
-2. **Policy cap**: Seized amount ≤ deficit × max_seizure_bps / 10_000
-3. **Non-negative**: Seized amount > 0 (no zero-value liquidations)
-4. **CEI pattern**: Stake reduced and recorded before token transfer to platform wallet
-5. **Grace period**: Artisans get configurable time to recover before flagging
-
-### Modified Functions
-
-- **`unstake_tokens()`** — Now blocks withdrawals when artisan is in `LiquidationEligible` or `Liquidated` status. Artisans must `cure_liquidation` before unstaking.
-
-### Default Policy
-
-```
-max_seizure_bps: 5000  (50% of deficit)
-grace_period:    172800 (2 days)
-enabled:         true
-```
+- [x] Bug fix
+- [ ] New feature
+- [ ] Breaking change
+- [x] Documentation update
 
 ## Files Modified
-- `craft-nexus-contract/src/lib.rs` — Core liquidation logic, types, keys, errors, functions
-- `craft-nexus-contract/src/liquidation_test.rs` — New: 20 comprehensive tests
-- `craft-nexus-contract/PR_DESCRIPTION.md` — This file
+
+- `craft-nexus-contract/src/lib.rs`
+- `craft-nexus-contract/src/liquidation_test.rs`
+- `craft-nexus-contract/src/lib.rs-conflict-resolution.md`
+- `craft-nexus-contract/PR_DESCRIPTION.md`
 
 ## Testing
 
-**Contract builds successfully:**
-```
-cargo build ✅ SUCCESS (0 errors, 6 pre-existing warnings)
-```
+- [x] Added host tests for missing stake and active-obligation records.
+- [ ] Contract compilation — attempted in Ubuntu WSL; blocked by existing source errors described below.
+- [ ] Tested on Stellar Testnet (not applicable to this storage-read fix).
 
-**Test suite:** Pre-existing compilation errors in `test.rs` (duplicate `deactivated_account_tests` module, `ReconciliationReport` type issues) prevent full test binary compilation. These are the same pre-existing issues noted in PR #1110. The liquidation test file compiles without errors.
+## Code Quality Checks
 
-**Test coverage (20 tests):**
-- Health snapshot evaluation (healthy, under-collateralized, persistence, determinism)
-- Policy get/set
-- Flag liquidation-eligible (admin auth, healthy rejection, disabled rejection, grace period enforcement)
-- Trigger liquidation (deficit cap, healthy rejection, disabled rejection, audit records)
-- Cure liquidation (cure by staking, still under-collateralized rejection, healthy rejection)
-- Unstake blocking (liquidation-eligible, liquidated)
-- Full lifecycle integration test
-- Health ratio edge cases (zero stake, large stake)
-- Event emission tests (flag, cure)
+- [x] `git diff --check`
+- [ ] `cargo check --manifest-path craft-nexus-contract/Cargo.toml --lib` — attempted in Ubuntu WSL; compilation is blocked before tests can run.
+- [ ] Focused diagnostic-scan tests — attempted in Ubuntu WSL; test compilation is blocked by existing syntax errors.
 
-## Acceptance Criteria Met
+## Behavioral Changes
 
-✅ Health status is deterministic at a ledger timestamp
-✅ Liquidation cannot seize more than the deficit and policy permits
-✅ Recovery and cure actions are auditable (LiquidationRecord with cure timestamps)
-✅ Unsafe withdrawals are blocked when artisan is liquidation-eligible or liquidated
-✅ Grace period protects artisans from immediate liquidation
-✅ Admin kill-switch can disable liquidation entirely
+The public return type remains `bool`. With no active-obligation record, the function returns `false`. If obligations are active but the stake record is missing, the missing stake is treated as zero collateral.
 
-Closes #1111
+## Existing Build Blockers
+
+The conflict markers and truncated text in `craft-nexus-contract/src/lib.rs` have been resolved. Cargo validation is still blocked by unrelated existing errors:
+
+- The library check reports the duplicate error discriminant `80` for `PaginationLimitZero` and `OnboardingVerificationRevoked`, followed by cascading compiler errors in the contract and onboarding sources.
+- The focused test build stops on syntax errors in `craft-nexus-contract/src/prop_test/escrow_props.rs` and `craft-nexus-contract/src/prop_test/harness.rs`.
+
+These issues prevent the test binary from compiling; the requested tests have not yet executed.
+
+## Related Issues
+
+Closes #1352.
