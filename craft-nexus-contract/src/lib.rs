@@ -369,6 +369,8 @@ const CURRENT_STORAGE_LAYOUT_VERSION: u32 = 1;
 // Conservative batch size to avoid exceeding instruction/read-write limits
 // observed on Soroban testnets. Reduced from 100 to 20 (Issue #198).
 const MAX_BATCH_SIZE: u32 = 20;
+/// Maximum escrow parameters persisted in one resumable batch job.
+const MAX_SCHEDULED_BATCH_SIZE: u32 = 100;
 /// Maximum number of escrows a scheduled continuation may process.
 const MAX_SCHEDULED_BATCH_WORK: u32 = 5;
 const MAX_PAGE_SIZE: u32 = 100;
@@ -4465,13 +4467,15 @@ impl CraftNexusContract {
         let count_key = DataKey::BuyerEscrowCount(buyer.clone());
         if env.storage().persistent().has(&count_key) {
             let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0u32);
-            let start = page * page_size;
+            let Some(start) = page.checked_mul(page_size) else {
+                return Ok(result);
+            };
 
             if start >= total_count {
                 return Ok(result);
             }
 
-            let end = (start + page_size).min(total_count);
+            let end = start.saturating_add(page_size).min(total_count);
 
             for position in start..end {
                 let storage_index = if reverse {
@@ -4502,14 +4506,16 @@ impl CraftNexusContract {
             Self::extend_persistent_read(&env, &legacy_key);
         }
 
-        let start = page * page_size;
+        let Some(start) = page.checked_mul(page_size) else {
+            return Ok(result);
+        };
         let len = escrow_ids.len();
 
         if start >= len {
             return Ok(result);
         }
 
-        let end = (start + page_size).min(len);
+        let end = start.saturating_add(page_size).min(len);
         if reverse {
             for position in start..end {
                 if let Some(escrow_id) = escrow_ids.get(len - 1 - position) {
@@ -4543,13 +4549,15 @@ impl CraftNexusContract {
         let count_key = DataKey::SellerEscrowCount(seller.clone());
         if env.storage().persistent().has(&count_key) {
             let total_count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0u32);
-            let start = page * page_size;
+            let Some(start) = page.checked_mul(page_size) else {
+                return Ok(result);
+            };
 
             if start >= total_count {
                 return Ok(result);
             }
 
-            let end = (start + page_size).min(total_count);
+            let end = start.saturating_add(page_size).min(total_count);
 
             for position in start..end {
                 let storage_index = if reverse {
@@ -4580,14 +4588,16 @@ impl CraftNexusContract {
             Self::extend_persistent_read(&env, &legacy_key);
         }
 
-        let start = page * page_size;
+        let Some(start) = page.checked_mul(page_size) else {
+            return Ok(result);
+        };
         let len = escrow_ids.len();
 
         if start >= len {
             return Ok(result);
         }
 
-        let end = (start + page_size).min(len);
+        let end = start.saturating_add(page_size).min(len);
         if reverse {
             for position in start..end {
                 if let Some(escrow_id) = escrow_ids.get(len - 1 - position) {
@@ -8173,7 +8183,7 @@ impl CraftNexusContract {
         Self::check_not_paused(&env);
         owner.require_auth();
 
-        if params.is_empty() || params.len() > MAX_BATCH_SIZE {
+        if params.is_empty() || params.len() > MAX_SCHEDULED_BATCH_SIZE {
             return Err(Error::BatchLimitExceeded);
         }
 
@@ -9182,13 +9192,15 @@ impl CraftNexusContract {
         Self::migrate_legacy_all_escrow_ids(&env);
 
         let total = Self::get_persistent_u32(&env, &DataKey::EscrowCount);
-        let start = page * limit;
+        let Some(start) = page.checked_mul(limit) else {
+            return soroban_sdk::Vec::new(&env);
+        };
 
         if start >= total {
             return soroban_sdk::Vec::new(&env);
         }
 
-        let end = (start + limit).min(total);
+        let end = start.saturating_add(limit).min(total);
         let mut result = soroban_sdk::Vec::new(&env);
 
         for index in start..end {

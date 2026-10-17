@@ -114,6 +114,20 @@ fn test_indexed_storage_scalability() {
     let page11 = client.get_escrows_by_buyer(&buyer, &10, &10, &false);
     assert_eq!(page11.len(), 0);
 
+    // Multiplication overflow is treated as an out-of-range page.
+    assert_eq!(
+        client
+            .get_escrows_by_buyer(&buyer, &u32::MAX, &10, &false)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .get_escrows_by_seller(&seller, &u32::MAX, &10, &false)
+            .len(),
+        0
+    );
+
     // Verify individual indexed entries exist
     for i in 0..100 {
         let index_key = DataKey::BuyerEscrowIndexed(buyer.clone(), i);
@@ -192,7 +206,7 @@ fn test_batch_escrow_indexing_scales_linearly_for_twenty_entries() {
 fn test_scheduled_batch_progresses_in_bounded_idempotent_chunks() {
     let (env, client, buyer, seller, token, _, _, _) = setup_test();
     let mut params = soroban_sdk::Vec::new(&env);
-    for i in 0..7u32 {
+    for i in 0..(MAX_BATCH_SIZE + 1) {
         params.push_back(EscrowCreateParams {
             buyer: buyer.clone(),
             seller: seller.clone(),
@@ -214,10 +228,22 @@ fn test_scheduled_batch_progresses_in_bounded_idempotent_chunks() {
     assert_eq!(client.get_escrow(&2_004).batch_id, Some(job_id));
 
     let second = client.continue_batch_escrow(&job_id, &buyer, &5);
-    assert_eq!(second.next_index, 7);
-    assert_eq!(second.status, BatchJobStatus::Completed);
-    assert_eq!(client.get_escrow(&2_006).batch_id, Some(job_id));
-    assert_eq!(client.get_batch_escrow_progress(&job_id).unwrap(), second);
+    assert_eq!(second.next_index, 10);
+    assert_eq!(second.status, BatchJobStatus::Pending);
+
+    let third = client.continue_batch_escrow(&job_id, &buyer, &5);
+    assert_eq!(third.next_index, 15);
+    assert_eq!(third.status, BatchJobStatus::Pending);
+
+    let fourth = client.continue_batch_escrow(&job_id, &buyer, &5);
+    assert_eq!(fourth.next_index, 20);
+    assert_eq!(fourth.status, BatchJobStatus::Pending);
+
+    let fifth = client.continue_batch_escrow(&job_id, &buyer, &5);
+    assert_eq!(fifth.next_index, MAX_BATCH_SIZE + 1);
+    assert_eq!(fifth.status, BatchJobStatus::Completed);
+    assert_eq!(client.get_escrow(&(2_000 + MAX_BATCH_SIZE)).batch_id, Some(job_id));
+    assert_eq!(client.get_batch_escrow_progress(&job_id).unwrap(), fifth);
     assert!(client
         .try_continue_batch_escrow(&job_id, &buyer, &1)
         .is_err());

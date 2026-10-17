@@ -4884,6 +4884,10 @@ fn test_get_all_escrow_ids_iterative_pagination() {
     // Page 3, limit 2 → empty (out of range)
     let page3 = client.get_all_escrow_ids_iterative(&3, &2);
     assert_eq!(page3.len(), 0);
+
+    // An overflowing page offset is also deterministically empty.
+    let overflow_page = client.get_all_escrow_ids_iterative(&u32::MAX, &2);
+    assert_eq!(overflow_page.len(), 0);
 }
 
 #[test]
