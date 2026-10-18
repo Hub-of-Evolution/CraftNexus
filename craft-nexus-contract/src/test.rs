@@ -5945,6 +5945,31 @@ fn test_get_escrow_count_empty() {
 }
 
 #[test]
+fn test_get_escrow_count_missing_key_returns_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, buyer, seller, token_id, token_admin, _, _) = setup_test(&env, true);
+
+    // Key absent before any escrow record exists: must not trap.
+    env.as_contract(&client.address, || {
+        env.storage().persistent().remove(&DataKey::EscrowCount);
+    });
+    assert_eq!(client.get_escrow_count(), 0);
+
+    // Key absent after an escrow reached a terminal state: must not trap.
+    token_admin.mint(&buyer, &100_000_000);
+    client.create_escrow(&buyer, &seller, &token_id, &50_000_000, &1, &None);
+    client.release_funds(&1);
+    assert_eq!(client.get_escrow(&1).status, EscrowStatus::Released);
+    assert_eq!(client.get_escrow_count(), 1);
+
+    env.as_contract(&client.address, || {
+        env.storage().persistent().remove(&DataKey::EscrowCount);
+    });
+    assert_eq!(client.get_escrow_count(), 0);
+}
+
+#[test]
 fn test_get_escrow_count_increments() {
     let env = Env::default();
     env.mock_all_auths();
