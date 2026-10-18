@@ -1,0 +1,33 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "fix/1369-1370-safe-storage-reads",
+    "fix/1369-1370-safe-storage-reads-v2",
+    "fix/craftnexus-ci-1020-v2",
+    "main",
+    "origin",
+    "solver/issue-1020-14-a0",
+    "solver/issue-1369-11-a0",
+    "solver/issue-1370-10-a0"
+  ],
+  "parent": {
+    "fix/1369-1370-safe-storage-reads": "main",
+    "fix/1369-1370-safe-storage-reads-v2": "fix/1369-1370-safe-storage-reads",
+    "fix/craftnexus-ci-1020-v2": "main",
+    "main": null,
+    "origin": "main",
+    "solver/issue-1020-14-a0": "main",
+    "solver/issue-1369-11-a0": "main",
+    "solver/issue-1370-10-a0": "main"
+  },
+  "order": [
+    "main",
+    "fix/1369-1370-safe-storage-reads",
+    "fix/craftnexus-ci-1020-v2",
+    "origin",
+    "solver/issue-1020-14-a0",
+    "solver/issue-1369-11-a0",
+    "solver/issue-1370-10-a0",
+    "fix/1369-1370-safe-storage-reads-v2"
+  ]
+}

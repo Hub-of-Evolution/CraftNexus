@@ -679,16 +679,53 @@ primary emitting function.
 
 | Topic tuple (filter) | Payload type | Emitted by |
 |----------------------|--------------|------------|
-| `(symbol "UserOnboarded",)` | `UserOnboardedEvent { user: Address, username: String, role: UserRole }` | `onboard_user` |
-| `(symbol "OnboardCallFailed",)` | `OnboardCallFailedEvent { user: Address, reason: u32, timestamp: u64 }` | `emit_onboard_failed_and_panic` |
-| `(symbol "RoleUpdated",)` | tuple `(user: Address, old_role: UserRole, new_role: UserRole)` | `update_user_role` |
-| `(symbol "ProfileDeactivated", Address)` | tuple `(user: Address, role: UserRole)` | `deactivate_profile` |
-| `(symbol "ProfileReactivated", Address)` | tuple `(user: Address, role: UserRole)` | `reactivate_profile` |
-| `(symbol "UserVerified",)` | `Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
-| `(symbol "UsernameChanged",)` | `Address` | `change_username` |
-| `(symbol "UsernameChangedRevoked",)` | audit symbol for revoked username changes | username-change flow |
-| `(symbol "PortfolioUpdated",)` | `Address` | `update_portfolio` |
-| `(symbol "AutoVerifiedEvent", Address)` | `AutoVerifiedEvent { user, escrow_count, volume }` | `try_auto_verify` |
+| `(symbol "user_onboarded",)` | `UserOnboardedEvent { user: Address, username: String, role: UserRole }` | `onboard_user` |
+| `(symbol "onboard_call_failed",)` | `OnboardCallFailedEvent { user: Address, reason: u32, timestamp: u64 }` | `emit_onboard_failed_and_panic` |
+| `(symbol "role_updated",)` | tuple `(user: Address, old_role: UserRole, new_role: UserRole)` | `update_user_role` |
+| `(symbol "profile_deactivated", Address)` | tuple `(user: Address, role: UserRole)` | `deactivate_profile` |
+| `(symbol "profile_reactivated", Address)` | tuple `(user: Address, role: UserRole)` | `reactivate_profile` |
+| `(symbol "user_verified",)` | `Address` | `verify_user`, `auto_verify_user`, `process_verification_request` |
+| `(symbol "username_changed",)` | `Address` | `change_username` |
+| `(symbol "portfolio_updated",)` | `Address` | `update_portfolio` |
+| `(symbol "auto_verified", Address)` | `AutoVerifiedEvent { user, escrow_count, volume }` | `try_auto_verify` |
+| `(symbol "attempt_rate_limited", operation)` | `AttemptRateLimitedEvent` | rate-limit checks |
+| `(symbol "sybil_pattern_detected",)` | `SybilPatternDetectedEvent` | `onboard_user`, `flag_profile` |
+| `(symbol "identity_correlated",)` | `IdentityCorrelatedEvent` | `onboard_user` |
+| `(symbol "poh_credential_registered",)` | `PohCredentialRegisteredEvent` | PoH registration |
+| `(symbol "sybil_review_decision",)` / `(symbol "review_completed",)` | `SybilReviewDecisionEvent` / `ReviewCompletedEvent` | sybil review flow |
+| `(symbol "profile_flagged",)` | `ProfileFlaggedEvent` | admin profile flagging |
+| `(symbol "sybil_config_updated", symbol "sybil_config")` | config payload | sybil config update |
+
+### Event Naming Convention
+
+All event topic names are lowercase `snake_case`, with the domain as a prefix where one exists
+(`escrow_*`, `stake_*`, `admin_*`, `dispute_*`, `recurring_*`, `user_*`/`profile_*` for onboarding).
+Struct names stay `PascalCase`; only the emitted topic symbol is `snake_case`. Payload shapes are unchanged.
+
+#### Indexer migration notes
+
+Onboarding topics previously used `PascalCase`. Indexers must subscribe to the new topics
+(and may keep the old ones for events emitted by earlier contract deployments):
+
+| Old topic | New topic |
+|-----------|-----------|
+| `UserOnboarded` | `user_onboarded` |
+| `OnboardCallFailed` | `onboard_call_failed` |
+| `RoleUpdated` | `role_updated` |
+| `ProfileDeactivated` | `profile_deactivated` |
+| `ProfileReactivated` | `profile_reactivated` |
+| `UserVerified` | `user_verified` |
+| `UsernameChanged` | `username_changed` |
+| `PortfolioUpdated` | `portfolio_updated` |
+| `AutoVerifiedEvent` | `auto_verified` |
+| `AttemptRateLimited` | `attempt_rate_limited` |
+| `SybilPatternDetected` | `sybil_pattern_detected` |
+| `IdentityCorrelated` | `identity_correlated` |
+| `PohCredentialRegistered` | `poh_credential_registered` |
+| `SybilReviewDecision` | `sybil_review_decision` |
+| `ReviewCompleted` | `review_completed` |
+| `ProfileFlagged` | `profile_flagged` |
+| `ConfigUpdated` (onboarding, `sybil_config`) | `sybil_config_updated` |
 
 Notes:
 - Topic tuples are the canonical filter keys for indexers. Many events include user or order identifiers in the topic tuple so consumers can cheaply subscribe to a single-user or single-order stream without decoding event payloads.
