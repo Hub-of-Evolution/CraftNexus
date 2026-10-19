@@ -43,6 +43,8 @@ mod diagnostic_scan_test;
 mod emergency_ops_test;
 #[cfg(test)]
 mod issue_1347_test;
+#[cfg(test)]
+mod platform_stats_missing_key_test;
 #[cfg(all(test, feature = "wasm-differential-tests"))]
 mod differential_test;
 #[cfg(test)]
@@ -1743,10 +1745,12 @@ impl CraftNexusContract {
 
     #[inline(always)]
     fn get_total_volume(env: &Env) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::TotalVolume)
-            .unwrap_or(0)
+        let key = DataKey::TotalVolume;
+        let value: Option<i128> = env.storage().persistent().get(&key);
+        if value.is_some() {
+            Self::extend_persistent_read(env, &key);
+        }
+        value.unwrap_or(0)
     }
 
     #[inline(always)]
@@ -8481,9 +8485,23 @@ impl CraftNexusContract {
     /// Derived purely from the operator's `expired_dispute_fee_policy`, so the
     /// outcome of letting a dispute time out is knowable in advance and cannot
     /// be influenced by whoever happens to call `resolve_expired_dispute`.
-    pub fn get_timeout_outcome(env: Env) -> TimeoutOutcome {
-        let config = Self::get_platform_config_internal(&env);
-        Self::timeout_outcome(config.expired_dispute_fee_policy)
+    ///
+    /// # Errors
+    /// * [`Error::PlatformNotInitialized`] if the platform config is missing
+    ///   (not yet initialized, or lost to a partial migration) or unreadable,
+    ///   instead of trapping the host.
+    pub fn get_timeout_outcome(env: Env) -> Result<TimeoutOutcome, Error> {
+        let stored: Val = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlatformConfig)
+            .ok_or(Error::PlatformNotInitialized)?;
+        let config = PlatformConfig::try_from_val(&env, &stored)
+            .map_err(|_| Error::PlatformNotInitialized)?;
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTENSION);
+        Ok(Self::timeout_outcome(config.expired_dispute_fee_policy))
     }
 
     /// Read the configured escalation checkpoint schedule (#1080).
@@ -15074,10 +15092,12 @@ impl CraftNexusContract {
 
     #[inline(always)]
     fn get_total_volume(env: &Env) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::TotalVolume)
-            .unwrap_or(0)
+        let key = DataKey::TotalVolume;
+        let value: Option<i128> = env.storage().persistent().get(&key);
+        if value.is_some() {
+            Self::extend_persistent_read(env, &key);
+        }
+        value.unwrap_or(0)
     }
 
     #[inline(always)]
@@ -20439,10 +20459,12 @@ impl CraftNexusContract {
 
     #[inline(always)]
     fn get_total_volume(env: &Env) -> i128 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::TotalVolume)
-            .unwrap_or(0)
+        let key = DataKey::TotalVolume;
+        let value: Option<i128> = env.storage().persistent().get(&key);
+        if value.is_some() {
+            Self::extend_persistent_read(env, &key);
+        }
+        value.unwrap_or(0)
     }
 
     #[inline(always)]
