@@ -31,6 +31,9 @@ mod enhanced_features_test;
 mod event_snapshot_test;
 #[cfg(test)]
 mod expired_dispute_fee_test;
+mod liquidation_cure;
+#[cfg(test)]
+mod liquidation_cure_test;
 #[cfg(test)]
 mod liquidation_test;
 #[cfg(test)]
@@ -10111,13 +10114,16 @@ impl CraftNexusContract {
                 None => Err(Error::PlatformNotInitialized),
             }
         }
+    }
 
-        env.events().publish(
-            (Symbol::new(&env, "stake_liquidation_cured"), artisan),
-            env.ledger().timestamp(),
-        );
-
-        Ok(())
+    /// Cure an artisan's liquidation after they have topped up their stake.
+    ///
+    /// Requires the artisan's authorization and an unpaused platform. Status,
+    /// collateral and checked arithmetic are validated before any storage write,
+    /// TTL refresh, legacy stake migration or token interaction. Rejections raise
+    /// the specific contract error without changing balances or audit records.
+    pub fn cure_liquidation(env: Env, artisan: Address) -> Result<(), Error> {
+        liquidation_cure::cure_liquidation(&env, &artisan)
     }
 
     /// Read-only getter: return a liquidation record by ID.
