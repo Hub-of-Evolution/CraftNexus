@@ -23,6 +23,39 @@ macro_rules! check_fields {
     }};
 }
 
+/// Renamed onboarding topics: (old PascalCase, new snake_case).
+const RENAMED_ONBOARDING_TOPICS: &[(&str, &str)] = &[
+    ("UserOnboarded", "user_onboarded"),
+    ("OnboardCallFailed", "onboard_call_failed"),
+    ("RoleUpdated", "role_updated"),
+    ("ProfileDeactivated", "profile_deactivated"),
+    ("ProfileReactivated", "profile_reactivated"),
+    ("UserVerified", "user_verified"),
+    ("UsernameChanged", "username_changed"),
+    ("PortfolioUpdated", "portfolio_updated"),
+    ("AutoVerifiedEvent", "auto_verified"),
+    ("AttemptRateLimited", "attempt_rate_limited"),
+    ("SybilPatternDetected", "sybil_pattern_detected"),
+    ("IdentityCorrelated", "identity_correlated"),
+    ("PohCredentialRegistered", "poh_credential_registered"),
+    ("SybilReviewDecision", "sybil_review_decision"),
+    ("ReviewCompleted", "review_completed"),
+    ("ProfileFlagged", "profile_flagged"),
+    ("ConfigUpdated", "sybil_config_updated"),
+];
+
+#[test]
+fn onboarding_event_topics_use_snake_case() {
+    let src = include_str!("onboarding.rs");
+    for (old, new) in RENAMED_ONBOARDING_TOPICS {
+        let old_lit = ["\"", old, "\""].concat();
+        let new_lit = ["\"", new, "\""].concat();
+        assert!(!src.contains(&old_lit), "old topic {} still emitted", old);
+        assert!(src.contains(&new_lit), "new topic {} not emitted", new);
+        assert!(new.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+    }
+}
+
 #[test]
 fn lifecycle_event_schema_version_is_pinned() {
     assert_eq!(LIFECYCLE_EVENT_SCHEMA_VERSION, 1);
