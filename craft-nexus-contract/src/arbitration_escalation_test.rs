@@ -85,6 +85,27 @@ fn create_and_dispute(
 // ── Dispute Arbitration Escalation (#941) ──────────────────────────────
 
 #[test]
+fn test_get_dispute_assignment_handles_missing_and_terminal_records() {
+    let env = Env::default();
+    let (client, buyer, seller, token, token_admin, admin) = setup(&env);
+
+    assert!(client.get_dispute_assignment(&1).is_none());
+
+    create_and_dispute(&env, &client, &buyer, &seller, &token, &token_admin, 1);
+    let assignment = client
+        .get_dispute_assignment(&1)
+        .expect("assignment should be recorded for a dispute");
+
+    env.ledger().with_mut(|li| {
+        li.timestamp += DEFAULT_EVIDENCE_CHALLENGE_WINDOW as u64 + 1;
+    });
+    client.resolve_dispute(&1, &Resolution::RefundToBuyer, &admin);
+
+    assert_eq!(client.get_escrow(&1).status, EscrowStatus::Resolved);
+    assert_eq!(client.get_dispute_assignment(&1), Some(assignment));
+}
+
+#[test]
 fn test_escalate_dispute_too_early_fails() {
     let env = Env::default();
     let (client, buyer, seller, token, token_admin, _admin) = setup(&env);
