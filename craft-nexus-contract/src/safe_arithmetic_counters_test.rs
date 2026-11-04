@@ -44,7 +44,7 @@ fn setup_rig() -> TestRig {
         &admin,
         &arbitrator,
         &500,
-        &Some(onboarding_contract),
+        &None,
     );
 
     client.set_min_escrow_amount(&token_addr, &0);

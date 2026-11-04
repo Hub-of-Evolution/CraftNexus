@@ -49,7 +49,7 @@ use alloc::string::{String, ToString};
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
-    token, Address, Env,
+    token, Address, Env, Symbol,
 };
 
 use super::{harness::advance_ledger_time, seed_from_env, Lcg64, DEFAULT_CASE_COUNT};
@@ -290,7 +290,7 @@ fn conservation_create_and_fund_escrow() {
     let before =
         FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
 
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &order_id, &None);
 
     let after =
         FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
@@ -317,7 +317,7 @@ fn conservation_release_to_seller() {
     let amount = 10_000_000i128;
     let order_id = 101u32;
 
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &order_id, &None);
 
     let before =
         FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);
@@ -355,7 +355,7 @@ fn conservation_refund_to_buyer() {
     let amount = 10_000_000i128;
     let order_id = 102u32;
 
-    client.create_escrow(&buyer, &seller, &token_id, &amount, &604_800, &None);
+    client.create_escrow(&buyer, &seller, &token_id, &amount, &order_id, &None);
 
     let before =
         FinancialSnapshot::capture(&env, &client, &token_id, &buyer, &seller, &platform_wallet);

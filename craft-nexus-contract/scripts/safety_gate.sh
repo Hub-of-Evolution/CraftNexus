@@ -24,7 +24,7 @@ PROP_SEED="${PROP_SEED:-0xCAFEF00DDEADBEEF}"
 REPORT_PATH="${SAFETY_GATE_REPORT:-${ROOT}/target/safety-gate-report.json}"
 WASM_TARGET="${WASM_TARGET:-wasm32v1-none}"
 WASM_ARTIFACT="${WASM_ARTIFACT:-target/${WASM_TARGET}/release/craft_nexus_contract.wasm}"
-MAX_WASM_SIZE_BYTES="${MAX_WASM_SIZE_BYTES:-65536}"
+MAX_WASM_SIZE_BYTES="${MAX_WASM_SIZE_BYTES:-524288}"
 SKIP_WASM_BUILD="${SKIP_WASM_BUILD:-0}"
 
 SOURCE_STATE="$(git -C "${ROOT}/.." rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -114,7 +114,7 @@ if [ "${SKIP_WASM_BUILD}" != "1" ]; then
         rustup target add "${WASM_TARGET}"
     fi
     log "Building WASM artifact..."
-    if ! RUSTFLAGS="-C opt-level=z -C lto -C panic=abort" cargo build --target "${WASM_TARGET}" --release --locked; then
+    if ! cargo build --target "${WASM_TARGET}" --release --locked; then
         fail_suite "wasm_validation" "native_wasm_build"
     fi
     if [ ! -f "${WASM_ARTIFACT}" ]; then

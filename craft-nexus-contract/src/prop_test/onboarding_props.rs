@@ -95,7 +95,7 @@ fn prop_no_duplicate_onboarding() {
         let user = Address::generate(&env);
         client.onboard_user(&user, &ss(&env, "alice"), &UserRole::Buyer);
 
-        let r = client.try_onboard_user(&user, &ss(&env, "alice"), &UserRole::Buyer);
+        let r = client.try_onboard_user(&user, &ss(&env, "alice_dup"), &UserRole::Buyer);
         if r.is_ok() && r.unwrap().is_ok() {
             panic!(
                 "[prop_no_duplicate_onboarding] second onboard succeeded (seed=0x{:016X})",
@@ -312,8 +312,8 @@ fn prop_onboarding_model_agreement() {
             match op {
                 OnboardingOp::OnboardBuyer | OnboardingOp::OnboardArtisan => {
                     let addr = &users[user_idx % users.len()];
+                    let name = alloc::format!("user_{}", user_idx);
                     user_idx = user_idx.wrapping_add(1);
-                    let name = user_names[crng.next_usize(user_names.len())];
                     let (sdk_role, model_role) = if matches!(op, OnboardingOp::OnboardBuyer) {
                         (UserRole::Buyer, ModelUserRole::Buyer)
                     } else {
@@ -321,7 +321,7 @@ fn prop_onboarding_model_agreement() {
                     };
                     let addr_str = alloc::format!("{:?}", addr);
                     let expected = model.onboard_user(addr_str, model_role);
-                    let actual = client.try_onboard_user(addr, &ss(&env, name), &sdk_role);
+                    let actual = client.try_onboard_user(addr, &ss(&env, &name), &sdk_role);
                     let actual_ok = actual.is_ok() && actual.unwrap().is_ok();
                     if expected.is_ok() != actual_ok {
                         panic!(
@@ -335,7 +335,7 @@ fn prop_onboarding_model_agreement() {
                         let addr_str = alloc::format!("{:?}", &users[0]);
                         let expected = model.onboard_user(addr_str, ModelUserRole::Buyer);
                         let actual = client.try_onboard_user(
-                            &users[0], &ss(&env, "dup"), &UserRole::Buyer,
+                            &users[0], &ss(&env, "dup_name_0"), &UserRole::Buyer,
                         );
                         let actual_ok = actual.is_ok() && actual.unwrap().is_ok();
                         if expected.is_ok() != actual_ok {

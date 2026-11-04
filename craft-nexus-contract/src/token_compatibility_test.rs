@@ -3,8 +3,8 @@
 use super::*;
 use soroban_sdk::{
     contract, contractimpl,
-    testutils::{Address as _, Ledger},
-    token, Address, Env,
+    testutils::Address as _,
+    token, Address, Env, Symbol,
 };
 
 // ---------------------------------------------------------------------------
@@ -27,6 +27,10 @@ pub mod mock_fully_supported {
         pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
     }
 }
+use fully_supported_token::FullySupportedToken;
+
+mod missing_balance_token {
+    use super::*;
 
 pub mod mock_missing_balance {
     use super::*;
@@ -41,6 +45,7 @@ pub mod mock_missing_balance {
         pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
     }
 }
+use missing_balance_token::MissingBalanceToken;
 
 pub mod mock_missing_transfer {
     use super::*;
@@ -57,6 +62,7 @@ pub mod mock_missing_transfer {
         }
     }
 }
+use missing_transfer_token::MissingTransferToken;
 
 pub mod mock_malformed_decimals {
     use super::*;
@@ -75,6 +81,7 @@ pub mod mock_malformed_decimals {
         pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {}
     }
 }
+use malformed_decimals_token::MalformedDecimalsToken;
 
 // Token that records whether transfer was called and with what amount
 pub mod mock_recording {
@@ -125,6 +132,7 @@ pub mod mock_recording {
         }
     }
 }
+use empty_token::EmptyToken;
 
 fn setup_client(env: &Env) -> (CraftNexusContractClient<'_>, Address) {
     env.mock_all_auths();
@@ -197,10 +205,11 @@ fn validate_compatibility_does_not_mutate_funds() {
     // Use StellarAssetContract (real token) to observe real balances
     let token_admin = Address::generate(&env);
     let token = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = token::StellarAssetClient::new(&env, &token.address());
+    let token_asset_client = token::StellarAssetClient::new(&env, &token.address());
+    let token_client = token::Client::new(&env, &token.address());
     let buyer = Address::generate(&env);
-    token_client.mint(&buyer, &10_000);
-    token_client.mint(&contract_id, &5_000);
+    token_asset_client.mint(&buyer, &10_000);
+    token_asset_client.mint(&contract_id, &5_000);
 
     let token_balance_before = token::Client::new(&env, &token.address()).balance(&contract_id);
     let buyer_balance_before = token::Client::new(&env, &token.address()).balance(&buyer);

@@ -112,7 +112,7 @@ fn test_recurring_escrow_lifecycle() {
     assert_eq!(token_client.balance(&platform_wallet), 50);
 
     let final_escrow = escrow.get_recurring_escrow(&rec_escrow.id);
-    assert!(final_escrow.is_active);
+    assert!(!final_escrow.is_active);
     assert!(!escrow.has_active_escrows(&buyer));
     assert!(!escrow.has_active_escrows(&artisan));
 }
