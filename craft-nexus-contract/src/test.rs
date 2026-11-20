@@ -5634,6 +5634,17 @@ fn test_set_paused_emits_platform_status_events() {
     assert_eq!(unpaused_event.timestamp, 1711368000);
 }
 
+#[test]
+fn test_set_paused_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = CraftNexusContractClient::new(&env, &env.register_contract(None, CraftNexusContract));
+
+    // Not initialized yet, get_admin will fail with Unauthorized.
+    let result = client.try_set_paused(&true);
+    assert_panic_contract_error(result, Error::Unauthorized);
+}
+
 /// Test metadata reveal verification with invalid content (Issue #122)
 #[test]
 fn test_verify_metadata_reveal_invalid_content() {
@@ -8667,6 +8678,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_query_requires_admin_auth_without_mutating_state() {
         let env = Env::default();
+        let (client, _, _, _, _, token_id, _) = setup_test(&env, true);
         let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
         env.set_auths(&[]);
 
@@ -8697,6 +8709,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_query_rejects_paused_platform_without_mutating_state() {
         let env = Env::default();
+        let (client, _, _, _, _, token_id, _) = setup_test(&env, true);
         let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
         client.set_paused(&true);
 
@@ -8704,6 +8717,7 @@ mod reconciliation_report_tests {
         let before_paused = client.is_paused();
         let result = client.try_query_reconciliation_report(&token_id, &0, &50);
 
+        assert_panic_contract_error(result, Error::ContractPaused);
         assert_returned_or_panic_contract_error(result, Error::ContractPaused);
         assert_eq!(client.is_paused(), before_paused);
         assert_eq!(
@@ -8715,6 +8729,7 @@ mod reconciliation_report_tests {
     #[test]
     fn test_query_rejects_recurring_amount_underflow() {
         let env = Env::default();
+        let (client, _, _, _, _, token_id, _) = setup_test(&env, true);
         let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
 
         env.as_contract(&client.address, || {
@@ -8740,12 +8755,14 @@ mod reconciliation_report_tests {
         });
 
         let result = client.try_query_reconciliation_report(&token_id, &0, &50);
+        assert_panic_contract_error(result, Error::CounterUnderflow);
         assert_returned_or_panic_contract_error(result, Error::CounterUnderflow);
     }
 
     #[test]
     fn test_query_rejects_recurring_amount_overflow() {
         let env = Env::default();
+        let (client, _, _, _, _, token_id, _) = setup_test(&env, true);
         let (client, _, _, token_id, _, _, _) = setup_test(&env, true);
 
         env.as_contract(&client.address, || {
@@ -8773,6 +8790,7 @@ mod reconciliation_report_tests {
         });
 
         let result = client.try_query_reconciliation_report(&token_id, &0, &50);
+        assert_panic_contract_error(result, Error::CounterOverflow);
         assert_returned_or_panic_contract_error(result, Error::CounterOverflow);
     }
 

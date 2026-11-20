@@ -588,6 +588,32 @@ fn timeout_settlement_is_rejected_before_the_final_deadline() {
 }
 
 #[test]
+fn timeout_outcome_returns_typed_error_when_config_is_missing() {
+    let env = Env::default();
+    let escrow_id = env.register_contract(None, CraftNexusContract);
+    let escrow = CraftNexusContractClient::new(&env, &escrow_id);
+
+    assert_typed_error(
+        escrow.try_get_timeout_outcome(),
+        Error::PlatformNotInitialized,
+    );
+}
+
+#[test]
+fn timeout_outcome_is_still_readable_after_a_terminal_state() {
+    let h = Harness::new();
+    h.dispute(1);
+    h.warp_to(DEFAULT_MAX_DISPUTE_DURATION as u64);
+    h.escrow.resolve_expired_dispute(&1);
+    assert_eq!(h.escrow.get_escrow(&1).status, EscrowStatus::Resolved);
+
+    assert_eq!(
+        h.escrow.get_timeout_outcome(),
+        TimeoutOutcome::RefundBuyerFull
+    );
+}
+
+#[test]
 fn timeout_outcome_tracks_the_configured_fee_policy() {
     let h = Harness::new();
 

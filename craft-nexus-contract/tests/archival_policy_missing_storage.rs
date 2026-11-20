@@ -20,3 +20,16 @@ fn get_archival_policy_returns_defaults_when_storage_is_missing() {
         DEFAULT_ARCHIVAL_COMPACTION_BATCH
     );
 }
+
+
+#[test]
+fn get_dispute_final_deadline_missing_order_returns_error() {
+    let env = Env::default();
+    let contract_id = env.register(CraftNexusContract, ());   // use the contract name your other tests use
+    let client = CraftNexusContractClient::new(&env, &contract_id);
+
+    // This order was never created.
+    let result = client.try_get_dispute_final_deadline(&9999u32);
+
+    assert_eq!(result, Err(Ok(Error::EscrowNotFound)));       // same variant as Edit 2
+}

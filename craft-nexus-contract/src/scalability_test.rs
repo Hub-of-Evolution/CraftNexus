@@ -1229,3 +1229,41 @@ fn test_escrow_counters_stay_in_sync_at_scale() {
         100
     );
 }
+
+#[test]
+fn test_get_batch_escrow_progress_missing_key() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let client = EscrowContractClient::new(&env, &env.register_contract(None, CraftNexusContract));
+
+    // Calling before the record exists should return None and not trap
+    let progress = client.get_batch_escrow_progress(&9999);
+    assert!(progress.is_none());
+
+    let buyer = Address::generate(&env);
+    let seller = Address::generate(&env);
+    let params = soroban_sdk::vec![
+        &env,
+        EscrowCreateParams {
+            buyer: buyer.clone(),
+            seller: seller.clone(),
+            amount: 100,
+            engagement_id: soroban_sdk::String::from_str(&env, "e1"),
+            fee_address: Address::generate(&env),
+            fee_amount: 5,
+        }
+    ];
+
+    let job_id = client.schedule_batch_escrow(&buyer, &params);
+    
+    // Calling during a valid state
+    let valid_progress = client.get_batch_escrow_progress(&job_id);
+    assert!(valid_progress.is_some());
+    
+    // Terminal state (cancel the batch)
+    client.cancel_batch_escrow(&job_id, &buyer);
+    
+    // Calling after terminal state should still return some progress or handle it safely
+    let terminal_progress = client.get_batch_escrow_progress(&job_id);
+    assert_eq!(terminal_progress.unwrap().status, BatchJobStatus::Cancelled);
+}
