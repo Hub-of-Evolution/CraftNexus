@@ -45,6 +45,8 @@ mod emergency_ops_test;
 mod issue_1347_test;
 #[cfg(test)]
 mod platform_stats_missing_key_test;
+#[cfg(test)]
+mod escrow_count_missing_key_test;
 #[cfg(all(test, feature = "wasm-differential-tests"))]
 mod differential_test;
 #[cfg(test)]
