@@ -55,7 +55,7 @@ impl CraftNexusEscrow {
     pub fn release_next_cycle(env: Env, escrow_id: u64) {
         let mut escrow: RecurringEscrow = env.storage().persistent().get(&escrow_id).expect("Escrow not found");
 
-        // 🎯 FIX: Validate status immediately before calculating or transferring the next cycle
+        // Validate status immediately before calculating or transferring the next cycle
         if escrow.status == EscrowStatus::Cancelled {
             panic!("Rejected: Escrow has been cancelled");
         }
