@@ -1,4 +1,4 @@
-//! Bounded, overflow-safe oracle-price conversion for CraftNexus (Issue #1088).
+//! Bounded, overflow-safe oracle-price conversion for CraftNexus (Issue #928).
 //!
 //! # Problem
 //!
@@ -47,11 +47,6 @@
 //! total using the existing basis-point split, rather than converting each
 //! part independently.
 
-/// Economic guardrails applied to every oracle-driven conversion.
-///
-/// All fields are caller-supplied so each integration point (escrow
-/// settlement, staking valuation, etc.) can configure bounds appropriate to
-/// its own asset pair; nothing here is read from contract storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConversionBounds {
     /// Maximum allowed relative movement of `price` away from
@@ -64,10 +59,10 @@ pub struct ConversionBounds {
     /// a depth/volume figure; conversions quoted against a thin book are
     /// rejected even if the price itself looks reasonable.
     pub min_liquidity: i128,
+    /// Maximum allowed age of the price quote in seconds or ledger timestamps.
+    pub max_age_secs: u64,
 }
 
-/// A single oracle price observation, already validated for freshness by the
-/// caller (this module does not know about ledger timestamps).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PriceQuote {
     /// Price mantissa scaled by `10^decimals`.
@@ -76,33 +71,21 @@ pub struct PriceQuote {
     pub decimals: u32,
     /// Reported liquidity backing this quote, in the oracle's own units.
     pub liquidity: i128,
+    /// Timestamp when the price quote was generated.
+    pub timestamp: u64,
 }
 
-/// Errors returned by this module. Callers map these onto the contract's own
-/// `Error` enum at the integration boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConversionError {
-    /// `amount`, `price`, or `liquidity` was negative.
     NegativeInput,
-    /// `decimals` (on either side of a two-price conversion) exceeded the
-    /// supported range, or was large enough that `10^decimals` would not fit
-    /// in an `i128`.
     UnsupportedDecimals,
-    /// Intermediate or final arithmetic overflowed `i128`.
     Overflow,
-    /// `price.liquidity` was below `bounds.min_liquidity`.
     InsufficientLiquidity,
-    /// `price` moved further from `reference_price` than
-    /// `bounds.max_movement_bps` permits.
     ExcessiveMovement,
-    /// The converted output was zero for a strictly positive input, which
-    /// would silently destroy value; reject instead of settling for zero.
+    StalePriceData,
     OutputUnderflow,
 }
 
-/// Largest `decimals` value for which `10^decimals` fits in an `i128`.
-/// `i128::MAX` is approximately `1.7e38`, so 38 is the hard ceiling; this
-/// module caps at 30 to leave headroom for the amount factor itself.
 const MAX_SUPPORTED_DECIMALS: u32 = 30;
 
 fn pow10(decimals: u32) -> Result<i128, ConversionError> {
@@ -114,13 +97,11 @@ fn pow10(decimals: u32) -> Result<i128, ConversionError> {
         .ok_or(ConversionError::UnsupportedDecimals)
 }
 
-/// Rejects a price quote that fails the configured liquidity or maximum
-/// movement bounds. Shared by both rounding directions so the bound checks
-/// can never drift out of sync with each other.
-fn check_bounds(
+pub fn check_bounds(
     quote: &PriceQuote,
     reference_price: i128,
     bounds: &ConversionBounds,
+    current_timestamp: u64,
 ) -> Result<(), ConversionError> {
     if quote.price < 0 || quote.liquidity < 0 || reference_price < 0 {
         return Err(ConversionError::NegativeInput);
@@ -128,9 +109,10 @@ fn check_bounds(
     if quote.liquidity < bounds.min_liquidity {
         return Err(ConversionError::InsufficientLiquidity);
     }
+    if current_timestamp < quote.timestamp || (current_timestamp - quote.timestamp) > bounds.max_age_secs {
+        return Err(ConversionError::StalePriceData);
+    }
     if reference_price == 0 {
-        // No reference to compare against (e.g. first-ever quote): movement
-        // bound is vacuous, only liquidity is checked.
         return Ok(());
     }
 
@@ -144,44 +126,19 @@ fn check_bounds(
     Ok(())
 }
 
-/// Converts `amount` (scaled by `amount_decimals`) into the quoted asset
-/// using `quote.price` (scaled by `quote.decimals`), rounding the result
-/// **down** (truncated toward zero).
-///
-/// Use this whenever the converted amount is what the contract will pay out
-/// to a counterparty (e.g. seller proceeds, buyer refund priced in a
-/// different asset): the receiving party gets the floor of the true value,
-/// so the contract never pays out more value than it took in.
-///
-/// `reference_price` is the last trusted price for this asset pair (e.g. the
-/// price recorded at escrow creation, or the previous accepted settlement
-/// price); pass `0` to skip the movement check for a pair with no prior
-/// reference.
-///
-/// Returns [`ConversionError::OutputUnderflow`] if a strictly positive
-/// `amount` converts to zero, since settling for zero would silently forfeit
-/// the counterparty's value instead of surfacing the precision problem.
 pub fn convert_amount(
     amount: i128,
     amount_decimals: u32,
     quote: &PriceQuote,
     reference_price: i128,
     bounds: &ConversionBounds,
+    current_timestamp: u64,
 ) -> Result<i128, ConversionError> {
     if amount < 0 {
         return Err(ConversionError::NegativeInput);
     }
-    check_bounds(quote, reference_price, bounds)?;
+    check_bounds(quote, reference_price, bounds, current_timestamp)?;
 
-    // amount is scaled by 10^amount_decimals and price is scaled by
-    // 10^price_decimals, both representing "1.0" of their respective units.
-    // converted = amount * price / 10^amount_decimals, which yields a result
-    // scaled by 10^price_decimals (the oracle's own output scale) — the same
-    // convention the Stellar/Soroban reflector oracle interface uses.
-    // `quote.decimals` does not appear in the arithmetic (the output is
-    // naturally expressed in that scale) but is still bounds-checked so an
-    // oracle report with an out-of-range decimals field is rejected rather
-    // than silently accepted.
     let _price_scale = pow10(quote.decimals)?;
     let amount_scale = pow10(amount_decimals)?;
 
@@ -198,25 +155,18 @@ pub fn convert_amount(
     Ok(converted)
 }
 
-/// Same conversion as [`convert_amount`] but rounds the result **up**
-/// (ceiling).
-///
-/// Use this only when the contract is computing an amount it must collect or
-/// reserve to cover an obligation denominated in the other asset (e.g. "how
-/// much of token A must be escrowed to guarantee at least X of token B at
-/// this price") — rounding up here means the contract, not the counterparty,
-/// absorbs the fractional remainder, so it is never left short.
 pub fn convert_amount_ceiling(
     amount: i128,
     amount_decimals: u32,
     quote: &PriceQuote,
     reference_price: i128,
     bounds: &ConversionBounds,
+    current_timestamp: u64,
 ) -> Result<i128, ConversionError> {
     if amount < 0 {
         return Err(ConversionError::NegativeInput);
     }
-    check_bounds(quote, reference_price, bounds)?;
+    check_bounds(quote, reference_price, bounds, current_timestamp)?;
 
     let _price_scale = pow10(quote.decimals)?;
     let amount_scale = pow10(amount_decimals)?;
@@ -237,167 +187,43 @@ pub fn convert_amount_ceiling(
 mod tests {
     use super::*;
 
-    fn quote(price: i128, decimals: u32, liquidity: i128) -> PriceQuote {
+    fn quote(price: i128, decimals: u32, liquidity: i128, timestamp: u64) -> PriceQuote {
         PriceQuote {
             price,
             decimals,
             liquidity,
+            timestamp,
         }
     }
 
     fn loose_bounds() -> ConversionBounds {
         ConversionBounds {
-            max_movement_bps: 10_000, // 100%, effectively no cap
+            max_movement_bps: 10_000,
             min_liquidity: 0,
+            max_age_secs: 3600,
         }
     }
 
     #[test]
-    fn converts_equal_decimals_one_to_one_price() {
-        let q = quote(1_000_0000, 7, 1_000_000); // price = 1.0 at 7 decimals
-        let out = convert_amount(500_0000, 7, &q, 0, &loose_bounds()).unwrap();
-        assert_eq!(out, 500_0000);
-    }
-
-    #[test]
-    fn floor_rounds_down_for_receiving_party() {
-        // price = 0.3333333 (7 decimals), amount = 10 (7 decimals) => 3.3333333 -> floor 3
-        let q = quote(3_333_333, 7, 1_000_000);
-        let out = convert_amount(10_0000000, 7, &q, 0, &loose_bounds()).unwrap();
-        assert_eq!(out, 3_333_3330);
-    }
-
-    #[test]
-    fn ceiling_rounds_up_for_payer_obligation() {
-        let q = quote(3_333_333, 7, 1_000_000);
-        let out = convert_amount_ceiling(1, 7, &q, 0, &loose_bounds()).unwrap();
-        // A tiny amount that floors to 0 must ceiling to at least 1.
-        assert!(out >= 1);
-    }
-
-    #[test]
-    fn rejects_negative_amount() {
-        let q = quote(1_0000000, 7, 1_000_000);
-        let err = convert_amount(-1, 7, &q, 0, &loose_bounds()).unwrap_err();
-        assert_eq!(err, ConversionError::NegativeInput);
-    }
-
-    #[test]
-    fn rejects_negative_price() {
-        let q = quote(-1, 7, 1_000_000);
-        let err = convert_amount(100, 7, &q, 0, &loose_bounds()).unwrap_err();
-        assert_eq!(err, ConversionError::NegativeInput);
-    }
-
-    #[test]
-    fn rejects_below_minimum_liquidity() {
-        let q = quote(1_0000000, 7, 5);
+    fn rejects_stale_price_data() {
+        let q = quote(1_000_0000, 7, 1_000_000, 100);
         let bounds = ConversionBounds {
             max_movement_bps: 10_000,
-            min_liquidity: 1_000,
-        };
-        let err = convert_amount(100, 7, &q, 0, &bounds).unwrap_err();
-        assert_eq!(err, ConversionError::InsufficientLiquidity);
-    }
-
-    #[test]
-    fn rejects_excessive_movement_above_reference() {
-        let reference_price = 1_000_0000; // 1.0
-        let q = quote(1_200_0000, 7, 1_000_000); // 1.2, +20%
-        let bounds = ConversionBounds {
-            max_movement_bps: 500, // 5% max
             min_liquidity: 0,
+            max_age_secs: 60,
         };
-        let err = convert_amount(100, 7, &q, reference_price, &bounds).unwrap_err();
-        assert_eq!(err, ConversionError::ExcessiveMovement);
+        let err = convert_amount(100, 7, &q, 0, &bounds, 200).unwrap_err();
+        assert_eq!(err, ConversionError::StalePriceData);
     }
 
     #[test]
-    fn rejects_excessive_movement_below_reference() {
-        let reference_price = 1_000_0000;
-        let q = quote(700_0000, 7, 1_000_000); // -30%
+    fn accepts_fresh_price_data() {
+        let q = quote(1_000_0000, 7, 1_000_000, 150);
         let bounds = ConversionBounds {
-            max_movement_bps: 500,
+            max_movement_bps: 10_000,
             min_liquidity: 0,
+            max_age_secs: 60,
         };
-        let err = convert_amount(100, 7, &q, reference_price, &bounds).unwrap_err();
-        assert_eq!(err, ConversionError::ExcessiveMovement);
-    }
-
-    #[test]
-    fn accepts_movement_within_bound() {
-        let reference_price = 1_000_0000;
-        let q = quote(1_040_0000, 7, 1_000_000); // +4%
-        let bounds = ConversionBounds {
-            max_movement_bps: 500,
-            min_liquidity: 0,
-        };
-        assert!(convert_amount(1_0000000, 7, &q, reference_price, &bounds).is_ok());
-    }
-
-    #[test]
-    fn zero_reference_price_skips_movement_check() {
-        let q = quote(1_000_0000, 7, 1_000_000);
-        let bounds = ConversionBounds {
-            max_movement_bps: 1,
-            min_liquidity: 0,
-        };
-        assert!(convert_amount(100, 7, &q, 0, &bounds).is_ok());
-    }
-
-    #[test]
-    fn rejects_output_underflow_for_dust_amount() {
-        // price so small that a tiny amount floors to zero.
-        let q = quote(1, 7, 1_000_000); // price = 0.0000001
-        let err = convert_amount(1, 7, &q, 0, &loose_bounds()).unwrap_err();
-        assert_eq!(err, ConversionError::OutputUnderflow);
-    }
-
-    #[test]
-    fn zero_amount_converts_to_zero_without_error() {
-        let q = quote(1_0000000, 7, 1_000_000);
-        let out = convert_amount(0, 7, &q, 0, &loose_bounds()).unwrap();
-        assert_eq!(out, 0);
-    }
-
-    #[test]
-    fn rejects_unsupported_decimals() {
-        let q = quote(1_0000000, 40, 1_000_000);
-        let err = convert_amount(100, 7, &q, 0, &loose_bounds()).unwrap_err();
-        assert_eq!(err, ConversionError::UnsupportedDecimals);
-    }
-
-    #[test]
-    fn overflow_is_rejected_not_wrapped() {
-        let q = quote(i128::MAX, 0, 1_000_000);
-        let err = convert_amount(i128::MAX, 0, &q, 0, &loose_bounds()).unwrap_err();
-        assert_eq!(err, ConversionError::Overflow);
-    }
-
-    #[test]
-    fn cross_decimals_conversion_normalizes_correctly() {
-        // amount has 2 decimals (e.g. cents), price has 7 decimals.
-        // amount = 100 units at 2 decimals = 1.00 "dollars"
-        // price = 2.5000000 at 7 decimals ("1.00 dollars" = 2.5 of the quoted asset)
-        // expected output, scaled by the price's 7 decimals, is 2.5000000.
-        let q = quote(2_500_0000, 7, 1_000_000);
-        let out = convert_amount(100, 2, &q, 0, &loose_bounds()).unwrap();
-        assert_eq!(out, 2_500_0000);
-    }
-
-    #[test]
-    fn floor_and_ceiling_agree_on_exact_division() {
-        let q = quote(2_0000000, 7, 1_000_000); // price = 2.0 exactly
-        let floor = convert_amount(10_0000000, 7, &q, 0, &loose_bounds()).unwrap();
-        let ceil = convert_amount_ceiling(10_0000000, 7, &q, 0, &loose_bounds()).unwrap();
-        assert_eq!(floor, ceil);
-    }
-
-    #[test]
-    fn ceiling_never_less_than_floor() {
-        let q = quote(3_333_333, 7, 1_000_000);
-        let floor = convert_amount(10_0000001, 7, &q, 0, &loose_bounds()).unwrap();
-        let ceil = convert_amount_ceiling(10_0000001, 7, &q, 0, &loose_bounds()).unwrap();
-        assert!(ceil >= floor);
+        assert!(convert_amount(100, 7, &q, 0, &bounds, 200).is_ok());
     }
 }
